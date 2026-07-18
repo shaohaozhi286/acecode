@@ -18,12 +18,27 @@ struct Heartbeat {
     std::int64_t timestamp_ms = 0; // unix epoch ms,UTC
 };
 
+struct DesktopManagedRuntime {
+    std::int64_t pid = 0;
+    std::string guid;
+    std::string kind;
+    int protocol_version = 0;
+    std::string acecode_version;
+};
+
+struct DesktopOwnerRecord {
+    std::int64_t pid = 0;
+    std::string instance_id;
+    std::int64_t timestamp_ms = 0;
+};
+
 struct RuntimeSnapshot {
     std::optional<std::int64_t> pid;
     std::optional<int> port;
     std::optional<std::string> guid;
     std::optional<Heartbeat> heartbeat;
     std::optional<std::string> token;
+    std::optional<DesktopManagedRuntime> desktop_managed;
 };
 
 struct RuntimeValidationOptions {
@@ -59,6 +74,21 @@ std::optional<Heartbeat> read_heartbeat();
 bool write_token(const std::string& token);
 std::optional<std::string> read_token();
 
+// Desktop-only runtime identity. The manifest is written last after the normal
+// pid/port/token bundle so its presence means the generation is fully
+// initialized. Explicit run_dir overloads are used by the native Desktop
+// process before it has applied a daemon-side run-dir override.
+bool write_desktop_managed_runtime(
+    const DesktopManagedRuntime& runtime,
+    const std::string& run_dir = std::string());
+std::optional<DesktopManagedRuntime> read_desktop_managed_runtime(
+    const std::string& run_dir = std::string());
+
+bool write_desktop_owner_record(const std::string& run_dir,
+                                const DesktopOwnerRecord& owner);
+std::optional<DesktopOwnerRecord> read_desktop_owner_record(
+    const std::string& run_dir = std::string());
+
 RuntimeSnapshot read_runtime_snapshot(const std::string& run_dir = std::string());
 RuntimeReuseCheck validate_runtime_snapshot_for_reuse(
     const RuntimeSnapshot& snapshot,
@@ -71,9 +101,24 @@ RuntimeReuseCheck validate_runtime_files_for_reuse(
 // still served by a live daemon.
 bool probe_loopback_port(int port);
 
+// Best-effort executable identity check used before Desktop signals a PID.
+// Unknown/unreadable identities return false; destructive callers must fail
+// closed instead of trusting pid files alone.
+bool process_is_acecode_daemon(std::int64_t pid);
+
 // daemon stop / 优雅退出时调用: 删 pid/port/heartbeat/token,保留 guid
 // (guid 可用于事后追溯)。删除失败不视为错误。
 void cleanup_runtime_files();
+
+// Remove one daemon runtime generation only when the current on-disk pid and
+// guid still match. The Desktop owner record belongs to the Desktop instance,
+// not the daemon generation, and is intentionally preserved. Managed callers
+// set remove_guid=true so a replacement can use a fresh generation id. Returns
+// false on an ownership mismatch.
+bool cleanup_runtime_files_if_owned(std::int64_t expected_pid,
+                                    const std::string& expected_guid,
+                                    const std::string& run_dir = std::string(),
+                                    bool remove_guid = false);
 
 // helper: 拿当前时间的 unix epoch 毫秒
 inline std::int64_t now_unix_ms() {

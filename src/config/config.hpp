@@ -366,9 +366,11 @@ struct DesktopNotificationsConfig {
 
 struct DesktopConfig {
     DesktopNotificationsConfig notifications;
-    // 关窗(× / Alt+F4 / aceDesktop_closeWindow)默认隐藏到托盘。
-    // false 时回到旧行为(关窗即退出)。见 openspec/changes/enhance-desktop-tray-menu。
+    // Windows 关窗(× / Alt+F4 / aceDesktop_closeWindow)默认隐藏到托盘。
+    // false 时回到关窗即退出。macOS 始终将关窗与真正退出分开。
     bool close_to_tray = true;
+    // Desktop 真正退出后是否保留其管理的后台进程。默认关闭;关窗口不属于退出。
+    bool continue_background_process = false;
 };
 
 // Web 控制台(ConsoleDock)配置。见 openspec/changes/add-console-dock。

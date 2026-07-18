@@ -35,6 +35,8 @@ inline constexpr const char* RUN_FILE_PORT      = "daemon.port";
 inline constexpr const char* RUN_FILE_GUID      = "daemon.guid";
 inline constexpr const char* RUN_FILE_HEARTBEAT = "heartbeat";
 inline constexpr const char* RUN_FILE_TOKEN     = "token";
+inline constexpr const char* RUN_FILE_DESKTOP_MANAGED = "desktop-managed.json";
+inline constexpr const char* RUN_FILE_DESKTOP_OWNER   = "desktop-owner.json";
 
 } // namespace constants
 } // namespace acecode

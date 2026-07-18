@@ -398,3 +398,57 @@ TEST(AskUserQuestionPrompter, SnapshotReturnsPendingRequestUntilResolved) {
     EXPECT_TRUE(prompter.snapshot_pending_requests().empty());
     d.unsubscribe(sub);
 }
+
+TEST(AskUserQuestionPrompter, SnapshotReplaysPendingShapeAndFirstAnswerWins) {
+    EventDispatcher d;
+    AskUserQuestionPrompter prompter(d);
+    ResponderState state;
+    auto sub = d.subscribe([&](const SessionEvent& event) {
+        if (event.kind != SessionEventKind::QuestionRequest) return;
+        {
+            std::lock_guard<std::mutex> lock(state.mu);
+            state.request_id =
+                event.payload.value("request_id", std::string{});
+            state.got = true;
+        }
+        state.cv.notify_all();
+    });
+
+    const auto questions = sample_questions();
+    auto future = std::async(std::launch::async, [&] {
+        return prompter.prompt(questions, nullptr);
+    });
+
+    std::string request_id;
+    {
+        std::unique_lock<std::mutex> lock(state.mu);
+        ASSERT_TRUE(state.cv.wait_for(lock, 500ms, [&] { return state.got; }));
+        request_id = state.request_id;
+    }
+
+    const auto pending = prompter.snapshot_pending_requests();
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].value("request_id", std::string{}), request_id);
+    ASSERT_TRUE(pending[0].contains("questions"));
+    EXPECT_EQ(pending[0]["questions"], questions);
+
+    AskUserQuestionResponse first;
+    AskUserQuestionAnswer answer;
+    answer.question_id = "Pick a color?";
+    answer.selected = {"Red"};
+    first.answers.push_back(answer);
+    prompter.notify_response(request_id, first);
+
+    AskUserQuestionResponse late;
+    late.cancelled = true;
+    prompter.notify_response(request_id, late);
+
+    ASSERT_EQ(future.wait_for(500ms), std::future_status::ready);
+    const auto response = future.get();
+    EXPECT_FALSE(response.cancelled);
+    ASSERT_EQ(response.answers.size(), 1u);
+    EXPECT_EQ(response.answers[0].selected,
+              std::vector<std::string>({"Red"}));
+    EXPECT_TRUE(prompter.snapshot_pending_requests().empty());
+    d.unsubscribe(sub);
+}

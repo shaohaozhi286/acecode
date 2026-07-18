@@ -59,6 +59,10 @@ std::function<void(std::vector<std::string>)> g_file_drop_handler;
 #ifdef __APPLE__
 std::function<void(bool)> g_mac_window_state_handler;
 bool g_mac_last_known_maximized = false;
+NSWindow* g_mac_reopen_window = nil;
+webview::webview* g_mac_quit_webview = nullptr;
+using MacApplicationReopenImp = BOOL (*)(id, SEL, NSApplication*, BOOL);
+MacApplicationReopenImp g_mac_original_reopen_imp = nullptr;
 NSString* const kAceCodeFocusExistingNotification =
     @"dev.acecode.desktop.focusExisting.v1";
 
@@ -144,7 +148,68 @@ void show_mac_window(NSWindow* window) {
 void hide_mac_window_to_tray(NSWindow* window) {
     if (!window) return;
     [window orderOut:nil];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    // Keep the regular activation policy so the Dock icon remains available as
+    // a restore affordance. Window close is not application quit.
+}
+
+BOOL acecode_application_should_handle_reopen(
+    id self,
+    SEL command,
+    NSApplication* application,
+    BOOL has_visible_windows) {
+    if (g_mac_reopen_window &&
+        (![g_mac_reopen_window isVisible] ||
+         [g_mac_reopen_window isMiniaturized])) {
+        show_mac_window(g_mac_reopen_window);
+    }
+    if (g_mac_original_reopen_imp) {
+        return g_mac_original_reopen_imp(
+            self, command, application, has_visible_windows);
+    }
+    return YES;
+}
+
+void install_mac_application_reopen_handler(NSWindow* window) {
+    if (!window) return;
+    g_mac_reopen_window = window;
+    id delegate = [NSApp delegate];
+    if (!delegate) return;
+    Class cls = object_getClass(delegate);
+    if (!cls) return;
+    const SEL selector =
+        @selector(applicationShouldHandleReopen:hasVisibleWindows:);
+    if (class_addMethod(
+            cls,
+            selector,
+            reinterpret_cast<IMP>(
+                acecode_application_should_handle_reopen),
+            "c@:@c")) {
+        return;
+    }
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method) return;
+    IMP current = method_getImplementation(method);
+    if (current == reinterpret_cast<IMP>(
+            acecode_application_should_handle_reopen)) {
+        return;
+    }
+    g_mac_original_reopen_imp =
+        reinterpret_cast<MacApplicationReopenImp>(current);
+    method_setImplementation(
+        method,
+        reinterpret_cast<IMP>(
+            acecode_application_should_handle_reopen));
+}
+
+void acecode_mac_request_quit(
+    id /*application*/,
+    SEL /*command*/,
+    id sender) {
+    if (g_mac_quit_webview) {
+        g_mac_quit_webview->terminate();
+        return;
+    }
+    [NSApp terminate:sender];
 }
 
 id install_mac_focus_existing_observer(webview::webview& w) {
@@ -308,15 +373,25 @@ void install_mac_close_handler(webview::webview& w) {
 // macOS WKWebView 不自动转发 Cmd+C/V/X/A 等标准快捷键。
 // 设置包含 Edit 菜单的 NSMenu 后,系统会通过 responder chain
 // 将这些 keyEquivalent 路由到 WKWebView,从而使快捷键生效。
-void install_mac_edit_menu() {
+void install_mac_edit_menu(webview::webview& w) {
+    g_mac_quit_webview = &w;
+    const SEL quit_selector = NSSelectorFromString(@"acecodeRequestQuit:");
+    class_addMethod(
+        [NSApplication class],
+        quit_selector,
+        reinterpret_cast<IMP>(acecode_mac_request_quit),
+        "v@:@");
+
     NSMenu* main_menu = [[NSMenu alloc] init];
 
     // Application menu (macOS 要求第一个菜单项为应用菜单)
     NSMenuItem* app_menu_item = [[NSMenuItem alloc] init];
     NSMenu* app_menu = [[NSMenu alloc] init];
-    [app_menu addItemWithTitle:@"Quit ACECode"
-                        action:@selector(terminate:)
-                 keyEquivalent:@"q"];
+    NSMenuItem* quit_item =
+        [app_menu addItemWithTitle:@"Quit ACECode"
+                            action:quit_selector
+                     keyEquivalent:@"q"];
+    [quit_item setTarget:NSApp];
     [app_menu_item setSubmenu:app_menu];
     [main_menu addItem:app_menu_item];
 
@@ -1571,9 +1646,10 @@ struct WebHost::Impl {
 #if defined(__APPLE__)
         w = std::make_unique<webview::webview>(debug, nullptr);
         configure_mac_window_chrome(*w);
-        install_mac_edit_menu();
+        install_mac_edit_menu(*w);
         mac_focus_observer = install_mac_focus_existing_observer(*w);
         install_mac_close_handler(*w);
+        install_mac_application_reopen_handler(mac_window_from_host(*w));
 #else
         w = std::make_unique<webview::webview>(debug, nullptr);
         configure_linux_window_chrome(*w);
@@ -1590,6 +1666,12 @@ struct WebHost::Impl {
         // Destroy webview first; for m_owns_window=false it removes only the child widget.
         // The parent HWND remains ours and is destroyed below.
 #ifdef __APPLE__
+        if (g_mac_quit_webview == w.get()) {
+            g_mac_quit_webview = nullptr;
+        }
+        if (g_mac_reopen_window == mac_window_from_host(*w)) {
+            g_mac_reopen_window = nil;
+        }
         if (mac_focus_observer) {
             [[NSDistributedNotificationCenter defaultCenter] removeObserver:mac_focus_observer];
             mac_focus_observer = nil;

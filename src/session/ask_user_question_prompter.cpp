@@ -83,6 +83,7 @@ void AskUserQuestionPrompter::notify_response(const std::string& request_id,
     }
     {
         std::lock_guard<std::mutex> lk(p->mu);
+        if (p->responded) return;
         p->response = response;
         p->responded = true;
     }
@@ -96,16 +97,27 @@ std::size_t AskUserQuestionPrompter::pending_count() const {
 
 std::vector<nlohmann::json>
 AskUserQuestionPrompter::snapshot_pending_requests() const {
-    std::vector<nlohmann::json> requests;
-    std::lock_guard<std::mutex> lk(pending_mu_);
-    requests.reserve(pending_.size());
-    for (const auto& [request_id, pending] : pending_) {
-        if (!pending) continue;
-        auto payload = pending->request_payload;
-        if (!payload.contains("request_id")) payload["request_id"] = request_id;
-        requests.push_back(std::move(payload));
+    std::vector<std::pair<std::string, std::shared_ptr<Pending>>> snapshot;
+    {
+        std::lock_guard<std::mutex> lk(pending_mu_);
+        snapshot.reserve(pending_.size());
+        for (const auto& [request_id, pending] : pending_) {
+            if (pending) snapshot.emplace_back(request_id, pending);
+        }
     }
-    return requests;
+
+    std::vector<nlohmann::json> out;
+    out.reserve(snapshot.size());
+    for (const auto& [request_id, pending] : snapshot) {
+        std::lock_guard<std::mutex> lk(pending->mu);
+        if (pending->responded) continue;
+        auto payload = pending->request_payload;
+        if (!payload.contains("request_id")) {
+            payload["request_id"] = request_id;
+        }
+        out.push_back(std::move(payload));
+    }
+    return out;
 }
 
 } // namespace acecode

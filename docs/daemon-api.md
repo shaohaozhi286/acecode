@@ -28,9 +28,28 @@ After the daemon starts, runtime files are written to `<data_dir>/run/`:
 | `daemon.guid` | UUID v4 |
 | `heartbeat` | JSON `{pid, guid, timestamp_ms}` refreshed periodically |
 | `token` | URL-safe daemon token |
+| `desktop-managed.json` | Desktop-managed identity `{pid, guid, kind, protocol_version, acecode_version}` |
+| `desktop-owner.json` | current Desktop owner `{pid, instance_id, timestamp_ms}` |
 
 `<data_dir>` is `~/.acecode/` for standalone daemons and the platform service
 data directory for installed services.
+
+The native Desktop uses the reserved
+`<data_dir>/run/desktop-shared/` directory. It verifies the process executable,
+PID, GUID, heartbeat, port, health response, and Desktop protocol before
+attaching to an existing process. A compatible process is reused; a verified
+incompatible Desktop-managed generation is stopped and replaced. Standalone
+CLI daemons use their normal runtime directory and are not reclaimed by this
+Desktop lifecycle. Daemon-generation cleanup preserves `desktop-owner.json`;
+the next Desktop instance overwrites that owner record before discovery, which
+prevents a late old daemon teardown from erasing a rapid-relaunch handoff.
+
+Closing the macOS Desktop window only hides it. Dock or menu-bar activation
+shows the same window again. A real application quit either stops the managed
+background process or releases it according to the global Desktop preference
+“退出 ACECode 后继续运行后台进程”. The preference defaults to off, and changing
+it affects the next application quit rather than immediately stopping the
+current process.
 
 ### Bind and auth
 
@@ -300,6 +319,8 @@ capabilities.
   "version": "0.5.10",
   "cwd": "C:/repo",
   "uptime_seconds": 423,
+  "desktop_managed": true,
+  "desktop_protocol_version": 1,
   "notifications": {
     "enabled": true,
     "on_question": true,
@@ -315,6 +336,11 @@ capabilities.
   }
 }
 ```
+
+`desktop_managed` is `true` only for the daemon generation started for the
+native Desktop. `desktop_protocol_version` is the attach/reuse compatibility
+contract; Desktop verifies it together with the runtime identity before
+reusing a process.
 
 `console.backend` is `conpty`, `winpty`, `pipe`, or `posix`.
 

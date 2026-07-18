@@ -70,7 +70,8 @@ private:
 class AsyncPrompter : public PermissionPrompter {
 public:
     explicit AsyncPrompter(EventDispatcher& events,
-                            std::chrono::milliseconds timeout = std::chrono::minutes(5))
+                            std::chrono::milliseconds timeout =
+                                std::chrono::milliseconds{0})
         : events_(events), timeout_(timeout) {}
 
     PermissionResult prompt(const std::string& tool_name,
@@ -98,6 +99,8 @@ private:
     static std::string make_request_id();
 
     EventDispatcher&         events_;
+    // zero = no passive timeout; explicit non-zero callers retain timeout
+    // behavior for policies/tests.
     std::chrono::milliseconds timeout_;
 
     struct Pending {

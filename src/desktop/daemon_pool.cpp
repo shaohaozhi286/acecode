@@ -1,8 +1,17 @@
 #include "daemon_pool.hpp"
 
+#include "../daemon/guid.hpp"
+#include "../daemon/platform.hpp"
 #include "../daemon/runtime_files.hpp"
+#include "daemon_protocol.hpp"
 #include "../utils/constants.hpp"
 #include "../utils/logger.hpp"
+
+#include <cpr/cpr.h>
+#include <nlohmann/json.hpp>
+
+#include <filesystem>
+#include <thread>
 
 namespace acecode::desktop {
 
@@ -17,6 +26,201 @@ std::chrono::milliseconds slow_startup_extra_wait(std::chrono::milliseconds init
 
 std::string ms_count(std::chrono::milliseconds value) {
     return std::to_string(value.count());
+}
+
+bool has_runtime_bundle(const acecode::daemon::RuntimeSnapshot& snapshot) {
+    return snapshot.pid.has_value() || snapshot.port.has_value() ||
+           snapshot.guid.has_value() || snapshot.heartbeat.has_value() ||
+           snapshot.token.has_value() || snapshot.desktop_managed.has_value();
+}
+
+bool has_complete_runtime_bundle(
+    const acecode::daemon::RuntimeSnapshot& snapshot) {
+    return snapshot.pid.has_value() && snapshot.port.has_value() &&
+           snapshot.guid.has_value() && snapshot.heartbeat.has_value() &&
+           snapshot.token.has_value();
+}
+
+acecode::daemon::RuntimeSnapshot read_settled_runtime_snapshot(
+    const std::string& run_dir) {
+    auto snapshot = acecode::daemon::read_runtime_snapshot(run_dir);
+    if (!has_runtime_bundle(snapshot) || has_complete_runtime_bundle(snapshot)) {
+        return snapshot;
+    }
+
+    // A surviving daemon can still be between its atomic guid/pid/port/token/
+    // manifest/heartbeat writes when Desktop relaunches immediately. Wait for
+    // that short publication window before classifying or cleaning anything.
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        snapshot = acecode::daemon::read_runtime_snapshot(run_dir);
+        if (!has_runtime_bundle(snapshot) ||
+            has_complete_runtime_bundle(snapshot)) {
+            break;
+        }
+    }
+    return snapshot;
+}
+
+ExistingDaemonProbeResult inspect_existing_daemon(
+    const ActivateRequest& req) {
+    ExistingDaemonProbeResult result;
+    if (!req.desktop_managed || req.run_dir.empty()) return result;
+
+    const auto snapshot = read_settled_runtime_snapshot(req.run_dir);
+    if (!has_runtime_bundle(snapshot)) {
+        return result;
+    }
+
+    if (!snapshot.pid.has_value()) {
+        const bool heartbeat_process_alive =
+            snapshot.heartbeat.has_value() &&
+            acecode::daemon::is_pid_alive(snapshot.heartbeat->pid);
+        const bool manifest_process_alive =
+            snapshot.desktop_managed.has_value() &&
+            acecode::daemon::is_pid_alive(snapshot.desktop_managed->pid);
+        const bool recorded_port_reachable =
+            snapshot.port.has_value() &&
+            acecode::daemon::probe_loopback_port(*snapshot.port);
+        if (heartbeat_process_alive || manifest_process_alive ||
+            recorded_port_reachable) {
+            result.action = ExistingDaemonAction::Unsafe;
+            result.reason =
+                "incomplete runtime bundle still references a live process";
+            return result;
+        }
+        if (snapshot.guid.has_value()) {
+            acecode::daemon::cleanup_runtime_files_if_owned(
+                0, *snapshot.guid, req.run_dir, true);
+        }
+        result.reason = "removed an incomplete stopped runtime generation";
+        return result;
+    }
+
+    if (!snapshot.guid.has_value()) {
+        if (acecode::daemon::is_pid_alive(*snapshot.pid)) {
+            result.action = ExistingDaemonAction::Unsafe;
+            result.reason =
+                "live runtime process is missing its generation GUID";
+        } else {
+            result.reason = "ignored an incomplete stopped runtime generation";
+        }
+        return result;
+    }
+
+    const bool has_generation =
+        snapshot.pid.has_value() && snapshot.guid.has_value();
+    const bool manifest_matches =
+        has_generation && snapshot.desktop_managed.has_value() &&
+        snapshot.desktop_managed->pid == *snapshot.pid &&
+        snapshot.desktop_managed->guid == *snapshot.guid &&
+        snapshot.desktop_managed->kind == kDesktopManagedRuntimeKind;
+
+    acecode::daemon::RuntimeValidationOptions options;
+    options.heartbeat_timeout_ms =
+        acecode::constants::DEFAULT_HEARTBEAT_TIMEOUT_MS;
+    options.require_process_identity = true;
+    const auto reuse =
+        acecode::daemon::validate_runtime_snapshot_for_reuse(snapshot, options);
+
+    if (!reuse.reusable) {
+        if (has_generation && !acecode::daemon::is_pid_alive(*snapshot.pid)) {
+            acecode::daemon::cleanup_runtime_files_if_owned(
+                *snapshot.pid, *snapshot.guid, req.run_dir, true);
+            result.reason = reuse.reason;
+            return result;
+        }
+        if (manifest_matches &&
+            acecode::daemon::process_is_acecode_daemon(*snapshot.pid)) {
+            result.action = ExistingDaemonAction::Replace;
+            result.pid = *snapshot.pid;
+            result.guid = *snapshot.guid;
+            result.reason = "verified Desktop-managed daemon is unhealthy: " +
+                            reuse.reason;
+            return result;
+        }
+        result.action = ExistingDaemonAction::Unsafe;
+        result.reason =
+            "existing runtime process is not safe to replace: " + reuse.reason;
+        return result;
+    }
+
+    result.pid = *snapshot.pid;
+    result.port = *snapshot.port;
+    result.token = snapshot.token.value_or(std::string{});
+    result.guid = snapshot.guid.value_or(std::string{});
+
+    nlohmann::json health;
+    try {
+        const auto response = cpr::Get(
+            cpr::Url{"http://127.0.0.1:" + std::to_string(result.port) +
+                     "/api/health"},
+            cpr::Header{{"X-ACECode-Token", result.token}},
+            cpr::Proxies{{"http", ""}, {"https", ""}},
+            cpr::Timeout{1200});
+        if (response.status_code != 200) {
+            result.action = manifest_matches
+                ? ExistingDaemonAction::Replace
+                : ExistingDaemonAction::Unsafe;
+            result.reason = manifest_matches
+                ? "verified Desktop-managed daemon health failed"
+                : "existing daemon health is unavailable";
+            return result;
+        }
+        health = nlohmann::json::parse(response.text);
+    } catch (const std::exception& e) {
+        result.action = manifest_matches
+            ? ExistingDaemonAction::Replace
+            : ExistingDaemonAction::Unsafe;
+        result.reason = manifest_matches
+            ? std::string("verified Desktop-managed daemon health parse failed: ") +
+                  e.what()
+            : "existing daemon identity could not be verified";
+        return result;
+    }
+
+    const bool health_identity_matches =
+        health.value("pid", static_cast<std::int64_t>(0)) == result.pid &&
+        health.value("guid", std::string{}) == result.guid &&
+        health.value("port", 0) == result.port;
+    if (!health_identity_matches) {
+        result.action = ExistingDaemonAction::Unsafe;
+        result.reason = "runtime and live health identity disagree";
+        return result;
+    }
+
+    const bool health_managed = health.value("desktop_managed", false);
+    const int protocol = health.value("desktop_protocol_version", 0);
+    if (manifest_matches && health_managed) {
+        if (snapshot.desktop_managed->protocol_version != protocol) {
+            result.action = ExistingDaemonAction::Unsafe;
+            result.reason =
+                "runtime manifest and live health protocol disagree";
+            return result;
+        }
+        result.action = protocol == kDesktopDaemonProtocolVersion
+            ? ExistingDaemonAction::Reuse
+            : ExistingDaemonAction::Replace;
+        result.reason = result.action == ExistingDaemonAction::Reuse
+            ? "healthy compatible Desktop-managed daemon"
+            : "Desktop daemon protocol is incompatible";
+        return result;
+    }
+
+    // One-release migration for the pre-manifest Desktop daemon.
+    const bool legacy_reserved_dir =
+        std::filesystem::path(req.run_dir).filename() == "desktop-shared";
+    if (!snapshot.desktop_managed.has_value() && !health_managed &&
+        legacy_reserved_dir &&
+        acecode::daemon::process_is_acecode_daemon(result.pid)) {
+        result.action = ExistingDaemonAction::Replace;
+        result.reason = "legacy Desktop-managed daemon requires protocol upgrade";
+        return result;
+    }
+
+    result.action = ExistingDaemonAction::Unsafe;
+    result.reason = "existing daemon is not Desktop-managed";
+    return result;
 }
 
 } // namespace
@@ -41,6 +245,7 @@ DaemonPool::Slot* DaemonPool::get_or_create_slot(const std::string& hash,
     } else {
         slot->sup = std::make_unique<DaemonSupervisor>();
     }
+    slot->sup->set_keep_alive_on_exit(keep_alive_on_exit_);
     Slot* raw = slot.get();
     slots_.emplace(key, std::move(slot));
     return raw;
@@ -96,16 +301,68 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
     // 解锁 spawn — daemon 启动可能跑数百 ms,持锁会阻塞 lookup / snapshot 这种
     // 只读调用。等结果回来再上锁写状态 + cv.notify_all。
 
-    int port = pick_free_loopback_port();
-    std::string token = make_auth_token();
-
     bool ok = false;
     std::string err;
-    if (port == 0) {
-        err = "pick_free_loopback_port returned 0";
-    } else if (token.empty()) {
-        err = "make_auth_token returned empty";
+    int port = 0;
+    std::string token;
+    DaemonConnectionSource source = DaemonConnectionSource::None;
+
+    ExistingDaemonProbe probe;
+    {
+        std::lock_guard<std::mutex> lk(main_mu_);
+        probe = existing_daemon_probe_;
+    }
+    const auto existing = probe ? probe(req) : inspect_existing_daemon(req);
+
+    if (existing.action == ExistingDaemonAction::Unsafe) {
+        err = existing.reason.empty()
+            ? "existing daemon identity is unsafe"
+            : existing.reason;
+    } else if (existing.action == ExistingDaemonAction::Reuse) {
+        auto attached = slot->sup->attach(existing.pid);
+        if (!attached.ok) {
+            err = "attach existing daemon failed: " + attached.error;
+        } else {
+            port = existing.port;
+            token = existing.token;
+            source = DaemonConnectionSource::Attached;
+            ok = true;
+            LOG_INFO("[daemon_pool] attached compatible daemon pid=" +
+                     std::to_string(existing.pid) + " port=" +
+                     std::to_string(port) + " for hash=" + req.hash);
+        }
     } else {
+        if (existing.action == ExistingDaemonAction::Replace) {
+            auto attached = slot->sup->attach(existing.pid);
+            if (!attached.ok) {
+                err = "attach incompatible daemon for replacement failed: " +
+                      attached.error;
+            } else {
+                LOG_INFO("[daemon_pool] replacing managed daemon pid=" +
+                         std::to_string(existing.pid) + ": " + existing.reason);
+                slot->sup->stop();
+                if (acecode::daemon::is_pid_alive(existing.pid)) {
+                    err =
+                        "verified Desktop-managed daemon did not exit during "
+                        "replacement";
+                } else {
+                    acecode::daemon::cleanup_runtime_files_if_owned(
+                        existing.pid, existing.guid, req.run_dir, true);
+                }
+            }
+        }
+        if (err.empty()) {
+            port = pick_free_loopback_port();
+            token = make_auth_token();
+        }
+        if (err.empty() && port == 0) {
+            err = "pick_free_loopback_port returned 0";
+        } else if (err.empty() && token.empty()) {
+            err = "make_auth_token returned empty";
+        }
+    }
+
+    if (!ok && err.empty()) {
         SpawnRequest sreq;
         sreq.daemon_exe_path = req.daemon_exe_path;
         sreq.port = port;
@@ -115,11 +372,21 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
         sreq.static_dir = req.static_dir;
         sreq.run_dir = req.run_dir;
         sreq.native_folder_picker_enabled = req.native_folder_picker_enabled;
+        sreq.desktop_managed = req.desktop_managed;
+        sreq.guid = req.desktop_managed
+            ? acecode::daemon::generate_daemon_guid()
+            : std::string{};
+        sreq.desktop_protocol_version = req.desktop_managed
+            ? kDesktopDaemonProtocolVersion
+            : 0;
+        sreq.desktop_owner_pid = req.desktop_owner_pid;
+        sreq.desktop_owner_instance = req.desktop_owner_instance;
         auto sr = slot->sup->spawn(sreq);
         if (!sr.ok) {
             err = sr.error;
         } else {
             ok = slot->sup->wait_until_ready(port, wait_timeout);
+            if (ok) source = DaemonConnectionSource::Spawned;
             bool used_slow_startup_fallback = false;
             if (!ok && slot->sup->running()) {
                 auto extra_wait = slow_startup_extra_wait(wait_timeout);
@@ -131,6 +398,7 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
                              ms_count(extra_wait) + "ms for hash=" + req.hash +
                              " context=" + context_id);
                     ok = slot->sup->wait_until_ready(port, extra_wait);
+                    if (ok) source = DaemonConnectionSource::Spawned;
                 }
             }
             if (!ok) {
@@ -141,34 +409,12 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
         }
     }
 
-    // POSIX/macOS: daemon 没有类似 Windows Job Object 的父死子死机制。
-    // 若 desktop 上次正常退出但 daemon 以孤儿进程形式继续运行,下次 spawn
-    // 新 daemon 时会因"already running"而立刻退出。
-    // 处理:spawn 失败后检查 run_dir 内的 port/token 文件,若原有 daemon 仍
-    // 在监听则直接复用(adopt),跳过重新 spawn。
-    if (!ok && !req.run_dir.empty()) {
-        acecode::daemon::RuntimeValidationOptions options;
-        options.heartbeat_timeout_ms = acecode::constants::DEFAULT_HEARTBEAT_TIMEOUT_MS;
-        auto snapshot = acecode::daemon::read_runtime_snapshot(req.run_dir);
-        auto reuse = acecode::daemon::validate_runtime_snapshot_for_reuse(snapshot, options);
-        if (reuse.reusable && snapshot.port.has_value() && snapshot.token.has_value()) {
-            port = *snapshot.port;
-            token = *snapshot.token;
-            ok = true;
-            err.clear();
-            LOG_INFO("[daemon_pool] reclaimed existing daemon at port=" +
-                     std::to_string(port) + " for hash=" + req.hash);
-        } else {
-            LOG_WARN("[daemon_pool] existing daemon runtime not reusable for hash=" +
-                     req.hash + " context=" + context_id + ": " + reuse.reason);
-        }
-    }
-
     sl.lock();
     if (ok) {
         slot->port = port;
         slot->token = token;
         slot->state = DaemonState::Running;
+        slot->source = source;
         slot->cv.notify_all();
         r.ok = true;
         r.port = port;
@@ -176,6 +422,7 @@ ActivateResult DaemonPool::activate(const ActivateRequest& req,
     } else {
         slot->error = err;
         slot->state = DaemonState::Failed;
+        slot->source = DaemonConnectionSource::None;
         slot->cv.notify_all();
         // 失败的 supervisor 可能持有半启动的子进程 — 显式 stop 释放 Job。
         if (slot->sup) slot->sup->stop();
@@ -198,6 +445,7 @@ DaemonPool::Snapshot DaemonPool::lookup(const std::string& hash,
     snap.port = s->port;
     snap.token = s->token;
     snap.error = s->error;
+    snap.source = s->source;
     return snap;
 }
 
@@ -212,6 +460,7 @@ std::vector<std::pair<std::string, DaemonPool::Snapshot>> DaemonPool::snapshot_a
         snap.port = s->port;
         snap.token = s->token;
         snap.error = s->error;
+        snap.source = s->source;
         out.emplace_back(hash, snap);
     }
     return out;
@@ -227,6 +476,7 @@ std::vector<std::pair<std::string, std::string>> DaemonPool::stop_all() {
             s->state = DaemonState::Stopped;
             s->port = 0;
             s->token.clear();
+            s->source = DaemonConnectionSource::None;
         } catch (const std::exception& e) {
             failures.emplace_back(hash, e.what());
         } catch (...) {
@@ -236,9 +486,53 @@ std::vector<std::pair<std::string, std::string>> DaemonPool::stop_all() {
     return failures;
 }
 
+std::vector<std::pair<std::string, std::string>> DaemonPool::shutdown_all() {
+    std::vector<std::pair<std::string, std::string>> failures;
+    std::lock_guard<std::mutex> lk(main_mu_);
+    for (auto& [hash, s] : slots_) {
+        try {
+            std::lock_guard<std::mutex> sl(s->mu);
+            if (s->sup) {
+                if (keep_alive_on_exit_) s->sup->release();
+                else s->sup->stop();
+            }
+            s->state = DaemonState::Stopped;
+            s->port = 0;
+            s->token.clear();
+            s->source = DaemonConnectionSource::None;
+        } catch (const std::exception& e) {
+            failures.emplace_back(hash, e.what());
+        } catch (...) {
+            failures.emplace_back(hash, "unknown exception in shutdown");
+        }
+    }
+    return failures;
+}
+
+void DaemonPool::set_keep_alive_on_exit(bool keep_alive) {
+    std::lock_guard<std::mutex> lk(main_mu_);
+    keep_alive_on_exit_ = keep_alive;
+    for (auto& [key, slot] : slots_) {
+        (void)key;
+        std::lock_guard<std::mutex> sl(slot->mu);
+        if (slot->sup) slot->sup->set_keep_alive_on_exit(keep_alive);
+    }
+}
+
+bool DaemonPool::keep_alive_on_exit() const {
+    std::lock_guard<std::mutex> lk(main_mu_);
+    return keep_alive_on_exit_;
+}
+
 void DaemonPool::set_supervisor_factory_for_test(SupervisorFactory factory) {
     std::lock_guard<std::mutex> lk(main_mu_);
     factory_ = std::move(factory);
+}
+
+void DaemonPool::set_existing_daemon_probe_for_test(
+    ExistingDaemonProbe probe) {
+    std::lock_guard<std::mutex> lk(main_mu_);
+    existing_daemon_probe_ = std::move(probe);
 }
 
 } // namespace acecode::desktop

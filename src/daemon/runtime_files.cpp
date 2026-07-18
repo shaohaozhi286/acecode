@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -33,7 +34,11 @@
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#endif
 #endif
 
 namespace fs = std::filesystem;
@@ -98,6 +103,50 @@ std::optional<Heartbeat> read_heartbeat_path(const std::string& path) {
     }
 }
 
+std::optional<DesktopManagedRuntime> read_desktop_managed_runtime_path(
+    const std::string& path) {
+    auto text = read_text(path);
+    if (!text || text->empty()) return std::nullopt;
+    try {
+        const auto j = nlohmann::json::parse(*text);
+        if (!j.is_object()) return std::nullopt;
+        DesktopManagedRuntime runtime;
+        runtime.pid = j.value("pid", static_cast<std::int64_t>(0));
+        runtime.guid = j.value("guid", std::string{});
+        runtime.kind = j.value("kind", std::string{});
+        runtime.protocol_version = j.value("protocol_version", 0);
+        runtime.acecode_version = j.value("acecode_version", std::string{});
+        if (runtime.pid <= 0 || runtime.guid.empty() || runtime.kind.empty() ||
+            runtime.protocol_version <= 0) {
+            return std::nullopt;
+        }
+        return runtime;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<DesktopOwnerRecord> read_desktop_owner_record_path(
+    const std::string& path) {
+    auto text = read_text(path);
+    if (!text || text->empty()) return std::nullopt;
+    try {
+        const auto j = nlohmann::json::parse(*text);
+        if (!j.is_object()) return std::nullopt;
+        DesktopOwnerRecord owner;
+        owner.pid = j.value("pid", static_cast<std::int64_t>(0));
+        owner.instance_id = j.value("instance_id", std::string{});
+        owner.timestamp_ms = j.value("timestamp_ms", static_cast<std::int64_t>(0));
+        if (owner.pid <= 0 || owner.instance_id.empty() ||
+            owner.timestamp_ms <= 0) {
+            return std::nullopt;
+        }
+        return owner;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 enum class ProcessIdentity {
     Match,
     Mismatch,
@@ -134,8 +183,30 @@ struct WsaInit {
 
 WsaInit g_wsa_init;
 #else
-ProcessIdentity daemon_process_identity(std::int64_t) {
+ProcessIdentity daemon_process_identity(std::int64_t pid) {
+    if (pid <= 0) return ProcessIdentity::Unknown;
+    fs::path image;
+#ifdef __APPLE__
+    std::vector<char> buffer(PROC_PIDPATHINFO_MAXSIZE);
+    const int length = ::proc_pidpath(
+        static_cast<int>(pid), buffer.data(), static_cast<uint32_t>(buffer.size()));
+    if (length <= 0) return ProcessIdentity::Unknown;
+    image = fs::path(std::string(buffer.data(), static_cast<std::size_t>(length)));
+#elif defined(__linux__)
+    std::vector<char> buffer(4096);
+    const std::string proc_path = "/proc/" + std::to_string(pid) + "/exe";
+    const ssize_t length = ::readlink(proc_path.c_str(), buffer.data(), buffer.size() - 1);
+    if (length <= 0) return ProcessIdentity::Unknown;
+    buffer[static_cast<std::size_t>(length)] = '\0';
+    image = fs::path(std::string(buffer.data(), static_cast<std::size_t>(length)));
+#else
     return ProcessIdentity::Unknown;
+#endif
+    std::string name = image.filename().string();
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (name == "acecode" || name == "acecode.exe") return ProcessIdentity::Match;
+    return ProcessIdentity::Mismatch;
 }
 #endif
 
@@ -191,6 +262,48 @@ std::optional<std::string> read_token() {
     return read_text(run_path(constants::RUN_FILE_TOKEN));
 }
 
+bool write_desktop_managed_runtime(const DesktopManagedRuntime& runtime,
+                                   const std::string& run_dir) {
+    ensure_run_dir_for(run_dir);
+    nlohmann::json j{
+        {"pid", runtime.pid},
+        {"guid", runtime.guid},
+        {"kind", runtime.kind},
+        {"protocol_version", runtime.protocol_version},
+        {"acecode_version", runtime.acecode_version},
+    };
+    return atomic_write_file(
+        run_path_for(run_dir, constants::RUN_FILE_DESKTOP_MANAGED),
+        j.dump(),
+        /*restrict_permissions=*/true);
+}
+
+std::optional<DesktopManagedRuntime> read_desktop_managed_runtime(
+    const std::string& run_dir) {
+    return read_desktop_managed_runtime_path(
+        run_path_for(run_dir, constants::RUN_FILE_DESKTOP_MANAGED));
+}
+
+bool write_desktop_owner_record(const std::string& run_dir,
+                                const DesktopOwnerRecord& owner) {
+    ensure_run_dir_for(run_dir);
+    nlohmann::json j{
+        {"pid", owner.pid},
+        {"instance_id", owner.instance_id},
+        {"timestamp_ms", owner.timestamp_ms},
+    };
+    return atomic_write_file(
+        run_path_for(run_dir, constants::RUN_FILE_DESKTOP_OWNER),
+        j.dump(),
+        /*restrict_permissions=*/true);
+}
+
+std::optional<DesktopOwnerRecord> read_desktop_owner_record(
+    const std::string& run_dir) {
+    return read_desktop_owner_record_path(
+        run_path_for(run_dir, constants::RUN_FILE_DESKTOP_OWNER));
+}
+
 RuntimeSnapshot read_runtime_snapshot(const std::string& run_dir) {
     RuntimeSnapshot snapshot;
     snapshot.pid = read_i64_path(run_path_for(run_dir, constants::RUN_FILE_PID));
@@ -198,6 +311,8 @@ RuntimeSnapshot read_runtime_snapshot(const std::string& run_dir) {
     snapshot.guid = read_text(run_path_for(run_dir, constants::RUN_FILE_GUID));
     snapshot.heartbeat = read_heartbeat_path(run_path_for(run_dir, constants::RUN_FILE_HEARTBEAT));
     snapshot.token = read_text(run_path_for(run_dir, constants::RUN_FILE_TOKEN));
+    snapshot.desktop_managed = read_desktop_managed_runtime_path(
+        run_path_for(run_dir, constants::RUN_FILE_DESKTOP_MANAGED));
     return snapshot;
 }
 
@@ -253,6 +368,10 @@ RuntimeReuseCheck validate_runtime_snapshot_for_reuse(
         ProcessIdentity identity = daemon_process_identity(*snapshot.pid);
         if (identity == ProcessIdentity::Mismatch) {
             check.reason = "recorded pid is not an acecode daemon process";
+            return check;
+        }
+        if (identity == ProcessIdentity::Unknown) {
+            check.reason = "recorded process executable identity is unavailable";
             return check;
         }
     }
@@ -323,13 +442,48 @@ bool probe_loopback_port(int port) {
 #endif
 }
 
+bool process_is_acecode_daemon(std::int64_t pid) {
+    return daemon_process_identity(pid) == ProcessIdentity::Match;
+}
+
 void cleanup_runtime_files() {
     std::error_code ec;
     fs::remove(path_from_utf8(run_path(constants::RUN_FILE_PID)), ec);
     fs::remove(path_from_utf8(run_path(constants::RUN_FILE_PORT)), ec);
     fs::remove(path_from_utf8(run_path(constants::RUN_FILE_HEARTBEAT)), ec);
     fs::remove(path_from_utf8(run_path(constants::RUN_FILE_TOKEN)), ec);
+    fs::remove(path_from_utf8(run_path(constants::RUN_FILE_DESKTOP_MANAGED)), ec);
     // guid 故意保留: 事后追溯用
+}
+
+bool cleanup_runtime_files_if_owned(std::int64_t expected_pid,
+                                    const std::string& expected_guid,
+                                    const std::string& run_dir,
+                                    bool remove_guid) {
+    const auto snapshot = read_runtime_snapshot(run_dir);
+    const bool pid_matches =
+        snapshot.pid.has_value() && *snapshot.pid == expected_pid;
+    const bool stopped_generation_matches =
+        remove_guid && !snapshot.pid.has_value();
+    if (!snapshot.guid.has_value() || *snapshot.guid != expected_guid ||
+        (!pid_matches && !stopped_generation_matches)) {
+        LOG_WARN("[daemon] skipped runtime cleanup for stale generation pid=" +
+                 std::to_string(expected_pid) + " guid=" + expected_guid);
+        return false;
+    }
+
+    std::error_code ec;
+    const auto remove_file = [&](const char* name) {
+        ec.clear();
+        fs::remove(path_from_utf8(run_path_for(run_dir, name)), ec);
+    };
+    remove_file(constants::RUN_FILE_PID);
+    remove_file(constants::RUN_FILE_PORT);
+    remove_file(constants::RUN_FILE_HEARTBEAT);
+    remove_file(constants::RUN_FILE_TOKEN);
+    remove_file(constants::RUN_FILE_DESKTOP_MANAGED);
+    if (remove_guid) remove_file(constants::RUN_FILE_GUID);
+    return true;
 }
 
 } // namespace acecode::daemon

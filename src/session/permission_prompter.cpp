@@ -43,6 +43,7 @@ PermissionResult AsyncPrompter::prompt(const std::string& tool_name,
 
     // 阻塞等响应 / abort / 超时。abort_flag 用 50ms 节奏轮询 — 不算热循环,
     // worker thread 多 50ms 退出延迟可接受。
+    const bool has_timeout = timeout_ > std::chrono::milliseconds{0};
     auto deadline = std::chrono::steady_clock::now() + timeout_;
     PermissionDecisionChoice final_choice = PermissionDecisionChoice::Deny;
     std::string close_reason = "abort";
@@ -66,7 +67,7 @@ PermissionResult AsyncPrompter::prompt(const std::string& tool_name,
             close_reason = pending->reason;
             break;
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (has_timeout && std::chrono::steady_clock::now() >= deadline) {
             pending->choice = PermissionDecisionChoice::Deny;
             pending->reason = "timeout";
             pending->responded = true;

@@ -577,6 +577,8 @@ TEST(WebServerHttp, HealthEndpointReturnsBasicMetadata) {
     EXPECT_EQ(j["guid"], "test-guid-aaaa-bbbb");
     EXPECT_EQ(j["pid"], 12345);
     EXPECT_EQ(j["port"], fx.port);
+    EXPECT_EQ(j["desktop_managed"], false);
+    EXPECT_EQ(j["desktop_protocol_version"], 0);
 
     // desktop.notifications 默认五个 bool 全 true,health 透传给前端做抑制规则判定。
     // 见 openspec/changes/add-windows-wintoast-completion-notifications。

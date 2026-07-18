@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <thread>
 #include <sstream>
 #include <vector>
@@ -167,12 +168,18 @@ bool validate_spawn_request(const SpawnRequest& req, std::string& error) {
             return false;
         }
     }
+    if (req.desktop_managed &&
+        (req.guid.empty() || req.desktop_protocol_version <= 0 ||
+         req.desktop_owner_pid <= 0 || req.desktop_owner_instance.empty())) {
+        error = "desktop managed spawn fields are incomplete";
+        return false;
+    }
     return true;
 }
 
 std::vector<std::string> build_posix_argv(const SpawnRequest& req) {
     std::vector<std::string> argv;
-    argv.reserve(8);
+    argv.reserve(14);
     argv.push_back(req.daemon_exe_path);
     argv.push_back("daemon");
     argv.push_back("--foreground");
@@ -182,6 +189,17 @@ std::vector<std::string> build_posix_argv(const SpawnRequest& req) {
     if (!req.static_dir.empty()) argv.push_back("--static-dir=" + req.static_dir);
     if (!req.run_dir.empty()) argv.push_back("--run-dir=" + req.run_dir);
     if (req.native_folder_picker_enabled) argv.push_back("--native-folder-picker");
+    if (req.desktop_managed) {
+        argv.push_back("--supervised");
+        argv.push_back("--guid=" + req.guid);
+        argv.push_back("--desktop-managed");
+        argv.push_back("--desktop-protocol=" +
+                       std::to_string(req.desktop_protocol_version));
+        argv.push_back("--desktop-owner-pid=" +
+                       std::to_string(req.desktop_owner_pid));
+        argv.push_back("--desktop-owner-instance=" +
+                       req.desktop_owner_instance);
+    }
     return argv;
 }
 
@@ -211,11 +229,14 @@ struct DaemonSupervisor::Impl {
     HANDLE process = nullptr;
     HANDLE thread = nullptr;
     DWORD  pid = 0;
+    bool keep_alive_on_exit = false;
+    bool attached = false;
 };
 
 DaemonSupervisor::DaemonSupervisor() : impl_(new Impl()) {}
 DaemonSupervisor::~DaemonSupervisor() {
-    stop();
+    if (impl_->keep_alive_on_exit) release();
+    else stop();
     delete impl_;
 }
 
@@ -231,6 +252,12 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     }
     if (req.token.empty()) {
         r.error = "token empty";
+        return r;
+    }
+    if (req.desktop_managed &&
+        (req.guid.empty() || req.desktop_protocol_version <= 0 ||
+         req.desktop_owner_pid <= 0 || req.desktop_owner_instance.empty())) {
+        r.error = "desktop managed spawn fields are incomplete";
         return r;
     }
 
@@ -269,7 +296,9 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
         return r;
     }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
-    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    jeli.BasicLimitInformation.LimitFlags = impl_->keep_alive_on_exit
+        ? 0
+        : JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!::SetInformationJobObject(impl_->job, JobObjectExtendedLimitInformation,
                                    &jeli, sizeof(jeli))) {
         ::CloseHandle(impl_->job);
@@ -288,6 +317,17 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     argv.push_back(L"--token=" + acecode::utf8_to_wide(req.token));
     if (req.dangerous) argv.push_back(L"-dangerous");
     if (req.native_folder_picker_enabled) argv.push_back(L"--native-folder-picker");
+    if (req.desktop_managed) {
+        argv.push_back(L"--supervised");
+        argv.push_back(L"--guid=" + acecode::utf8_to_wide(req.guid));
+        argv.push_back(L"--desktop-managed");
+        argv.push_back(L"--desktop-protocol=" +
+                       std::to_wstring(req.desktop_protocol_version));
+        argv.push_back(L"--desktop-owner-pid=" +
+                       std::to_wstring(req.desktop_owner_pid));
+        argv.push_back(L"--desktop-owner-instance=" +
+                       acecode::utf8_to_wide(req.desktop_owner_instance));
+    }
     if (!req.static_dir.empty()) {
         std::wstring static_dir_w = acecode::utf8_to_wide(req.static_dir);
         if (static_dir_w.empty()) {
@@ -387,10 +427,41 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     impl_->process = pi.hProcess;
     impl_->thread  = pi.hThread;
     impl_->pid     = pi.dwProcessId;
+    impl_->attached = false;
 
     r.ok = true;
     r.pid = static_cast<long long>(pi.dwProcessId);
     return r;
+}
+
+SpawnResult DaemonSupervisor::attach(std::int64_t pid) {
+    SpawnResult result;
+    if (pid <= 0 || pid > static_cast<std::int64_t>(MAXDWORD)) {
+        result.error = "attach pid out of range";
+        return result;
+    }
+    release();
+    HANDLE process = ::OpenProcess(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+        FALSE,
+        static_cast<DWORD>(pid));
+    if (!process) {
+        result.error = "OpenProcess for attach failed" +
+                       windows_error_suffix(::GetLastError());
+        return result;
+    }
+    DWORD code = 0;
+    if (!::GetExitCodeProcess(process, &code) || code != STILL_ACTIVE) {
+        ::CloseHandle(process);
+        result.error = "attach target is not running";
+        return result;
+    }
+    impl_->process = process;
+    impl_->pid = static_cast<DWORD>(pid);
+    impl_->attached = true;
+    result.ok = true;
+    result.pid = pid;
+    return result;
 }
 
 bool DaemonSupervisor::wait_until_ready(int port, std::chrono::milliseconds timeout) {
@@ -415,6 +486,10 @@ void DaemonSupervisor::stop() {
         ::CloseHandle(impl_->job);
         impl_->job = nullptr;
     }
+    if (!impl_->job && impl_->attached && impl_->process) {
+        ::TerminateProcess(impl_->process, 0);
+        ::WaitForSingleObject(impl_->process, 2000);
+    }
     if (impl_->thread) {
         ::CloseHandle(impl_->thread);
         impl_->thread = nullptr;
@@ -424,6 +499,43 @@ void DaemonSupervisor::stop() {
         impl_->process = nullptr;
     }
     impl_->pid = 0;
+    impl_->attached = false;
+}
+
+void DaemonSupervisor::release() {
+    if (impl_->job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+        jeli.BasicLimitInformation.LimitFlags = 0;
+        ::SetInformationJobObject(impl_->job, JobObjectExtendedLimitInformation,
+                                  &jeli, sizeof(jeli));
+        ::CloseHandle(impl_->job);
+        impl_->job = nullptr;
+    }
+    if (impl_->thread) {
+        ::CloseHandle(impl_->thread);
+        impl_->thread = nullptr;
+    }
+    if (impl_->process) {
+        ::CloseHandle(impl_->process);
+        impl_->process = nullptr;
+    }
+    impl_->pid = 0;
+    impl_->attached = false;
+}
+
+void DaemonSupervisor::set_keep_alive_on_exit(bool keep_alive) {
+    impl_->keep_alive_on_exit = keep_alive;
+    if (!impl_->job) return;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+    jeli.BasicLimitInformation.LimitFlags = keep_alive
+        ? 0
+        : JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!::SetInformationJobObject(
+            impl_->job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+        // Explicit shutdown still applies the requested policy; this warning is
+        // about abnormal parent termination only.
+        (void)::GetLastError();
+    }
 }
 
 bool DaemonSupervisor::running() const {
@@ -463,14 +575,25 @@ struct DaemonSupervisor::Impl {
     pid_t pid = -1;
     bool exited = false;
     int exit_status = 0;
+    bool is_child = false;
+    bool keep_alive_on_exit = false;
 
     bool poll_exited() {
         if (pid <= 0 || exited) return exited;
-        int status = 0;
-        pid_t rc = ::waitpid(pid, &status, WNOHANG);
-        if (rc == pid) {
+        if (is_child) {
+            int status = 0;
+            pid_t rc = ::waitpid(pid, &status, WNOHANG);
+            if (rc == pid) {
+                exited = true;
+                exit_status = status;
+                return true;
+            }
+            if (rc < 0 && errno == ECHILD) {
+                is_child = false;
+            }
+        }
+        if (!is_child && ::kill(pid, 0) != 0 && errno == ESRCH) {
             exited = true;
-            exit_status = status;
             return true;
         }
         return false;
@@ -479,7 +602,8 @@ struct DaemonSupervisor::Impl {
 
 DaemonSupervisor::DaemonSupervisor() : impl_(new Impl()) {}
 DaemonSupervisor::~DaemonSupervisor() {
-    stop();
+    if (impl_->keep_alive_on_exit) release();
+    else stop();
     delete impl_;
 }
 
@@ -516,9 +640,33 @@ SpawnResult DaemonSupervisor::spawn(const SpawnRequest& req) {
     impl_->pid = pid;
     impl_->exited = false;
     impl_->exit_status = 0;
+    impl_->is_child = true;
     r.ok = true;
     r.pid = static_cast<long long>(pid);
     return r;
+}
+
+SpawnResult DaemonSupervisor::attach(std::int64_t pid_value) {
+    SpawnResult result;
+    if (pid_value <= 0 ||
+        pid_value > static_cast<std::int64_t>(
+            (std::numeric_limits<pid_t>::max)())) {
+        result.error = "attach pid out of range";
+        return result;
+    }
+    const pid_t pid = static_cast<pid_t>(pid_value);
+    if (::kill(pid, 0) != 0 && errno == ESRCH) {
+        result.error = "attach target is not running";
+        return result;
+    }
+    release();
+    impl_->pid = pid;
+    impl_->exited = false;
+    impl_->exit_status = 0;
+    impl_->is_child = false;
+    result.ok = true;
+    result.pid = pid_value;
+    return result;
 }
 bool DaemonSupervisor::wait_until_ready(int port, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -532,16 +680,43 @@ bool DaemonSupervisor::wait_until_ready(int port, std::chrono::milliseconds time
 void DaemonSupervisor::stop() {
     if (impl_->pid <= 0 || impl_->exited) return;
     signal_process_group(impl_->pid, SIGTERM);
-    int status = 0;
-    pid_t rc = ::waitpid(impl_->pid, &status, WNOHANG);
-    if (rc == 0) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (impl_->poll_exited()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (!impl_->exited) {
         signal_process_group(impl_->pid, SIGKILL);
-        rc = ::waitpid(impl_->pid, &status, 0);
-    }
-    if (rc == impl_->pid) {
+        if (impl_->is_child) {
+            int status = 0;
+            const pid_t rc = ::waitpid(impl_->pid, &status, 0);
+            if (rc == impl_->pid) {
+                impl_->exit_status = status;
+            }
+        } else {
+            const auto kill_deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            while (std::chrono::steady_clock::now() < kill_deadline &&
+                   ::kill(impl_->pid, 0) == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+        }
         impl_->exited = true;
-        impl_->exit_status = status;
     }
+    impl_->pid = -1;
+    impl_->is_child = false;
+}
+
+void DaemonSupervisor::release() {
+    impl_->pid = -1;
+    impl_->exited = false;
+    impl_->exit_status = 0;
+    impl_->is_child = false;
+}
+
+void DaemonSupervisor::set_keep_alive_on_exit(bool keep_alive) {
+    impl_->keep_alive_on_exit = keep_alive;
 }
 bool DaemonSupervisor::running() const {
     if (impl_->pid <= 0 || impl_->exited) return false;

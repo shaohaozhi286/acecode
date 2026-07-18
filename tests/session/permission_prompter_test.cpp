@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -175,6 +176,38 @@ TEST(AsyncPrompter, TimeoutReturnsDenyAndEmitsError) {
     EXPECT_EQ(events[1].payload.value("reason", std::string{}), "timeout");
     EXPECT_LT(events[1].seq, timeout_error_seq)
         << "close 必须先于 timeout error,避免后台客户端先退订而漏掉 close";
+    d.unsubscribe(sub);
+}
+
+TEST(AsyncPrompter, DefaultHasNoPassiveTimeout) {
+    EventDispatcher d;
+    AsyncPrompter prompter(d);
+    ResponderState state;
+    auto sub = d.subscribe([&](const SessionEvent& event) {
+        if (event.kind != SessionEventKind::PermissionRequest) return;
+        {
+            std::lock_guard<std::mutex> lock(state.mu);
+            state.request_id =
+                event.payload.value("request_id", std::string{});
+            state.got = true;
+        }
+        state.cv.notify_all();
+    });
+
+    auto future = std::async(std::launch::async, [&] {
+        return prompter.prompt("bash", "{\"command\":\"pwd\"}", nullptr);
+    });
+    std::string request_id;
+    {
+        std::unique_lock<std::mutex> lock(state.mu);
+        ASSERT_TRUE(state.cv.wait_for(lock, 500ms, [&] { return state.got; }));
+        request_id = state.request_id;
+    }
+    EXPECT_EQ(future.wait_for(180ms), std::future_status::timeout);
+
+    prompter.notify_decision(request_id, PermissionDecisionChoice::Allow);
+    ASSERT_EQ(future.wait_for(500ms), std::future_status::ready);
+    EXPECT_EQ(future.get(), PermissionResult::Allow);
     d.unsubscribe(sub);
 }
 

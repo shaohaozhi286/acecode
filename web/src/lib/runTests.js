@@ -94,6 +94,7 @@ import './desktopNotificationMonitor.test.js';
 import './desktopNotificationAuthorization.test.js';
 import './desktopShellMode.test.js';
 import './desktopAppActions.test.js';
+import './desktopBackgroundProcess.test.js';
 import './desktopGuidedTour.test.js';
 import './desktopTrayMenu.test.js';
 import './opencodeImport.test.js';

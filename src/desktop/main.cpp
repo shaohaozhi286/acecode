@@ -9,7 +9,7 @@
 //   5. 若 active workspace 存在 → DaemonPool::activate → 拼 URL → navigate
 //      若不存在 → 仍启动 shared daemon 只用于承载前端,sidebar 渲染为空列表 + "+ 添加项目"
 //   6. WebHost.run() 阻塞直到窗口关闭
-//   7. quit: pool.stop_all() + 写 last_active_workspace_hash
+//   7. quit: pool.shutdown_all() 按用户策略 stop/release + 写 last_active
 //
 // daemon 端通过 workspace-aware API 在同一进程内服务多个 workspace。
 
@@ -33,6 +33,8 @@
 #include "workspace_registry.hpp"
 
 #include "../config/config.hpp"
+#include "../daemon/platform.hpp"
+#include "../daemon/runtime_files.hpp"
 #include "../utils/clipboard.hpp"
 #include "../utils/base64.hpp"
 #include "../utils/cwd_hash.hpp"
@@ -40,6 +42,7 @@
 #include "../utils/logger.hpp"
 #include "../utils/state_file.hpp"
 #include "../utils/utf8_path.hpp"
+#include "../utils/uuid.hpp"
 #include "version.hpp"
 
 #include <nlohmann/json.hpp>
@@ -613,7 +616,7 @@ int run_browser_fallback(const std::string& url,
     if (edge_process) ::CloseHandle(static_cast<HANDLE>(edge_process));
     shutdown_tray_icon();
 
-    auto failures = pool.stop_all();
+    auto failures = pool.shutdown_all();
     return failures.empty() ? 0 : 100;
 #else
     // 非 Windows:desktop 用 WebKitGTK,几乎不会走到这里。best-effort 开默认浏览器
@@ -624,7 +627,7 @@ int run_browser_fallback(const std::string& url,
     if (!ext.ok) {
         LOG_ERROR("[desktop] browser fallback failed to open default browser: " + ext.error);
     }
-    auto failures = pool.stop_all();
+    auto failures = pool.shutdown_all();
     return failures.empty() ? (ext.ok ? 0 : 1) : 100;
 #endif
 }
@@ -677,6 +680,20 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    const std::int64_t desktop_owner_pid =
+        acecode::daemon::current_pid();
+    const std::string desktop_owner_instance = acecode::generate_uuid();
+    const std::string shared_run_dir = desktop_shared_run_dir();
+    if (!acecode::daemon::write_desktop_owner_record(
+            shared_run_dir,
+            acecode::daemon::DesktopOwnerRecord{
+                desktop_owner_pid,
+                desktop_owner_instance,
+                acecode::daemon::now_unix_ms(),
+            })) {
+        LOG_WARN("[desktop] failed to publish Desktop owner record");
+    }
+
     SplashScreen splash;
     splash.show();
 
@@ -685,6 +702,7 @@ int main(int argc, char** argv) {
     // 默认值仍生效。Daemon 子进程会自己再次 load_config,所以 Desktop 这次读
     // 不会污染或覆盖 daemon 端配置。
     acecode::AppConfig desktop_cfg;
+    std::mutex desktop_config_mu;
     try {
         desktop_cfg = acecode::load_config();
     } catch (const std::exception& e) {
@@ -752,6 +770,15 @@ int main(int argc, char** argv) {
     //   b) WebView2 parent 不 hide,只是在屏幕外可见,避免 hidden controller
     //      暂停渲染,同时用户只能看到透明 icon。
     DaemonPool pool;
+    pool.set_keep_alive_on_exit(
+        desktop_cfg.desktop.continue_background_process);
+    auto configure_managed_request =
+        [&](ActivateRequest& request) {
+            request.run_dir = shared_run_dir;
+            request.desktop_managed = true;
+            request.desktop_owner_pid = desktop_owner_pid;
+            request.desktop_owner_instance = desktop_owner_instance;
+        };
     std::mutex active_mu;
     std::string active_hash_dynamic = active_hash; // 后续切 workspace 时更新
 
@@ -774,7 +801,7 @@ int main(int argc, char** argv) {
             req.daemon_exe_path = daemon_exe;
             req.static_dir = dev_web_dir;
             req.context_id = kSharedDaemonContextId;
-            req.run_dir = desktop_shared_run_dir();
+            configure_managed_request(req);
             req.native_folder_picker_enabled = true;
             ActivateResult r;
             if (launch_cwd.empty()) {
@@ -807,7 +834,7 @@ int main(int argc, char** argv) {
         req.daemon_exe_path = daemon_exe;
         req.static_dir = dev_web_dir;
         req.context_id = kSharedDaemonContextId;
-        req.run_dir = desktop_shared_run_dir();
+        configure_managed_request(req);
         req.native_folder_picker_enabled = true;
         ActivateResult r;
         if (launch_cwd.empty()) {
@@ -880,9 +907,15 @@ int main(int argc, char** argv) {
         },
         nullptr);
 
-    // close-to-tray:WM_CLOSE / Alt+F4 / aceDesktop_closeWindow 全部归到
-    // ShowWindow(SW_HIDE),保留 daemon + tray 在后台。`config.desktop.close_to_tray
-    // == false` 或 tray 安装失败时跳过该 handler,回到旧的关窗即退出。
+    // Window close and application quit are separate lifecycle events. macOS
+    // always hides the window and keeps the Dock/menu-bar restore paths alive.
+    // Windows retains the configurable close-to-tray behavior.
+#ifdef __APPLE__
+    host.set_close_request_handler([&host]() {
+        host.set_visible(false);
+        return true;
+    });
+#else
     if (tray_ok && desktop_cfg.desktop.close_to_tray) {
         host.set_close_request_handler([&host]() {
 #ifdef _WIN32
@@ -897,6 +930,7 @@ int main(int argc, char** argv) {
             return false;
         });
     }
+#endif
 
     // 共享的 "focus session" lambda — native 通知 / tray 菜单 session 项 / 直接
     // bridge 调用都走同一份 JS 派发逻辑。
@@ -1021,6 +1055,58 @@ int main(int argc, char** argv) {
     host.bind("aceDesktop_pageReady", [&](const std::string& /*req*/) -> std::string {
         close_splash_once();
         return nlohmann::json{{"ok", true}}.dump();
+    });
+
+    host.bind("aceDesktop_getBackgroundProcessPreference",
+              [&](const std::string& /*req*/) -> std::string {
+        std::lock_guard<std::mutex> lock(desktop_config_mu);
+        return nlohmann::json{
+            {"ok", true},
+            {"enabled",
+             desktop_cfg.desktop.continue_background_process},
+        }.dump();
+    });
+
+    host.bind("aceDesktop_setBackgroundProcessPreference",
+              [&](const std::string& req) -> std::string {
+        bool enabled = false;
+        try {
+            const auto args = nlohmann::json::parse(req);
+            if (!args.is_array() || args.empty() ||
+                !args[0].is_boolean()) {
+                return nlohmann::json{
+                    {"ok", false},
+                    {"error", "expect [enabled:boolean]"},
+                }.dump();
+            }
+            enabled = args[0].get<bool>();
+
+            // Reload-merge so daemon-side config writes made after Desktop
+            // startup are not overwritten by this native preference update.
+            acecode::AppConfig latest = acecode::load_config();
+            latest.desktop.continue_background_process = enabled;
+            const bool previous_keep_alive = pool.keep_alive_on_exit();
+            pool.set_keep_alive_on_exit(enabled);
+            try {
+                acecode::save_config(latest);
+            } catch (...) {
+                pool.set_keep_alive_on_exit(previous_keep_alive);
+                throw;
+            }
+            {
+                std::lock_guard<std::mutex> lock(desktop_config_mu);
+                desktop_cfg.desktop.continue_background_process = enabled;
+            }
+            return nlohmann::json{
+                {"ok", true},
+                {"enabled", enabled},
+            }.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{
+                {"ok", false},
+                {"error", e.what()},
+            }.dump();
+        }
     });
 
     // Post-upgrade restart bridge. Preflight while the current UI is still alive
@@ -1534,7 +1620,7 @@ int main(int argc, char** argv) {
         // Keep runtime files isolated from standalone daemon runs, but do not
         // create per-workspace or per-resume run dirs.
         req.context_id = kSharedDaemonContextId;
-        req.run_dir = desktop_shared_run_dir();
+        configure_managed_request(req);
         req.native_folder_picker_enabled = true;
         auto r = pool.activate(req);
         if (!r.ok) {
@@ -1582,7 +1668,7 @@ int main(int argc, char** argv) {
             areq.cwd = choose_launch_cwd(m->cwd, proc_cwd, daemon_exe);
             areq.daemon_exe_path = daemon_exe;
             areq.static_dir = dev_web_dir;
-            areq.run_dir = desktop_shared_run_dir();
+            configure_managed_request(areq);
             areq.native_folder_picker_enabled = true;
             auto ar = pool.activate(areq);
             if (!ar.ok) return nlohmann::json{{"error", ar.error}}.dump();
@@ -1766,7 +1852,7 @@ int main(int argc, char** argv) {
     notification_shutdown_guard.dismiss();
     shutdown_tray_icon();
 
-    auto failures = pool.stop_all();
+    auto failures = pool.shutdown_all();
     if (restart_requested.load()) {
         // The replacement must not see the dying process's singleton guard and
         // focus it instead of starting. At this point the WebView loop, tray,

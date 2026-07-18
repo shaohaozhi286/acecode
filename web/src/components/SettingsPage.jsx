@@ -18,6 +18,11 @@ import {
   requestMacNotificationAuthorization,
   subscribeMacNotificationAuthorization,
 } from '../lib/desktopNotificationAuthorization.js';
+import {
+  desktopBackgroundProcessAvailable,
+  getDesktopBackgroundProcess,
+  setDesktopBackgroundProcess,
+} from '../lib/desktopBackgroundProcess.js';
 import { Modal, Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
@@ -285,6 +290,12 @@ function SectionGeneral({
   const [notificationAuthorizationBusy, setNotificationAuthorizationBusy] =
     useState(false);
   const macAuthorizationAvailable = macNotificationAuthorizationAvailable();
+  const backgroundProcessAvailable = desktopBackgroundProcessAvailable();
+  const [backgroundProcessEnabled, setBackgroundProcessEnabled] =
+    useState(false);
+  const [backgroundProcessBusy, setBackgroundProcessBusy] = useState(
+    backgroundProcessAvailable,
+  );
   const [maxTurns, setMaxTurns] = useState(50);
   const [workMode, setWorkMode] = useState('coding');
   const [openTarget, setOpenTarget] = useState('vscode');
@@ -315,6 +326,23 @@ function SectionGeneral({
       });
     return () => { cancelled = true; };
   }, [health?.notifications?.enabled]);
+
+  useEffect(() => {
+    if (!backgroundProcessAvailable) return undefined;
+    let cancelled = false;
+    setBackgroundProcessBusy(true);
+    getDesktopBackgroundProcess()
+      .then((state) => {
+        if (cancelled) return;
+        if (state?.ok) {
+          setBackgroundProcessEnabled(state.enabled === true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setBackgroundProcessBusy(false);
+      });
+    return () => { cancelled = true; };
+  }, [backgroundProcessAvailable]);
 
   useEffect(() => {
     if (!macAuthorizationAvailable) return undefined;
@@ -431,6 +459,36 @@ function SectionGeneral({
       toast({ kind: 'err', text: '默认权限模式更新失败:' + (e?.message || '') });
     } finally {
       setPermBusy(false);
+    }
+  };
+
+  const switchBackgroundProcess = async (enabled) => {
+    const next = !!enabled;
+    const previous = backgroundProcessEnabled;
+    if (!backgroundProcessAvailable || backgroundProcessBusy ||
+        next === previous) return;
+    setBackgroundProcessEnabled(next);
+    setBackgroundProcessBusy(true);
+    try {
+      const state = await setDesktopBackgroundProcess(next);
+      if (!state?.ok) {
+        throw new Error(state?.error || '原生设置不可用');
+      }
+      setBackgroundProcessEnabled(state.enabled === true);
+      toast({
+        kind: 'ok',
+        text: state.enabled
+          ? '退出后将继续运行后台进程'
+          : '下次退出时将停止后台进程',
+      });
+    } catch (error) {
+      setBackgroundProcessEnabled(previous);
+      toast({
+        kind: 'err',
+        text: '后台运行设置失败:' + (error?.message || ''),
+      });
+    } finally {
+      setBackgroundProcessBusy(false);
     }
   };
 
@@ -635,7 +693,7 @@ function SectionGeneral({
       </div>
       <div className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
         <div>
-          <div className="text-[13px] font-medium">Daemon 状态</div>
+          <div className="text-[13px] font-medium">后台进程状态</div>
           <div className="text-[11px] text-fg-mute mt-0.5">{health?.cwd || '—'}</div>
         </div>
         <span className="flex items-center gap-1.5 text-[12px] text-ok">
@@ -643,6 +701,41 @@ function SectionGeneral({
           运行中 · 端口 {health?.port || 28080}
         </span>
       </div>
+      {backgroundProcessAvailable && (
+        <div
+          role="switch"
+          aria-checked={backgroundProcessEnabled}
+          tabIndex={0}
+          onClick={() => switchBackgroundProcess(!backgroundProcessEnabled)}
+          onKeyDown={(event) => {
+            if (event.key === ' ' || event.key === 'Enter') {
+              event.preventDefault();
+              switchBackgroundProcess(!backgroundProcessEnabled);
+            }
+          }}
+          className={clsx(
+            'flex items-center justify-between gap-4 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2 transition',
+            'cursor-pointer hover:bg-surface-hi',
+            backgroundProcessBusy && 'opacity-75 cursor-wait',
+          )}
+        >
+          <div>
+            <div className="text-[13px] font-medium">
+              退出 ACECode 后继续运行后台进程
+            </div>
+            <div className="text-[11px] text-fg-mute mt-0.5">
+              开启后，真正退出桌面应用时，后台任务和待处理交互仍会继续运行
+            </div>
+          </div>
+          <div onClick={(event) => event.stopPropagation()}>
+            <Toggle
+              on={backgroundProcessEnabled}
+              disabled={backgroundProcessBusy}
+              onChange={switchBackgroundProcess}
+            />
+          </div>
+        </div>
+      )}
     </>
   );
 }
