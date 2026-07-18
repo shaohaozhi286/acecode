@@ -1,5 +1,5 @@
 // 主聊天视图:头部(会话名 + 状态 badge)+ 消息流 +
-// InputBar + StatusBar。
+// 内嵌会话控制的 InputBar。
 //
 // 消息流是 items 数组,每个 item 形如:
 //   { kind: 'msg' | 'tool' | 'task_complete', id, role?, content?, ts?, streaming?, tool? }
@@ -25,7 +25,6 @@ import { SidePanel } from './SidePanel.jsx';
 import { SubagentPanel } from './SubagentPanel.jsx';
 import { SubagentGroupBlock } from './SubagentGroupBlock.jsx';
 import { PreviewDetailsPanel } from './PreviewDetailsPanel.jsx';
-import { StatusBar } from './StatusBar.jsx';
 import { Modal } from './Modal.jsx';
 import { CreateProjectModal } from './CreateProjectModal.jsx';
 import { ChangeGlassDock } from './ChangeReview.jsx';
@@ -2040,7 +2039,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     }
   }, [api, modelState, modelSwitching, sid]);
 
-  const changeStatusBarModel = useCallback((name) => {
+  const changeComposerModel = useCallback((name) => {
     if (sid) void switchSessionModel(name);
     else void selectHomeModel(name);
   }, [selectHomeModel, sid, switchSessionModel]);
@@ -2084,7 +2083,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     }
   }, [api, onPermissionModeChanged, permissionMode, permissionSwitching, sid]);
 
-  const changeStatusBarPermissionMode = useCallback((mode) => {
+  const changeComposerPermissionMode = useCallback((mode) => {
     if (sid) void switchPermissionMode(mode);
     else void switchHomeDefaultPermissionMode(mode);
   }, [sid, switchHomeDefaultPermissionMode, switchPermissionMode]);
@@ -2369,8 +2368,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const currentModelLabel = modelDisplayLabel(modelState, currentModelFallback);
   const currentModelName = modelSelectValue(modelState, pendingModelName);
   const homeModelFallback = !homeModelName && modelListEmptyLoaded ? noModelLabel : (homeModelName || '加载中');
+  const selectedHomeModel = modelOptions.find((option) => option.name === homeModelName);
   const homeModelLabel = modelDisplayLabel(
-    modelOptions.find((option) => option.name === homeModelName) || (homeModelName ? { name: homeModelName } : null),
+    selectedHomeModel || (homeModelName ? { name: homeModelName } : null),
     homeModelFallback,
   );
   const currentContextWindow = Number(modelState?.contextWindow || ref?.context_window || ref?.contextWindow || 0) || 0;
@@ -2378,6 +2378,11 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     usage: tokenUsage,
     contextWindow: currentContextWindow,
   }), [currentContextWindow, tokenUsage]);
+  const homeContextWindow = Number(selectedHomeModel?.contextWindow || 0) || 0;
+  const homeTokenBudget = useMemo(() => normalizeTokenBudget({
+    usage: null,
+    contextWindow: homeContextWindow,
+  }), [homeContextWindow]);
   const displayedModelOptions = useMemo(() => {
     const currentName = selectedModelName(modelState);
     if (!currentName || modelOptions.some((m) => m.name === currentName)) return modelOptions;
@@ -2815,6 +2820,20 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
                 disabled={!!questionForView || homeSubmitting}
                 placeholder="向 ACECode 描述任务，或输入 / 命令..."
                 {...composerInputProps}
+                sessionControls={{
+                  model: homeModelLabel,
+                  modelOptions,
+                  selectedModelName: homeModelName,
+                  modelLoad: homeModelLoad,
+                  modelSwitching,
+                  modelRefreshing,
+                  onModelChange: changeComposerModel,
+                  onRefreshModels: refreshSessionModels,
+                  tokenBudget: homeTokenBudget,
+                  permissionMode,
+                  permissionSwitching,
+                  onPermissionModeChange: changeComposerPermissionMode,
+                }}
               />
             </div>
             <div className="flex items-center gap-2 mr-auto ml-0">
@@ -2926,21 +2945,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
             onCreated={handleProjectCreated}
           />
         )}
-        <StatusBar
-          model={homeModelLabel}
-          turns={0}
-          branch={health?.branch || ''}
-          modelOptions={modelOptions}
-          selectedModelName={homeModelName}
-          modelLoad={homeModelLoad}
-          modelSwitching={modelSwitching}
-          modelRefreshing={modelRefreshing}
-          onModelChange={changeStatusBarModel}
-          onRefreshModels={refreshSessionModels}
-          permissionMode={permissionMode}
-          permissionSwitching={permissionSwitching}
-          onPermissionModeChange={changeStatusBarPermissionMode}
-        />
       </div>
     );
   }
@@ -3414,6 +3418,20 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         {...composerInputProps}
         disabled={!!questionForView || composerSubmitting}
         placeholder={questionForView ? '请先回答上方问题…' : undefined}
+        sessionControls={{
+          model: currentModelLabel,
+          modelOptions: displayedModelOptions,
+          selectedModelName: currentModelName,
+          modelLoad: currentModelLoad,
+          modelSwitching,
+          modelRefreshing,
+          onModelChange: changeComposerModel,
+          onRefreshModels: refreshSessionModels,
+          tokenBudget,
+          permissionMode,
+          permissionSwitching,
+          onPermissionModeChange: changeComposerPermissionMode,
+        }}
       />
       <GitSessionPill
         key={`session-${sid}`}
@@ -3426,23 +3444,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
           : (ref?.worktree || null)}
         busy={busy}
         onIntentChange={handleGitPillIntentChange}
-      />
-      <StatusBar
-        model={currentModelLabel}
-        turns={turns}
-        branch={health?.branch || ''}
-        modelOptions={displayedModelOptions}
-        selectedModelName={currentModelName}
-        modelLoad={currentModelLoad}
-        modelSwitching={modelSwitching}
-        modelRefreshing={modelRefreshing}
-        onModelChange={changeStatusBarModel}
-        onRefreshModels={refreshSessionModels}
-        tokenBudget={tokenBudget}
-        goal={goal}
-        permissionMode={permissionMode}
-        permissionSwitching={permissionSwitching}
-        onPermissionModeChange={changeStatusBarPermissionMode}
       />
       </div>
       {previewPanelVisible && !previewPanelMaximized && (

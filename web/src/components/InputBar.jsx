@@ -12,6 +12,7 @@ import { clsx } from '../lib/format.js';
 import { getGoalStopControlState } from '../lib/goalControl.js';
 import { getInputBarActionState } from '../lib/inputBarState.js';
 import { FileTypeIcon, VsIcon } from './Icon.jsx';
+import { ComposerSessionControls } from './ComposerSessionControls.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { RichComposer } from './RichComposer.jsx';
 import { PathReferenceDropdown } from './PathReferenceDropdown.jsx';
@@ -111,6 +112,7 @@ export const InputBar = forwardRef(function InputBar({
   attachments = [], contexts = [], onMediaFiles, onRemoveAttachment, onAddBrowserContext, onRemoveContext,
   selectionPreview = null, onPinSelectionPreview,
   pathReferenceApi = null, cwd = '',
+  sessionControls = null,
 }, ref) {
   const isControlled = controlledValue != null;
   const [internalValue, setInternalValue] = useState('');
@@ -139,7 +141,9 @@ export const InputBar = forwardRef(function InputBar({
   const caretRestoreScheduleRef = useRef({ firstRaf: 0, secondRaf: 0, timeout: 0 });
   const isHero = variant === 'hero';
   const textareaVerticalPadding = isHero ? 16 : 12;
-  const textareaBaseHeight = LINE_HEIGHT + textareaVerticalPadding;
+  // 状态控制已经收进 composer，空输入区统一保留两行高度，整体比例与
+  // WorkBuddy 式输入框一致；最大高度仍保持原有 8 行上限。
+  const textareaBaseHeight = LINE_HEIGHT * 2 + textareaVerticalPadding;
   const textareaMaxHeight = LINE_HEIGHT * MAX_ROWS + textareaVerticalPadding;
   const attachmentItems = Array.isArray(attachments) ? attachments : [];
   const contextItems = Array.isArray(contexts) ? contexts : [];
@@ -621,6 +625,143 @@ export const InputBar = forwardRef(function InputBar({
   const actionState = getInputBarActionState({ value, disabled, busy, hasExtras });
   const stopControl = getGoalStopControlState({ goal, busy, stopping: goalStopping });
   const composerSpacingClass = isHero ? 'px-4 pt-3 pb-1 text-[14px]' : 'px-3 pt-2 pb-1 text-[13px]';
+  const hasInlineContexts = otherContextItems.length > 0 || fileAttachments.length > 0;
+  const capabilityControl = (
+    <div ref={capabilityMenuRef} className="relative shrink-0 flex items-center">
+      <button
+        type="button"
+        disabled={disabled || !hasCapabilityHandlers}
+        className="w-7 h-7 rounded-full flex items-center justify-center text-fg-mute hover:bg-surface-hi hover:text-fg disabled:opacity-50"
+        onClick={() => setCapabilityOpen((open) => !open)}
+        title="添加上下文"
+      >
+        <VsIcon name="add" size={15} />
+      </button>
+      {capabilityOpen && hasCapabilityHandlers && (
+        <div className="absolute left-0 bottom-8 z-50 w-52 py-1 rounded-lg border border-border bg-surface ace-shadow">
+          <button
+            type="button"
+            className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
+            onClick={chooseLocalContext}
+            disabled={!canChooseLocalContext}
+          >
+            <VsIcon name="openFile" size={14} />
+            <span>{nativeContextPickerAvailable ? '添加图片、文件或文件夹' : '添加图片或文件'}</span>
+          </button>
+          <button
+            type="button"
+            className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
+            onClick={addBrowser}
+            disabled={!onAddBrowserContext}
+          >
+            <VsIcon name="search" size={14} />
+            <span>浏览器</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+  const inlineContextControls = hasInlineContexts ? (
+    <>
+      {otherContextItems.map((item, index) => {
+        const key = composerContextKey(item, index);
+        const presentation = contextPresentation(item);
+        return (
+          <div
+            key={key}
+            className="group h-7 max-w-[112px] shrink-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
+            title={presentation.title}
+          >
+            <VsIcon name={presentation.icon} size={13} />
+            <span className="truncate">{presentation.label}</span>
+            <button
+              type="button"
+              className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
+              onClick={() => onRemoveContext?.(key)}
+              aria-label={presentation.removeLabel}
+            >
+              <VsIcon name="close" size={9} />
+            </button>
+          </div>
+        );
+      })}
+      {fileAttachments.map((item, index) => {
+        const context = composerAttachmentContext(item, index);
+        return (
+          <div
+            key={context.key}
+            data-desktop-attachment-id={context.id}
+            data-desktop-attachment-name={context.name}
+            data-desktop-attachment-url={context.url || undefined}
+            data-desktop-attachment-path={context.path || undefined}
+            data-desktop-attachment-preview-url={context.url || undefined}
+            data-desktop-attachment-mutable="true"
+            className="group h-7 max-w-[160px] min-w-0 shrink-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
+            title={item.name}
+          >
+            <VsIcon name="file" size={13} />
+            <span className="truncate">{item.uploading ? `${item.name || '文件'} 上传中` : (item.name || '文件')}</span>
+            <button
+              type="button"
+              className="w-4 h-4 shrink-0 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
+              onClick={() => onRemoveAttachment?.(context.key)}
+              aria-label="移除文件"
+            >
+              <VsIcon name="close" size={9} />
+            </button>
+          </div>
+        );
+      })}
+    </>
+  ) : null;
+  const submitControls = (
+    <>
+      {stopControl.visible && (
+        <button
+          type="button"
+          onClick={onAbort}
+          disabled={stopControl.disabled}
+          className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition flex items-center gap-1 disabled:opacity-50 disabled:cursor-wait"
+          title={stopControl.title}
+        >
+          <VsIcon name="stop" size={12} mono={false} />
+          <span>{stopControl.label}</span>
+        </button>
+      )}
+      {busy ? (
+        <button
+          type="button"
+          onClick={submit}
+          disabled={!actionState.canSubmit}
+          className={clsx(
+            'px-2 h-7 rounded-md text-[11px] transition flex items-center gap-1',
+            actionState.canSubmit
+              ? 'bg-accent text-white hover:opacity-90'
+              : 'bg-surface-hi text-fg-mute cursor-default',
+          )}
+          title={actionState.submitTitle}
+        >
+          <VsIcon name="send" size={12} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
+          <span>{actionState.submitLabel}</span>
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={submit}
+          disabled={!actionState.canSubmit}
+          className={clsx(
+            'w-7 h-7 rounded-full flex items-center justify-center transition',
+            actionState.canSubmit
+              ? 'bg-accent text-white hover:opacity-90'
+              : 'bg-surface-hi text-fg-mute cursor-default',
+          )}
+          title={actionState.submitTitle}
+        >
+          <VsIcon name="send" size={14} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
+        </button>
+      )}
+    </>
+  );
 
   return (
     <div className={clsx(
@@ -634,7 +775,7 @@ export const InputBar = forwardRef(function InputBar({
         onChange={handleFiles}
       />
       <div className={clsx(
-        'relative bg-surface border-[1.5px] border-border focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15 transition',
+        'ace-composer-card relative bg-surface border-[1.5px] border-border focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15 transition',
         isHero ? 'ace-inputbar-hero-card rounded-2xl' : 'rounded-xl',
         dragActive && 'border-accent ring-2 ring-accent/20',
       )}
@@ -757,140 +898,13 @@ export const InputBar = forwardRef(function InputBar({
             }}
           />
         </div>
-        <div className={clsx("relative flex items-center gap-1 min-w-0 overflow-visible", isHero ? "px-2.5 pb-2.5" : "px-1.5 pb-1")}>
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-visible">
-            <div ref={capabilityMenuRef} className="relative shrink-0 flex items-center">
-              <button
-                type="button"
-                disabled={disabled || !hasCapabilityHandlers}
-                className="w-7 h-7 rounded-full flex items-center justify-center text-fg-mute hover:bg-surface-hi hover:text-fg disabled:opacity-50"
-                onClick={() => setCapabilityOpen((open) => !open)}
-                title="添加上下文"
-              >
-                <VsIcon name="add" size={15} />
-              </button>
-              {capabilityOpen && hasCapabilityHandlers && (
-                <div className="absolute left-0 bottom-8 z-50 w-52 py-1 rounded-lg border border-border bg-surface ace-shadow">
-                  <button
-                    type="button"
-                    className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
-                    onClick={chooseLocalContext}
-                    disabled={!canChooseLocalContext}
-                  >
-                    <VsIcon name="openFile" size={14} />
-                    <span>{nativeContextPickerAvailable ? '添加图片、文件或文件夹' : '添加图片或文件'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="w-full h-8 px-2 flex items-center gap-2 text-left text-[13px] text-fg hover:bg-surface-hi disabled:opacity-50"
-                    onClick={addBrowser}
-                    disabled={!onAddBrowserContext}
-                  >
-                    <VsIcon name="search" size={14} />
-                    <span>浏览器</span>
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
-              {otherContextItems.map((item, index) => {
-                const key = composerContextKey(item, index);
-                const presentation = contextPresentation(item);
-                return (
-                  <div
-                    key={key}
-                    className="group h-7 max-w-[112px] shrink-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
-                    title={presentation.title}
-                  >
-                    <VsIcon name={presentation.icon} size={13} />
-                    <span className="truncate">{presentation.label}</span>
-                    <button
-                      type="button"
-                      className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
-                      onClick={() => onRemoveContext?.(key)}
-                      aria-label={presentation.removeLabel}
-                    >
-                      <VsIcon name="close" size={9} />
-                    </button>
-                  </div>
-                );
-              })}
-              {fileAttachments.map((item, index) => {
-                const context = composerAttachmentContext(item, index);
-                return (
-                  <div
-                    key={context.key}
-                    data-desktop-attachment-id={context.id}
-                    data-desktop-attachment-name={context.name}
-                    data-desktop-attachment-url={context.url || undefined}
-                    data-desktop-attachment-path={context.path || undefined}
-                    data-desktop-attachment-preview-url={context.url || undefined}
-                    data-desktop-attachment-mutable="true"
-                    className="group h-7 max-w-[160px] min-w-0 rounded-md px-1.5 flex items-center gap-1 text-[12px] text-fg-mute hover:bg-surface-hi"
-                    title={item.name}
-                  >
-                    <VsIcon name="file" size={13} />
-                    <span className="truncate">{item.uploading ? `${item.name || '文件'} 上传中` : (item.name || '文件')}</span>
-                    <button
-                      type="button"
-                      className="w-4 h-4 shrink-0 rounded-full flex items-center justify-center hover:bg-bg text-fg-mute opacity-0 group-hover:opacity-100 focus:opacity-100"
-                      onClick={() => onRemoveAttachment?.(context.key)}
-                      aria-label="移除文件"
-                    >
-                      <VsIcon name="close" size={9} />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            {stopControl.visible && (
-              <button
-                type="button"
-                onClick={onAbort}
-                disabled={stopControl.disabled}
-                className="px-2 h-7 rounded-md text-[11px] text-danger border border-danger/40 hover:bg-danger-bg transition flex items-center gap-1 disabled:opacity-50 disabled:cursor-wait"
-                title={stopControl.title}
-              >
-                <VsIcon name="stop" size={12} mono={false} />
-                <span>{stopControl.label}</span>
-              </button>
-            )}
-            {busy ? (
-              <button
-                type="button"
-                onClick={submit}
-                disabled={!actionState.canSubmit}
-                className={clsx(
-                  'px-2 h-7 rounded-md text-[11px] transition flex items-center gap-1',
-                  actionState.canSubmit
-                    ? 'bg-accent text-white hover:opacity-90'
-                    : 'bg-surface-hi text-fg-mute cursor-default',
-                )}
-                title={actionState.submitTitle}
-              >
-                <VsIcon name="send" size={12} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
-                <span>{actionState.submitLabel}</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={submit}
-                disabled={!actionState.canSubmit}
-                className={clsx(
-                  'w-7 h-7 rounded-full flex items-center justify-center transition',
-                  actionState.canSubmit
-                    ? 'bg-accent text-white hover:opacity-90'
-                    : 'bg-surface-hi text-fg-mute cursor-default',
-                )}
-                title={actionState.submitTitle}
-              >
-                <VsIcon name="send" size={14} mono={false} className={actionState.canSubmit ? 'ace-icon-on-accent' : ''} />
-              </button>
-            )}
-          </div>
-        </div>
+        <ComposerSessionControls
+          {...(sessionControls || {})}
+          className={isHero ? 'px-2.5 pb-2.5' : 'px-1.5 pb-1'}
+          addControl={capabilityControl}
+          contexts={inlineContextControls}
+          actions={submitControls}
+        />
       </div>
       <ImageLightbox preview={attachmentPreview} onClose={() => setAttachmentPreview(null)} />
     </div>
