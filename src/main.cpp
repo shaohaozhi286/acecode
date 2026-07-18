@@ -4167,18 +4167,23 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                    thinking_now - animation_origin).count());
 
         // smooth-tui-thinking-animation:短语和固定三个点共用一条基于真实
-        // elapsed time 的流光。80ms 相邻帧只移动约 0.36 cell,再用颜色插值
-        // 补出亚字符过渡;漏帧时下一帧直接回到正确 phase,不会越跑越慢。
+        // elapsed time 的方向性流光。黄色尾迹接亮白核心,前沿自然回落到灰色;
+        // 60ms 相邻帧只移动约 0.405 cell,漏帧时也会直接回到正确 phase。
         const std::vector<std::string> thinking_glyphs =
             ftxui::Utf8ToGlyphs(state.current_thinking_phrase + "...");
         const auto animation_frame = tui::make_thinking_animation_frame(
             thinking_glyphs.size(), animation_elapsed_ms);
         Elements chars;
         for (std::size_t i = 0; i < thinking_glyphs.size(); ++i) {
-            const Color glyph_color = Color::Interpolate(
-                animation_frame.glyph_highlights[i],
+            const auto& highlight = animation_frame.glyph_highlights[i];
+            const Color warm_color = Color::Interpolate(
+                highlight.warm,
                 tui::theme().ui.text_dim,
                 tui::theme().ui.accent);
+            const Color glyph_color = Color::Interpolate(
+                highlight.white,
+                warm_color,
+                Color::White);
             chars.push_back(text(thinking_glyphs[i]) | color(glyph_color));
         }
 

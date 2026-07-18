@@ -19,7 +19,7 @@ using acecode::tui::make_thinking_animation_frame;
 using acecode::tui::select_animation_frame_interval_ms;
 
 // 触发场景:共享 ticker 在拖动、旧终端、现代 thinking 与空闲状态间选择节奏。
-// 期望行为:拖动优先级最高;旧终端保持 1s;只有可见 thinking 使用 80ms。
+// 期望行为:拖动优先级最高;旧终端保持 1s;只有可见 thinking 使用 60ms。
 TEST(ThinkingAnimationCadence, SelectsActiveOnlyIntervalWithStablePriority) {
     EXPECT_EQ(select_animation_frame_interval_ms(false, true, true),
               kDragAutoscrollFrameMs);
@@ -31,29 +31,37 @@ TEST(ThinkingAnimationCadence, SelectsActiveOnlyIntervalWithStablePriority) {
               kDefaultAnimationFrameMs);
 
     EXPECT_EQ(kDragAutoscrollFrameMs, 50);
-    EXPECT_EQ(kThinkingAnimationFrameMs, 80);
+    EXPECT_EQ(kThinkingAnimationFrameMs, 60);
     EXPECT_EQ(kDefaultAnimationFrameMs, 300);
     EXPECT_EQ(kConhostAnimationFrameMs, 1000);
 }
 
-// 触发场景:为短语和固定三个点生成一帧流光权重。
-// 期望行为:每个 glyph 都有一个可直接用于颜色插值的 [0,1] 权重。
-TEST(ThinkingAnimationFrame, ProducesOneBoundedWeightPerGlyph) {
+// 触发场景:为短语和固定三个点生成一帧双色流光权重。
+// 期望行为:每个 glyph 都有一组可用于两段颜色插值的 [0,1] 权重。
+TEST(ThinkingAnimationFrame, ProducesBoundedWarmAndWhiteWeightsPerGlyph) {
     const auto frame = make_thinking_animation_frame(9, 640);
     ASSERT_EQ(frame.glyph_highlights.size(), 9u);
-    for (float weight : frame.glyph_highlights) {
-        EXPECT_GE(weight, 0.0f);
-        EXPECT_LE(weight, 1.0f);
+    float peak_warm = 0.0f;
+    float peak_white = 0.0f;
+    for (const auto& highlight : frame.glyph_highlights) {
+        EXPECT_GE(highlight.warm, 0.0f);
+        EXPECT_LE(highlight.warm, 1.0f);
+        EXPECT_GE(highlight.white, 0.0f);
+        EXPECT_LE(highlight.white, 1.0f);
+        peak_warm = std::max(peak_warm, highlight.warm);
+        peak_white = std::max(peak_white, highlight.white);
     }
-    EXPECT_GT(*std::max_element(frame.glyph_highlights.begin(),
-                                frame.glyph_highlights.end()),
-              0.8f);
+    EXPECT_GT(peak_warm, 0.8f);
+    EXPECT_GT(peak_white, 0.8f);
 }
 
-// 触发场景:相邻两帧相隔产品设定的 80ms。
-// 期望行为:高光中心只移动 0.36 个 cell,多个 glyph 的中间亮度随之渐变,
+// 触发场景:相邻两帧相隔产品设定的 60ms。
+// 期望行为:速度从 4.5 精确增加 50% 到 6.75 cells/s,高光中心每帧
+// 只移动 0.405 个 cell,多个 glyph 的中间亮度随之渐变,
 // 而不是直接从一个整字符跳到下一个整字符。
 TEST(ThinkingAnimationFrame, AdjacentFramesInterpolateSubcellMovement) {
+    EXPECT_DOUBLE_EQ(kThinkingShimmerCellsPerSecond, 4.5 * 1.5);
+
     const auto first = make_thinking_animation_frame(12, 500);
     const auto next = make_thinking_animation_frame(
         12, 500 + kThinkingAnimationFrameMs);
@@ -66,17 +74,40 @@ TEST(ThinkingAnimationFrame, AdjacentFramesInterpolateSubcellMovement) {
     int meaningfully_changed = 0;
     int intermediate_weights = 0;
     for (std::size_t i = 0; i < first.glyph_highlights.size(); ++i) {
-        if (std::abs(next.glyph_highlights[i] -
-                     first.glyph_highlights[i]) > 0.02f) {
+        const auto& first_highlight = first.glyph_highlights[i];
+        const auto& next_highlight = next.glyph_highlights[i];
+        if (std::abs(next_highlight.warm - first_highlight.warm) > 0.02f ||
+            std::abs(next_highlight.white - first_highlight.white) > 0.02f) {
             ++meaningfully_changed;
         }
-        if (next.glyph_highlights[i] > 0.05f &&
-            next.glyph_highlights[i] < 0.95f) {
+        if ((next_highlight.warm > 0.05f &&
+             next_highlight.warm < 0.95f) ||
+            (next_highlight.white > 0.05f &&
+             next_highlight.white < 0.95f)) {
             ++intermediate_weights;
         }
     }
     EXPECT_GE(meaningfully_changed, 2);
     EXPECT_GE(intermediate_weights, 2);
+}
+
+// 触发场景:流光核心落在一个整 glyph 上,观察移动方向前后的权重。
+// 期望行为:左侧尾迹以黄色为主,核心达到亮白,右侧前沿快速回落到灰色。
+TEST(ThinkingAnimationFrame, OrdersWarmTrailWhiteCoreAndGrayLeadingEdge) {
+    const auto frame = make_thinking_animation_frame(9, 963);
+    ASSERT_EQ(frame.glyph_highlights.size(), 9u);
+    EXPECT_NEAR(frame.highlight_center, 4.0, 0.001);
+
+    const auto& warm_trail = frame.glyph_highlights[3];
+    const auto& white_core = frame.glyph_highlights[4];
+    const auto& gray_leading_edge = frame.glyph_highlights[6];
+
+    EXPECT_GT(warm_trail.warm, 0.9f);
+    EXPECT_LT(warm_trail.white, 0.3f);
+    EXPECT_GT(white_core.white, 0.99f);
+    EXPECT_GT(white_core.white, white_core.warm);
+    EXPECT_LT(gray_leading_edge.warm, 0.02f);
+    EXPECT_LT(gray_leading_edge.white, 0.02f);
 }
 
 // 触发场景:中间若干 redraw 被调度器跳过,随后直接请求当前时间的一帧。
@@ -88,13 +119,20 @@ TEST(ThinkingAnimationFrame, ElapsedTimestampIsDeterministicAcrossSkippedFrames)
     const auto after_skips = make_thinking_animation_frame(10, 1370);
 
     EXPECT_DOUBLE_EQ(after_skips.highlight_center, direct.highlight_center);
-    EXPECT_EQ(after_skips.glyph_highlights, direct.glyph_highlights);
+    ASSERT_EQ(after_skips.glyph_highlights.size(),
+              direct.glyph_highlights.size());
+    for (std::size_t i = 0; i < direct.glyph_highlights.size(); ++i) {
+        EXPECT_FLOAT_EQ(after_skips.glyph_highlights[i].warm,
+                        direct.glyph_highlights[i].warm);
+        EXPECT_FLOAT_EQ(after_skips.glyph_highlights[i].white,
+                        direct.glyph_highlights[i].white);
+    }
 }
 
 // 触发场景:流光从末尾绕回开头。
-// 期望行为:中心在可见文本两侧各留 2.5 cell 的淡出区,绕回前后的
-// 最大亮度都很低且近似相等,不会从末字符硬切到首字符。
-TEST(ThinkingAnimationFrame, WrapsThroughSymmetricOffTextPadding) {
+// 期望行为:中心在可见文本两侧各留 2.5 cell 的淡出区,额外的边缘
+// 可见度包络也会压低较长的黄色尾迹,不会从末字符硬切到首字符。
+TEST(ThinkingAnimationFrame, WrapsThroughOffTextFadePadding) {
     constexpr std::size_t glyph_count = 9;
     const double cycle_cells = static_cast<double>(glyph_count - 1) +
         2.0 * kThinkingShimmerEdgePaddingCells;
@@ -106,13 +144,16 @@ TEST(ThinkingAnimationFrame, WrapsThroughSymmetricOffTextPadding) {
     const auto after_wrap = make_thinking_animation_frame(
         glyph_count, static_cast<long long>(std::ceil(cycle_ms)));
 
-    const float before_peak = *std::max_element(
-        before_wrap.glyph_highlights.begin(), before_wrap.glyph_highlights.end());
-    const float after_peak = *std::max_element(
-        after_wrap.glyph_highlights.begin(), after_wrap.glyph_highlights.end());
-    EXPECT_LT(before_peak, 0.06f);
-    EXPECT_LT(after_peak, 0.06f);
-    EXPECT_NEAR(before_peak, after_peak, 0.002f);
+    float before_peak = 0.0f;
+    float after_peak = 0.0f;
+    for (const auto& highlight : before_wrap.glyph_highlights) {
+        before_peak = std::max({before_peak, highlight.warm, highlight.white});
+    }
+    for (const auto& highlight : after_wrap.glyph_highlights) {
+        after_peak = std::max({after_peak, highlight.warm, highlight.white});
+    }
+    EXPECT_LT(before_peak, 0.03f);
+    EXPECT_LT(after_peak, 0.03f);
 }
 
 // 触发场景:空短语或防御性负 elapsed 输入。
@@ -124,5 +165,11 @@ TEST(ThinkingAnimationFrame, HandlesEmptyAndNegativeInputs) {
     const auto negative = make_thinking_animation_frame(5, -100);
     const auto zero = make_thinking_animation_frame(5, 0);
     EXPECT_DOUBLE_EQ(negative.highlight_center, zero.highlight_center);
-    EXPECT_EQ(negative.glyph_highlights, zero.glyph_highlights);
+    ASSERT_EQ(negative.glyph_highlights.size(), zero.glyph_highlights.size());
+    for (std::size_t i = 0; i < zero.glyph_highlights.size(); ++i) {
+        EXPECT_FLOAT_EQ(negative.glyph_highlights[i].warm,
+                        zero.glyph_highlights[i].warm);
+        EXPECT_FLOAT_EQ(negative.glyph_highlights[i].white,
+                        zero.glyph_highlights[i].white);
+    }
 }
