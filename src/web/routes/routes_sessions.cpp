@@ -54,6 +54,235 @@ struct UserMessageSearchScope {
 
 } // namespace
 
+ParsedSessionUserInputRequest
+WebServer::Impl::parse_session_user_input_request(
+    const std::string& body,
+    const std::string& session_id,
+    bool allow_worktree) {
+    ParsedSessionUserInputRequest result;
+    std::string text;
+    std::string client_message_id;
+    json attachment_refs = json::array();
+    json contexts = json::array();
+
+    try {
+        auto payload = json::parse(body);
+        if (!payload.is_object()) {
+            result.error = "request body must be an object";
+            return result;
+        }
+        if (payload.contains("text") && payload["text"].is_string()) {
+            text = payload["text"].get<std::string>();
+        }
+        if (payload.contains("attachments") &&
+            payload["attachments"].is_array()) {
+            attachment_refs = payload["attachments"];
+        }
+        if (payload.contains("contexts") && payload["contexts"].is_array()) {
+            contexts = payload["contexts"];
+        }
+        if (payload.contains("client_message_id") &&
+            payload["client_message_id"].is_string()) {
+            const auto candidate =
+                payload["client_message_id"].get<std::string>();
+            if (!candidate.empty() && candidate.size() <= 256) {
+                client_message_id = candidate;
+            }
+        }
+        if (payload.contains("expected_turn_id") &&
+            payload["expected_turn_id"].is_string()) {
+            result.expected_turn_id =
+                payload["expected_turn_id"].get<std::string>();
+        }
+        if (payload.contains("worktree") &&
+            payload["worktree"].is_object()) {
+            const auto& worktree = payload["worktree"];
+            if (worktree.contains("create") &&
+                worktree["create"].is_boolean()) {
+                result.worktree_create = worktree["create"].get<bool>();
+            }
+            if (worktree.contains("base") &&
+                worktree["base"].is_string()) {
+                result.worktree_base = worktree["base"].get<std::string>();
+            }
+        }
+    } catch (const std::exception& e) {
+        result.error = std::string("bad json: ") + e.what();
+        return result;
+    }
+
+    if (result.worktree_create && !allow_worktree) {
+        result.error = "worktree creation is not allowed for turn steering";
+        return result;
+    }
+    if (text.empty() && attachment_refs.empty() && contexts.empty()) {
+        result.error = "text or attachment required";
+        return result;
+    }
+
+    // Worktree intent belongs to the ordinary first-message transaction and
+    // must apply before command expansion or attachment lookup so all later
+    // resolution observes the final session cwd.
+    if (result.worktree_create) {
+        if (!deps.session_registry) {
+            result.status = 503;
+            result.error = "session registry unavailable";
+            return result;
+        }
+        auto worktree = deps.session_registry->enter_worktree_for_web(
+            session_id, result.worktree_base);
+        if (!worktree.ok) {
+            result.status = worktree.http_status;
+            result.error = worktree.error;
+            return result;
+        }
+    }
+
+    std::string original_text = text;
+    bool expanded = false;
+    SelectionPromptContext selection_context =
+        build_selection_prompt_context(contexts);
+    const bool selection_expanded = !selection_context.prompt.empty();
+
+    if (attachment_refs.empty() && contexts.empty() &&
+        deps.session_registry && deps.app_config) {
+        if (auto entry = deps.session_registry->acquire(session_id)) {
+            if (!entry->cwd.empty()) {
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                auto command = web::try_expand_opencode_command(
+                    text, *deps.app_config, entry->cwd);
+                if (command.expanded) {
+                    text = std::move(command.text);
+                    expanded = true;
+                }
+            }
+        }
+    }
+    if (!expanded && attachment_refs.empty() && contexts.empty() &&
+        deps.session_registry && deps.app_config) {
+        if (auto entry = deps.session_registry->acquire(session_id)) {
+            if (!entry->cwd.empty()) {
+                SkillRegistry skills;
+                std::lock_guard<std::mutex> config_lock(app_config_mu);
+                initialize_skill_registry(
+                    skills, *deps.app_config, entry->cwd);
+                auto skill = web::try_expand_skill_command(text, skills);
+                if (skill.expanded) {
+                    text = std::move(skill.text);
+                    expanded = true;
+                }
+            }
+        }
+    }
+    if (selection_expanded) {
+        text = build_selection_augmented_prompt(
+            selection_context, original_text);
+    }
+
+    result.input.text = text;
+    if (expanded || selection_expanded) {
+        result.input.display_text = original_text;
+    }
+    if (!client_message_id.empty()) {
+        result.input.metadata["client_message_id"] = client_message_id;
+    }
+
+    if (!attachment_refs.empty() || !contexts.empty()) {
+        if (!deps.session_registry) {
+            result.status = 503;
+            result.error = "session registry unavailable";
+            return result;
+        }
+        auto entry = deps.session_registry->acquire(session_id);
+        if (!entry) {
+            result.status = 404;
+            result.error = "unknown session";
+            return result;
+        }
+
+        json parts = json::array();
+        if (!text.empty()) {
+            parts.push_back(json{{"type", "text"}, {"text", text}});
+        }
+
+        json attachment_meta = json::array();
+        const std::string project_dir =
+            SessionStorage::get_project_dir(entry->cwd);
+        for (const auto& ref : attachment_refs) {
+            std::string attachment_id;
+            if (ref.is_string()) {
+                attachment_id = ref.get<std::string>();
+            } else if (ref.is_object() && ref.contains("id") &&
+                       ref["id"].is_string()) {
+                attachment_id = ref["id"].get<std::string>();
+            }
+            if (attachment_id.empty()) {
+                result.error = "attachment id required";
+                return result;
+            }
+
+            std::string error;
+            auto record =
+                load_attachment(project_dir, session_id, attachment_id, &error);
+            if (!record.has_value()) {
+                result.status = 404;
+                result.error =
+                    error.empty() ? "attachment not found" : error;
+                return result;
+            }
+
+            json metadata = attachment_to_json(*record);
+            attachment_meta.push_back(metadata);
+            const std::string part_kind = attachment_kind_for_mime(
+                record->mime_type, record->name);
+            parts.push_back(json{
+                {"type", part_kind == "image" ? "image" : "file"},
+                {"attachment", std::move(metadata)},
+            });
+        }
+
+        json context_meta = json::array();
+        for (const auto& context : contexts) {
+            if (!context.is_object()) continue;
+            if (json_string_field(context, "type") == "selection") {
+                auto metadata = sanitized_selection_context_meta(context);
+                if (!metadata.has_value()) continue;
+                context_meta.push_back(*metadata);
+                parts.push_back(json{
+                    {"type", "selection_context"},
+                    {"context", *metadata},
+                });
+            } else {
+                context_meta.push_back(context);
+                parts.push_back(json{
+                    {"type", "browser_context"},
+                    {"context", context},
+                });
+            }
+        }
+
+        result.input.content_parts = std::move(parts);
+        if (!result.input.metadata.is_object()) {
+            result.input.metadata = json::object();
+        }
+        if (!attachment_meta.empty()) {
+            result.input.metadata["attachments"] =
+                std::move(attachment_meta);
+        }
+        if (!context_meta.empty()) {
+            result.input.metadata["contexts"] = std::move(context_meta);
+        }
+        if (selection_expanded) {
+            result.input.metadata["selection_context_expanded"] = true;
+            result.input.metadata["display_text"] = original_text;
+        }
+    }
+
+    result.ok = true;
+    result.status = 200;
+    return result;
+}
+
 void WebServer::Impl::register_sessions() {
         CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
@@ -68,6 +297,10 @@ void WebServer::Impl::register_sessions() {
             return cors_preflight(req);
         });
         CROW_ROUTE(app, "/api/sessions/<string>/messages").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req, const std::string&) {
+            return cors_preflight(req);
+        });
+        CROW_ROUTE(app, "/api/sessions/<string>/turn/steer").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req, const std::string&) {
             return cors_preflight(req);
         });
@@ -735,204 +968,16 @@ void WebServer::Impl::register_sessions() {
                 return with_cors(req, std::move(r));
             }
 
-            std::string text;
-            std::string client_message_id;
-            json attachment_refs = json::array();
-            json contexts = json::array();
-            bool worktree_create = false;
-            std::string worktree_base;
-            try {
-                auto j = json::parse(req.body);
-                if (j.contains("text") && j["text"].is_string()) {
-                    text = j["text"].get<std::string>();
-                }
-                if (j.contains("attachments") && j["attachments"].is_array()) {
-                    attachment_refs = j["attachments"];
-                }
-                if (j.contains("contexts") && j["contexts"].is_array()) {
-                    contexts = j["contexts"];
-                }
-                if (j.contains("client_message_id") && j["client_message_id"].is_string()) {
-                    const auto candidate = j["client_message_id"].get<std::string>();
-                    if (!candidate.empty() && candidate.size() <= 256) {
-                        client_message_id = candidate;
-                    }
-                }
-                // 首条消息的 worktree 意图(openspec add-webui-git-session-pill):
-                // {create:true, base:"<branch>"}。随消息原子处理,避免"先建
-                // worktree 再发消息"两次往返的中间态。
-                if (j.contains("worktree") && j["worktree"].is_object()) {
-                    const auto& wt = j["worktree"];
-                    if (wt.contains("create") && wt["create"].is_boolean())
-                        worktree_create = wt["create"].get<bool>();
-                    if (wt.contains("base") && wt["base"].is_string())
-                        worktree_base = wt["base"].get<std::string>();
-                }
-            } catch (const std::exception& e) {
-                crow::response r(400);
-                r.body = json{{"error", std::string("bad json: ") + e.what()}}.dump();
-                r.add_header("Content-Type", "application/json");
-                return with_cors(req, std::move(r));
-            }
-            if (text.empty() && attachment_refs.empty() && contexts.empty()) {
-                crow::response r(400);
-                r.body = R"({"error":"text or attachment required"})";
+            auto parsed = parse_session_user_input_request(
+                req.body, id, /*allow_worktree=*/true);
+            if (!parsed.ok) {
+                crow::response r(parsed.status);
+                r.body = json{{"error", parsed.error}}.dump();
                 r.add_header("Content-Type", "application/json");
                 return with_cors(req, std::move(r));
             }
 
-            // worktree 前置步骤:失败则整个请求失败,消息不入队(用户的
-            // 隔离意图落空后静默跑在主仓里是惊吓)。
-            if (worktree_create) {
-                if (!deps.session_registry) {
-                    crow::response r(503);
-                    r.body = R"({"error":"session registry unavailable"})";
-                    r.add_header("Content-Type", "application/json");
-                    return with_cors(req, std::move(r));
-                }
-                auto wt_result = deps.session_registry->enter_worktree_for_web(
-                    id, worktree_base);
-                if (!wt_result.ok) {
-                    crow::response r(wt_result.http_status);
-                    r.body = json{{"error", wt_result.error}}.dump();
-                    r.add_header("Content-Type", "application/json");
-                    return with_cors(req, std::move(r));
-                }
-            }
-
-            // Daemon 端 slash expansion。opencode markdown commands 优先于
-            // skill(但 builtin 已由前端/commands endpoint 走专门路径),命中后
-            // UI 仍显示原文(走 metadata.display_text)。
-            std::string original_text = text;
-            bool expanded = false;
-            SelectionPromptContext selection_context = build_selection_prompt_context(contexts);
-            const bool selection_expanded = !selection_context.prompt.empty();
-            if (attachment_refs.empty() && contexts.empty() &&
-                deps.session_registry && deps.app_config) {
-                if (auto entry = deps.session_registry->acquire(id)) {
-                    if (!entry->cwd.empty()) {
-                        std::lock_guard<std::mutex> config_lock(app_config_mu);
-                        auto cmd_exp = web::try_expand_opencode_command(
-                            text, *deps.app_config, entry->cwd);
-                        if (cmd_exp.expanded) {
-                            text = std::move(cmd_exp.text);
-                            expanded = true;
-                        }
-                    }
-                }
-            }
-            if (!expanded && attachment_refs.empty() && contexts.empty() &&
-                deps.session_registry && deps.app_config) {
-                if (auto entry = deps.session_registry->acquire(id)) {
-                    if (!entry->cwd.empty()) {
-                        SkillRegistry tmp_skills;
-                        std::lock_guard<std::mutex> config_lock(app_config_mu);
-                        initialize_skill_registry(tmp_skills, *deps.app_config, entry->cwd);
-                        auto exp = web::try_expand_skill_command(text, tmp_skills);
-                        if (exp.expanded) {
-                            text = std::move(exp.text);
-                            expanded = true;
-                        }
-                    }
-                }
-            }
-            if (selection_expanded) {
-                text = build_selection_augmented_prompt(selection_context, original_text);
-            }
-
-            UserInput input;
-            input.text = text;
-            if (expanded || selection_expanded) input.display_text = original_text;
-            if (!client_message_id.empty()) {
-                input.metadata["client_message_id"] = client_message_id;
-            }
-
-            if (!attachment_refs.empty() || !contexts.empty()) {
-                if (!deps.session_registry) {
-                    crow::response r(503);
-                    r.body = R"({"error":"session registry unavailable"})";
-                    r.add_header("Content-Type", "application/json");
-                    return with_cors(req, std::move(r));
-                }
-                auto entry = deps.session_registry->acquire(id);
-                if (!entry) {
-                    crow::response r(404);
-                    r.body = R"({"error":"unknown session"})";
-                    r.add_header("Content-Type", "application/json");
-                    return with_cors(req, std::move(r));
-                }
-
-                json parts = json::array();
-                if (!text.empty()) {
-                    parts.push_back(json{{"type", "text"}, {"text", text}});
-                }
-
-                json attachment_meta = json::array();
-                const std::string project_dir = SessionStorage::get_project_dir(entry->cwd);
-                for (const auto& ref : attachment_refs) {
-                    std::string attachment_id;
-                    if (ref.is_string()) {
-                        attachment_id = ref.get<std::string>();
-                    } else if (ref.is_object() && ref.contains("id") && ref["id"].is_string()) {
-                        attachment_id = ref["id"].get<std::string>();
-                    }
-                    if (attachment_id.empty()) {
-                        crow::response r(400);
-                        r.body = R"({"error":"attachment id required"})";
-                        r.add_header("Content-Type", "application/json");
-                        return with_cors(req, std::move(r));
-                    }
-
-                    std::string error;
-                    auto record = load_attachment(project_dir, id, attachment_id, &error);
-                    if (!record.has_value()) {
-                        crow::response r(404);
-                        r.body = json{{"error", error.empty() ? "attachment not found" : error}}.dump();
-                        r.add_header("Content-Type", "application/json");
-                        return with_cors(req, std::move(r));
-                    }
-
-                    json meta = attachment_to_json(*record);
-                    attachment_meta.push_back(meta);
-                    // 按 MIME + 文件名重新分类(route-attachments-by-capability 1.7),
-                    // 不直接信持久化 kind:SVG 等非视觉媒体归 file,避免误走图片 part。
-                    const std::string part_kind =
-                        attachment_kind_for_mime(record->mime_type, record->name);
-                    parts.push_back(json{
-                        {"type", part_kind == "image" ? "image" : "file"},
-                        {"attachment", std::move(meta)},
-                    });
-                }
-
-                json context_meta = json::array();
-                for (const auto& ctx : contexts) {
-                    if (!ctx.is_object()) continue;
-                    if (json_string_field(ctx, "type") == "selection") {
-                        auto meta = sanitized_selection_context_meta(ctx);
-                        if (!meta.has_value()) continue;
-                        context_meta.push_back(*meta);
-                        parts.push_back(json{{"type", "selection_context"}, {"context", *meta}});
-                    } else {
-                        context_meta.push_back(ctx);
-                        parts.push_back(json{{"type", "browser_context"}, {"context", ctx}});
-                    }
-                }
-
-                input.content_parts = std::move(parts);
-                if (!input.metadata.is_object()) input.metadata = json::object();
-                if (!attachment_meta.empty()) {
-                    input.metadata["attachments"] = std::move(attachment_meta);
-                }
-                if (!context_meta.empty()) {
-                    input.metadata["contexts"] = std::move(context_meta);
-                }
-                if (selection_expanded) {
-                    input.metadata["selection_context_expanded"] = true;
-                    input.metadata["display_text"] = original_text;
-                }
-            }
-
-            bool ok = deps.session_client->send_input(id, input);
+            bool ok = deps.session_client->send_input(id, parsed.input);
             if (!ok) {
                 crow::response r(404);
                 r.body = R"({"error":"unknown session"})";
@@ -944,6 +989,113 @@ void WebServer::Impl::register_sessions() {
             r.body = R"({"queued":true})";
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
+        });
+
+        // POST /api/sessions/:id/turn/steer: append structured input to the
+        // matching active regular turn. Acceptance is not transcript commit;
+        // the normal user message event carrying client_message_id is the
+        // durable acknowledgement.
+        CROW_ROUTE(app, "/api/sessions/<string>/turn/steer").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req, const std::string& id) {
+            if (auto rejection = require_auth(req)) {
+                return std::move(*rejection);
+            }
+            if (!deps.session_client) {
+                crow::response response(503);
+                response.body = json{
+                    {"error", "SESSION_CLIENT_UNAVAILABLE"},
+                    {"message", "session client unavailable"},
+                }.dump();
+                response.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(response));
+            }
+
+            auto parsed = parse_session_user_input_request(
+                req.body, id, /*allow_worktree=*/false);
+            if (!parsed.ok) {
+                crow::response response(parsed.status);
+                const bool unknown_session =
+                    parsed.status == 404 &&
+                    parsed.error == "unknown session";
+                response.body = json{
+                    {"error", unknown_session
+                        ? "UNKNOWN_SESSION"
+                        : "INVALID_TURN_INPUT"},
+                    {"message", parsed.error},
+                }.dump();
+                response.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(response));
+            }
+            if (parsed.expected_turn_id.empty()) {
+                crow::response response(400);
+                response.body = json{
+                    {"error", "EXPECTED_TURN_ID_REQUIRED"},
+                    {"message", "expected_turn_id is required"},
+                }.dump();
+                response.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(response));
+            }
+
+            const auto result = deps.session_client->steer_input(
+                id, parsed.expected_turn_id, parsed.input);
+            int status = 409;
+            std::string code;
+            switch (result.status) {
+            case TurnSteerStatus::Accepted:
+                status = 202;
+                break;
+            case TurnSteerStatus::InvalidInput:
+                status = 400;
+                code = "INVALID_TURN_INPUT";
+                break;
+            case TurnSteerStatus::UnknownSession:
+                status = 404;
+                code = "UNKNOWN_SESSION";
+                break;
+            case TurnSteerStatus::NoActiveTurn:
+                code = "NO_ACTIVE_TURN";
+                break;
+            case TurnSteerStatus::NonSteerable:
+                code = "TURN_NOT_STEERABLE";
+                break;
+            case TurnSteerStatus::TurnMismatch:
+                code = "TURN_MISMATCH";
+                break;
+            case TurnSteerStatus::QueueFull:
+                status = 429;
+                code = "TURN_STEER_QUEUE_FULL";
+                break;
+            }
+
+            crow::response response(status);
+            if (result.accepted()) {
+                json body = {
+                    {"accepted", true},
+                    {"turn_id", result.turn_id},
+                };
+                if (parsed.input.metadata.is_object()) {
+                    const std::string client_message_id =
+                        parsed.input.metadata.value(
+                            "client_message_id", std::string{});
+                    if (!client_message_id.empty()) {
+                        body["client_message_id"] = client_message_id;
+                    }
+                }
+                response.body = body.dump();
+            } else {
+                json body = {
+                    {"error", code},
+                    {"message", result.message.empty()
+                        ? std::string(to_string(result.status))
+                        : result.message},
+                };
+                if (!result.turn_id.empty()) {
+                    body["active_turn_id"] = result.turn_id;
+                }
+                response.body = body.dump();
+            }
+            response.add_header("Content-Type", "application/json");
+            return with_cors(req, std::move(response));
         });
 
         // POST /api/sessions/:id/commands: daemon-owned builtin slash command

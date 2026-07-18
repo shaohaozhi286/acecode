@@ -115,7 +115,11 @@ export function cancelQueuedInput(state, id) {
   return setQueuedInputState(state, id, QUEUED_INPUT_STATE.CANCELLED);
 }
 
-export function beginQueuedGuidance(state, id) {
+export function beginQueuedGuidance(
+  state,
+  id,
+  { turnId = '', now = Date.now() } = {},
+) {
   return updateQueuedInput(state, id, (item) => {
     const currentState = item?.queued?.state;
     if (currentState !== QUEUED_INPUT_STATE.QUEUED &&
@@ -126,14 +130,37 @@ export function beginQueuedGuidance(state, id) {
         ...item.queued,
         state: QUEUED_INPUT_STATE.GUIDING,
         guidancePreviousState: currentState,
-        updatedAt: Date.now(),
+        steerTurnId: normalizeText(turnId),
+        acceptedAt: 0,
+        error: '',
+        updatedAt: now,
+      },
+    };
+  });
+}
+
+export function markQueuedGuidanceAccepted(
+  state,
+  id,
+  { turnId = '', now = Date.now() } = {},
+) {
+  return updateQueuedInput(state, id, (item) => {
+    if (item?.queued?.state !== QUEUED_INPUT_STATE.GUIDING) return item;
+    return {
+      ...item,
+      queued: {
+        ...item.queued,
+        steerTurnId: normalizeText(turnId) || item.queued.steerTurnId || '',
+        acceptedAt: now,
+        updatedAt: now,
+        error: '',
       },
     };
   });
 }
 
 export function finishQueuedGuidance(state, id, { succeeded = false } = {}) {
-  if (succeeded) return cancelQueuedInput(state, id);
+  if (succeeded) return markQueuedGuidanceAccepted(state, id);
   return updateQueuedInput(state, id, (item) => {
     if (item?.queued?.state !== QUEUED_INPUT_STATE.GUIDING) return item;
     const previous = item.queued.guidancePreviousState === QUEUED_INPUT_STATE.FAILED
@@ -141,8 +168,26 @@ export function finishQueuedGuidance(state, id, { succeeded = false } = {}) {
       : QUEUED_INPUT_STATE.QUEUED;
     const queued = { ...item.queued, state: previous, updatedAt: Date.now() };
     delete queued.guidancePreviousState;
+    delete queued.steerTurnId;
+    delete queued.acceptedAt;
     return { ...item, queued };
   });
+}
+
+export function restoreUncommittedGuidanceForSession(state, sessionId) {
+  const sid = normalizeSessionId(sessionId);
+  const source = state || createChatInputQueueState();
+  const guided = cloneItems(source).filter((item) => (
+    item?.queued?.sessionId === sid &&
+    item.queued.state === QUEUED_INPUT_STATE.GUIDING
+  ));
+  if (guided.length === 0) return source;
+
+  let next = source;
+  for (const item of guided) {
+    next = finishQueuedGuidance(next, item.queued.id, { succeeded: false });
+  }
+  return next;
 }
 
 export function markQueuedInputSending(state, id, { now = Date.now() } = {}) {
@@ -235,7 +280,12 @@ export function completeQueuedInputForMessage(
   const current = createChatInputQueueState(state);
   const matched = current.items.find((item) => {
     if (item?.queued?.sessionId !== sid) return false;
-    if (item.queued.state !== QUEUED_INPUT_STATE.SENDING) return false;
+    const queueState = item.queued.state;
+    if (queueState !== QUEUED_INPUT_STATE.SENDING &&
+        queueState !== QUEUED_INPUT_STATE.GUIDING) return false;
+    if (queueState === QUEUED_INPUT_STATE.GUIDING) {
+      return !!correlationId && item.queued.id === correlationId;
+    }
     if (correlationId) return item.queued.id === correlationId;
     if (normalizeText(item.content) !== text) return false;
     const sentAt = Number(item.queued.sentAt || 0);

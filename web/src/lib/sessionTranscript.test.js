@@ -392,6 +392,41 @@ run('busy done error 状态按事件更新', () => {
   assert.equal(state.items.at(-1).content, '任务已终止：boom');
 });
 
+run('active turn id 随 busy 生命周期设置并在结束时清空', () => {
+  let state = reduceTranscriptEvent(createTranscriptState(), {
+    type: 'busy_changed',
+    payload: { busy: true, turn_id: 'turn-1' },
+    seq: 1,
+  }).state;
+  assert.equal(state.busy, true);
+  assert.equal(state.activeTurnId, 'turn-1');
+
+  state = reduceTranscriptEvent(state, {
+    type: 'busy_changed',
+    payload: { busy: false, turn_id: 'turn-1' },
+    seq: 2,
+  }).state;
+  assert.equal(state.activeTurnId, '');
+});
+
+run('history runtime snapshot restores the active turn id only while busy', () => {
+  const active = loadTranscriptHistory(createTranscriptState(), {
+    messages: [],
+    events: [],
+    busy: true,
+    active_turn_id: 'turn-history',
+  }).state;
+  assert.equal(active.activeTurnId, 'turn-history');
+
+  const idle = loadTranscriptHistory(active, {
+    messages: [],
+    events: [],
+    busy: false,
+    active_turn_id: 'stale-turn',
+  }).state;
+  assert.equal(idle.activeTurnId, '');
+});
+
 run('完成通知只在 busy true→false 时发一次, trailing done 不重复', () => {
   let state = createTranscriptState();
   state = reduceTranscriptEvent(state, {

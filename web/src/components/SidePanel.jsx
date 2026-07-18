@@ -30,7 +30,13 @@ import {
   normalizeWorkspaceRelativePath,
   statusForTreeEntry,
 } from '../lib/fileTreeChangeStatus.js';
-import { fileTreeReloadPaths } from '../lib/fileTreeRefresh.js';
+import {
+  beginFileTreeDirectoryRequest,
+  fileTreeDirectoryRequestKey,
+  fileTreeReloadPaths,
+  finishFileTreeDirectoryRequest,
+  reconcileFileTreeDirectory,
+} from '../lib/fileTreeRefresh.js';
 import { clsx } from '../lib/format.js';
 import {
   SIDE_PANEL_CONTEXT_EFFECTS,
@@ -125,30 +131,81 @@ function pathAncestors(path) {
 // 又跑得更晚把刚拉的根清掉)在这个数据结构下不复存在。
 function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpandedDirs,
                     selectedPath, onPickFile, onRefreshTree, refreshToken, reviewStatusByPath }) {
-  const [loading, setLoading] = useState(new Set()); // path 集合,正在请求中
-  const [errors, setErrors]   = useState(new Map()); // path → 错误文案
+  const [loading, setLoading] = useState(new Set()); // cwd/path request key 集合
+  const [errors, setErrors]   = useState(new Map()); // cwd/path request key → 错误文案
   const treeRef = useRef(null);
+  const treeCacheRef = useRef(treeCache);
+  const inFlightRequestsRef = useRef(new Set());
+  const mountedRef = useRef(true);
+  treeCacheRef.current = treeCache;
   const selectedNormalizedPath = normalizeTreePath(selectedPath);
   const selectedParentPath = selectedNormalizedPath ? treeParentPath(selectedNormalizedPath) : '';
   const selectedParentGuideIndex = selectedParentPath
     ? selectedParentPath.split('/').filter(Boolean).length - 1
     : -1;
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const loadDir = useCallback(async (path, options = {}) => {
     const force = !!options.force;
-    if ((!force && treeCache.has(path)) || loading.has(path)) return;
-    setLoading(prev => { const n = new Set(prev); n.add(path); return n; });
+    const hasCachedEntries = treeCacheRef.current.has(path);
+    if (!force && hasCachedEntries) return;
+
+    const requestKey = beginFileTreeDirectoryRequest(inFlightRequestsRef.current, cwd, path);
+    if (requestKey === null) return;
+    if (!hasCachedEntries) {
+      setLoading((prev) => {
+        if (prev.has(requestKey)) return prev;
+        const next = new Set(prev);
+        next.add(requestKey);
+        return next;
+      });
+      setErrors((prev) => {
+        if (!prev.has(requestKey)) return prev;
+        const next = new Map(prev);
+        next.delete(requestKey);
+        return next;
+      });
+    }
+
     try {
       const entries = await api.listFiles(cwd, path);
-      setTreeCache(prev => { const n = new Map(prev); n.set(path, Array.isArray(entries) ? entries : []); return n; });
-      setErrors(prev => { const n = new Map(prev); n.delete(path); return n; });
+      setTreeCache((prev) => reconcileFileTreeDirectory(prev, path, entries));
+      if (!hasCachedEntries && mountedRef.current) {
+        setErrors((prev) => {
+          if (!prev.has(requestKey)) return prev;
+          const next = new Map(prev);
+          next.delete(requestKey);
+          return next;
+        });
+      }
     } catch (err) {
-      const msg = err instanceof ApiError ? `加载失败 (HTTP ${err.status})` : '加载失败';
-      setErrors(prev => { const n = new Map(prev); n.set(path, msg); return n; });
+      if (!hasCachedEntries && mountedRef.current) {
+        const msg = err instanceof ApiError ? `加载失败 (HTTP ${err.status})` : '加载失败';
+        setErrors((prev) => {
+          if (prev.get(requestKey) === msg) return prev;
+          const next = new Map(prev);
+          next.set(requestKey, msg);
+          return next;
+        });
+      }
     } finally {
-      setLoading(prev => { const n = new Set(prev); n.delete(path); return n; });
+      finishFileTreeDirectoryRequest(inFlightRequestsRef.current, requestKey);
+      if (!hasCachedEntries && mountedRef.current) {
+        setLoading((prev) => {
+          if (!prev.has(requestKey)) return prev;
+          const next = new Set(prev);
+          next.delete(requestKey);
+          return next;
+        });
+      }
     }
-  }, [api, cwd, treeCache, loading, setTreeCache]);
+  }, [api, cwd, setTreeCache]);
 
   // 首次 mount + cwd 变 → 拉根。refreshToken 变时不清 UI 状态,而是后台重拉
   // 根和已展开目录,避免 agent 飙字 / tool 完成时把深层目录折回初始状态。
@@ -168,13 +225,16 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
   }, [cwd, expandedDirs, loadDir]);
 
   const toggleDir = useCallback((path) => {
-    setExpandedDirs(prev => {
-      const n = new Set(prev);
-      if (n.has(path)) n.delete(path);
-      else { n.add(path); loadDir(path); }
-      return n;
+    const shouldExpand = !expandedDirs.has(path);
+    setExpandedDirs((prev) => {
+      if (prev.has(path) === shouldExpand) return prev;
+      const next = new Set(prev);
+      if (shouldExpand) next.add(path);
+      else next.delete(path);
+      return next;
     });
-  }, [loadDir, setExpandedDirs]);
+    if (shouldExpand) loadDir(path, { force: true });
+  }, [expandedDirs, loadDir, setExpandedDirs]);
 
   useEffect(() => {
     const handler = (event) => {
@@ -191,8 +251,9 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
         onRefreshTree?.();
       } else if (action === DESKTOP_CONTEXT_ACTIONS.EXPAND_DIRECTORY && target.kind === 'directory') {
         detail.handled = true;
-        loadDir(path);
+        loadDir(path, { force: true });
         setExpandedDirs((prev) => {
+          if (prev.has(path)) return prev;
           const next = new Set(prev);
           next.add(path);
           return next;
@@ -200,6 +261,7 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
       } else if (action === DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY && target.kind === 'directory') {
         detail.handled = true;
         setExpandedDirs((prev) => {
+          if (!prev.has(path)) return prev;
           const next = new Set(prev);
           next.delete(path);
           return next;
@@ -230,8 +292,9 @@ function FileTree({ api, cwd, treeCache, setTreeCache, expandedDirs, setExpanded
   // 递归渲染 — 每个目录的子项展开时插入到该目录节点之后
   const renderEntries = (parentPath, depth) => {
     const entries = treeCache.get(parentPath);
-    const err = errors.get(parentPath);
-    if (!entries && loading.has(parentPath)) {
+    const requestKey = fileTreeDirectoryRequestKey(cwd, parentPath);
+    const err = errors.get(requestKey);
+    if (!entries && loading.has(requestKey)) {
       return (
         <div className="ace-file-tree-message text-fg-mute">
           <TreeIndent depth={depth} />
@@ -450,6 +513,7 @@ export function SidePanel({
     setTreeCacheByCwd(prev => {
       const cur = prev.get(cwdKey) || new Map();
       const next = typeof updater === 'function' ? updater(cur) : updater;
+      if (next === cur) return prev;
       const n = new Map(prev);
       n.set(cwdKey, next);
       return n;
@@ -459,6 +523,7 @@ export function SidePanel({
     setExpandedDirsByCwd(prev => {
       const cur = prev.get(cwdKey) || new Set();
       const next = typeof updater === 'function' ? updater(cur) : updater;
+      if (next === cur) return prev;
       const n = new Map(prev);
       n.set(cwdKey, next);
       return n;

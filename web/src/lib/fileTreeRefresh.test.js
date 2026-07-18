@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { fileTreeRefreshKeyFromItems, fileTreeReloadPaths } from './fileTreeRefresh.js';
+import {
+  beginFileTreeDirectoryRequest,
+  fileTreeDirectoryEntriesEqual,
+  fileTreeDirectoryRequestKey,
+  fileTreeRefreshKeyFromItems,
+  fileTreeReloadPaths,
+  finishFileTreeDirectoryRequest,
+  reconcileFileTreeDirectory,
+} from './fileTreeRefresh.js';
 
 function run(name, fn) {
   try {
@@ -74,4 +82,100 @@ run('fileTreeReloadPaths: 根目录优先,随后按展开顺序刷新子目录',
 run('fileTreeReloadPaths: 去重空路径和重复展开目录', () => {
   const paths = fileTreeReloadPaths(['', 'src', 'src', 'src/tool']);
   assert.deepEqual(paths, ['', 'src', 'src/tool']);
+});
+
+run('fileTreeDirectoryEntriesEqual: 只比较影响可见行的有序字段', () => {
+  const current = [
+    { name: 'components', path: 'src/components', kind: 'dir', modified_ms: 100 },
+    { name: 'main.cpp', path: 'src/main.cpp', kind: 'file', size: 10, modified_ms: 100 },
+  ];
+  const incoming = [
+    { name: 'components', path: 'src/components', kind: 'dir', modified_ms: 200 },
+    { name: 'main.cpp', path: 'src/main.cpp', kind: 'file', size: 20, modified_ms: 200 },
+  ];
+
+  assert.equal(fileTreeDirectoryEntriesEqual(current, incoming), true);
+  assert.equal(fileTreeDirectoryEntriesEqual(current, incoming.slice().reverse()), false);
+});
+
+run('reconcileFileTreeDirectory: 首次缓存空目录仍创建目录条目', () => {
+  const current = new Map();
+  const next = reconcileFileTreeDirectory(current, 'empty', []);
+
+  assert.notEqual(next, current);
+  assert.equal(next.has('empty'), true);
+  assert.deepEqual(next.get('empty'), []);
+});
+
+run('reconcileFileTreeDirectory: 相同克隆响应保留 Map 和行引用', () => {
+  const rows = [
+    { name: 'lib', path: 'src/lib', kind: 'dir', modified_ms: 100 },
+    { name: 'main.cpp', path: 'src/main.cpp', kind: 'file', size: 10 },
+  ];
+  const current = new Map([['src', rows]]);
+  const incoming = rows.map((row) => ({ ...row, modified_ms: 999, size: 999 }));
+  const next = reconcileFileTreeDirectory(current, 'src', incoming);
+
+  assert.equal(next, current);
+  assert.equal(next.get('src'), rows);
+});
+
+run('reconcileFileTreeDirectory: 可见目录结构变化只替换目标目录', () => {
+  const rootRows = [{ name: 'src', path: 'src', kind: 'dir' }];
+  const srcRows = [{ name: 'main.cpp', path: 'src/main.cpp', kind: 'file' }];
+  const current = new Map([
+    ['', rootRows],
+    ['src', srcRows],
+  ]);
+  const incoming = [
+    { name: 'lib', path: 'src/lib', kind: 'dir' },
+    { name: 'main.cpp', path: 'src/main.cpp', kind: 'file' },
+  ];
+  const next = reconcileFileTreeDirectory(current, 'src', incoming);
+
+  assert.notEqual(next, current);
+  assert.equal(next.get(''), rootRows);
+  assert.equal(next.get('src'), incoming);
+});
+
+run('reconcileFileTreeDirectory: 重命名和 kind 变化会更新缓存', () => {
+  const current = new Map([[
+    'src',
+    [{ name: 'main.cpp', path: 'src/main.cpp', kind: 'file' }],
+  ]]);
+
+  const renamed = reconcileFileTreeDirectory(current, 'src', [
+    { name: 'app.cpp', path: 'src/app.cpp', kind: 'file' },
+  ]);
+  const kindChanged = reconcileFileTreeDirectory(current, 'src', [
+    { name: 'main.cpp', path: 'src/main.cpp', kind: 'dir' },
+  ]);
+
+  assert.notEqual(renamed, current);
+  assert.notEqual(kindChanged, current);
+});
+
+run('fileTreeDirectoryRequestKey: cwd 和目录边界不会碰撞', () => {
+  const first = fileTreeDirectoryRequestKey('/repo', 'src/lib');
+  const same = fileTreeDirectoryRequestKey('/repo', 'src/lib');
+  const otherPath = fileTreeDirectoryRequestKey('/repo/src', 'lib');
+  const otherCwd = fileTreeDirectoryRequestKey('/other', 'src/lib');
+
+  assert.equal(first, same);
+  assert.notEqual(first, otherPath);
+  assert.notEqual(first, otherCwd);
+});
+
+run('beginFileTreeDirectoryRequest: 同 cwd/path 请求同步去重并可释放', () => {
+  const inFlight = new Set();
+  const first = beginFileTreeDirectoryRequest(inFlight, '/repo', 'src');
+  const duplicate = beginFileTreeDirectoryRequest(inFlight, '/repo', 'src');
+  const otherCwd = beginFileTreeDirectoryRequest(inFlight, '/other', 'src');
+
+  assert.equal(first, fileTreeDirectoryRequestKey('/repo', 'src'));
+  assert.equal(duplicate, null);
+  assert.equal(otherCwd, fileTreeDirectoryRequestKey('/other', 'src'));
+
+  finishFileTreeDirectoryRequest(inFlight, first);
+  assert.equal(beginFileTreeDirectoryRequest(inFlight, '/repo', 'src'), first);
 });

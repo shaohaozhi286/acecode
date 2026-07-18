@@ -9,6 +9,8 @@ import {
   normalizePreviewPanelWidth,
   normalizeSidebarWidth,
   normalizeSidePanelWidth,
+  normalizeSingleLayoutPreference,
+  previewPanelWidthIsUserSized,
   solveSingleContentLayout,
   validateLayoutWidths,
 } from './singleLayout.js';
@@ -66,6 +68,51 @@ run('layout validation accepts legacy widths without previewPanel', () => {
   assert.equal(validateLayoutWidths(DEFAULT_SINGLE_LAYOUT), true);
 });
 
+run('layout validation only accepts a boolean preview sizing marker', () => {
+  assert.equal(validateLayoutWidths({
+    sidebar: 270,
+    sidePanel: 280,
+    previewPanel: 640,
+    previewPanelUserSized: 'false',
+  }), false);
+});
+
+run('layout preference migration keeps the default preview automatically managed', () => {
+  assert.deepEqual(normalizeSingleLayoutPreference({
+    sidebar: 200,
+    sidePanel: 280,
+  }), {
+    sidebar: 270,
+    sidePanel: 280,
+    previewPanel: 640,
+    previewPanelUserSized: false,
+  });
+});
+
+run('layout preference migration recognizes a legacy non-default preview width as user-sized', () => {
+  assert.deepEqual(normalizeSingleLayoutPreference({
+    sidebar: 270,
+    sidePanel: 280,
+    previewPanel: 500,
+  }), {
+    sidebar: 270,
+    sidePanel: 280,
+    previewPanel: 500,
+    previewPanelUserSized: true,
+  });
+});
+
+run('explicit preview sizing intent wins over legacy numeric inference', () => {
+  assert.equal(previewPanelWidthIsUserSized({
+    previewPanel: 500,
+    previewPanelUserSized: false,
+  }), false);
+  assert.equal(previewPanelWidthIsUserSized({
+    previewPanel: 640,
+    previewPanelUserSized: true,
+  }), true);
+});
+
 run('sidebar resize reserves the side panel and chat minimum widths', () => {
   assert.equal(normalizeSidebarWidth(360, {
     shellWidth: 1200,
@@ -90,6 +137,66 @@ run('single content layout opens preview by first compressing chat', () => {
     sidePanelWidth: 280,
     previewPanelWidth: 640,
     previewPanelVisible: true,
+  });
+  assert.deepEqual(result, {
+    chatWidth: 480,
+    previewPanelWidth: 640,
+    sidePanelWidth: 280,
+  });
+});
+
+run('automatically managed preview shares a constrained area evenly with chat', () => {
+  const result = solveSingleContentLayout({
+    contentWidth: 1400,
+    sidePanelWidth: 280,
+    previewPanelWidth: 640,
+    previewPanelVisible: true,
+    previewPanelAutoFit: true,
+  });
+  assert.deepEqual(result, {
+    chatWidth: 560,
+    previewPanelWidth: 560,
+    sidePanelWidth: 280,
+  });
+});
+
+run('automatically managed preview keeps its preferred width on a large layout', () => {
+  const result = solveSingleContentLayout({
+    contentWidth: 1600,
+    sidePanelWidth: 280,
+    previewPanelWidth: 640,
+    previewPanelVisible: true,
+    previewPanelAutoFit: true,
+  });
+  assert.deepEqual(result, {
+    chatWidth: 680,
+    previewPanelWidth: 640,
+    sidePanelWidth: 280,
+  });
+});
+
+run('automatically managed preview keeps its minimum on an extremely narrow layout', () => {
+  const result = solveSingleContentLayout({
+    contentWidth: 950,
+    sidePanelWidth: 360,
+    previewPanelWidth: 640,
+    previewPanelVisible: true,
+    previewPanelAutoFit: true,
+  });
+  assert.deepEqual(result, {
+    chatWidth: 170,
+    previewPanelWidth: MIN_PREVIEW_PANEL_WIDTH,
+    sidePanelWidth: 360,
+  });
+});
+
+run('user-sized preview bypasses automatic balancing', () => {
+  const result = solveSingleContentLayout({
+    contentWidth: 1400,
+    sidePanelWidth: 280,
+    previewPanelWidth: 640,
+    previewPanelVisible: true,
+    previewPanelAutoFit: false,
   });
   assert.deepEqual(result, {
     chatWidth: 480,
@@ -147,6 +254,7 @@ run('single content layout maximizes preview into chat work area while keeping s
     previewPanelWidth: 640,
     previewPanelVisible: true,
     previewPanelMaximized: true,
+    previewPanelAutoFit: true,
   });
   assert.deepEqual(result, {
     chatWidth: 0,

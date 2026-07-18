@@ -284,6 +284,104 @@ void publish_goal_state_locked(TuiState& state, AgentLoop& agent_loop, SessionMa
 
 } // namespace
 
+static void emit_command_message(CommandContext& ctx, std::string message) {
+    {
+        std::lock_guard<std::mutex> lk(ctx.state.mu);
+        emit_system_message_locked(ctx.state, std::move(message));
+    }
+    if (ctx.post_event) ctx.post_event();
+}
+
+static void cmd_turn(CommandContext& ctx, const std::string& raw_args) {
+    const std::string guidance = trim_ascii_command(raw_args);
+    if (guidance.empty()) {
+        emit_command_message(ctx, "Usage: /turn <guidance>");
+        return;
+    }
+
+    const std::string turn_id = ctx.agent_loop.active_turn_id();
+    if (turn_id.empty()) {
+        emit_command_message(
+            ctx,
+            "No active steerable turn. /turn only guides the turn that is "
+            "currently running.");
+        return;
+    }
+
+    UserInput input;
+    input.text = guidance;
+    auto result = ctx.agent_loop.steer_input(turn_id, input);
+    switch (result.status) {
+        case TurnSteerStatus::Accepted:
+            emit_command_message(ctx, "Guidance accepted for the active turn.");
+            return;
+        case TurnSteerStatus::NoActiveTurn:
+        case TurnSteerStatus::NonSteerable:
+            emit_command_message(
+                ctx,
+                "The active turn ended before the guidance could be accepted.");
+            return;
+        case TurnSteerStatus::TurnMismatch:
+            emit_command_message(
+                ctx,
+                "The active turn changed before the guidance could be accepted.");
+            return;
+        case TurnSteerStatus::QueueFull:
+            emit_command_message(
+                ctx,
+                "The active turn guidance queue is full. Try again after the "
+                "agent processes earlier guidance.");
+            return;
+        case TurnSteerStatus::InvalidInput:
+            emit_command_message(ctx, "Usage: /turn <guidance>");
+            return;
+        case TurnSteerStatus::UnknownSession:
+            break;
+    }
+    emit_command_message(ctx, "Active-turn guidance is unavailable.");
+}
+
+static void cmd_side_question(CommandContext& ctx,
+                              const std::string& raw_args,
+                              const std::string& command_name) {
+    const std::string question = trim_ascii_command(raw_args);
+    if (question.empty()) {
+        emit_command_message(
+            ctx, "Usage: /" + command_name + " <question>");
+        return;
+    }
+
+    emit_command_message(
+        ctx, "[/" + command_name + "] Side question started: " + question);
+
+    auto* state = &ctx.state;
+    auto post_event = ctx.post_event;
+    const bool started = ctx.agent_loop.ask_side_question_async(
+        question,
+        [state, post_event, command_name](SideQuestionResult result) {
+            std::string message;
+            if (result.status == SideQuestionStatus::Ok) {
+                message = "[/" + command_name + "] " + result.answer;
+            } else {
+                message = "[/" + command_name + "] Side question failed: " +
+                          (result.error.empty()
+                               ? std::string("unknown error")
+                               : result.error);
+            }
+            {
+                std::lock_guard<std::mutex> lk(state->mu);
+                emit_system_message_locked(*state, std::move(message));
+            }
+            if (post_event) post_event();
+        });
+    if (!started) {
+        emit_command_message(
+            ctx, "[/" + command_name +
+                     "] Side question could not start because the session is "
+                     "shutting down.");
+    }
+}
+
 static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
     std::lock_guard<std::mutex> lk(ctx.state.mu);
     std::ostringstream oss;
@@ -298,6 +396,9 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /tokens   - Show session token usage\n"
         << "  /goal     - Create, view, pause, resume, edit, or clear the thread goal\n"
         << "  /plan     - Enter plan mode or start planning a described task\n"
+        << "  /turn     - Guide the active turn at its next model boundary\n"
+        << "  /btw      - Ask a detached one-turn side question\n"
+        << "  /side     - Alias for /btw\n"
         << "  /resume   - Resume a previous session\n"
         << "  /rewind   - Rewind to a previous user turn\n"
         << "  /mcp      - Manage MCP servers\n"
@@ -1772,6 +1873,21 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"tokens", "Show session token usage", cmd_tokens});
     register_goal_command(registry);
     registry.register_command({"plan", "Enter plan mode or start planning a described task", cmd_plan});
+    registry.register_command({"turn", "Guide the active turn", cmd_turn});
+    registry.register_command({
+        "btw",
+        "Ask a detached one-turn side question",
+        [](CommandContext& ctx, const std::string& args) {
+            cmd_side_question(ctx, args, "btw");
+        },
+    });
+    registry.register_command({
+        "side",
+        "Alias for /btw",
+        [](CommandContext& ctx, const std::string& args) {
+            cmd_side_question(ctx, args, "side");
+        },
+    });
     registry.register_command({"compact", "Compress conversation history", cmd_compact});
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
     registry.register_command({"rewind", "Rewind to a previous user turn", cmd_rewind});

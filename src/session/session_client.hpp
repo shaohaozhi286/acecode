@@ -95,6 +95,42 @@ struct BuiltinCommandResult {
     std::string message;
 };
 
+enum class TurnSteerStatus {
+    Accepted,
+    InvalidInput,
+    UnknownSession,
+    NoActiveTurn,
+    NonSteerable,
+    TurnMismatch,
+    QueueFull,
+};
+
+struct TurnSteerResult {
+    TurnSteerStatus status = TurnSteerStatus::NoActiveTurn;
+    std::string turn_id;
+    std::string message;
+
+    bool accepted() const { return status == TurnSteerStatus::Accepted; }
+};
+
+enum class SideQuestionStatus {
+    Ok,
+    InvalidQuestion,
+    UnknownSession,
+    ContextNotReady,
+    ProviderUnavailable,
+    Failed,
+};
+
+struct SideQuestionResult {
+    SideQuestionStatus status = SideQuestionStatus::Failed;
+    std::string question;
+    std::string answer;
+    std::string error;
+};
+
+constexpr std::size_t kMaxSideQuestionBytes = 16000;
+
 // ----- Session 创建参数 -----
 
 struct SessionOptions {
@@ -182,6 +218,7 @@ struct SessionInfo {
     bool        busy = false;     // 是否正在处理当前轮
     bool        no_workspace = false;
     std::string parent_session_id; // 非空 = spawn_subagent 子会话(后台任务)
+    std::string active_turn_id;   // 非空 = 当前可接受 steering 的 regular turn
 };
 
 // ----- AskUserQuestion 回应(client→server) -----
@@ -244,6 +281,22 @@ public:
         return send_input(session_id, input.text, input.display_text);
     }
 
+    // Append input to the currently running regular turn. Implementations must
+    // validate expected_turn_id atomically with enqueueing so callers cannot
+    // accidentally steer a replacement turn.
+    virtual TurnSteerResult steer_input(const std::string& session_id,
+                                        const std::string& expected_turn_id,
+                                        const UserInput& input) {
+        (void)session_id;
+        (void)expected_turn_id;
+        (void)input;
+        return {
+            TurnSteerStatus::NonSteerable,
+            {},
+            "active-turn steering is unavailable",
+        };
+    }
+
     // Execute a daemon-owned builtin command, currently limited to `/init` and
     // `/compact`. This is intentionally separate from send_input so command
     // text is not skill-expanded or sent to the model as an ordinary message.
@@ -303,6 +356,19 @@ inline const char* to_string(PermissionDecisionChoice c) {
         case PermissionDecisionChoice::AllowSession: return "allow_session";
     }
     return "deny";
+}
+
+inline const char* to_string(TurnSteerStatus status) {
+    switch (status) {
+        case TurnSteerStatus::Accepted:       return "accepted";
+        case TurnSteerStatus::InvalidInput:   return "invalid_input";
+        case TurnSteerStatus::UnknownSession: return "unknown_session";
+        case TurnSteerStatus::NoActiveTurn:   return "no_active_turn";
+        case TurnSteerStatus::NonSteerable:   return "non_steerable";
+        case TurnSteerStatus::TurnMismatch:   return "turn_mismatch";
+        case TurnSteerStatus::QueueFull:      return "queue_full";
+    }
+    return "no_active_turn";
 }
 
 inline std::optional<PermissionDecisionChoice>

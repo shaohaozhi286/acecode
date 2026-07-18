@@ -61,9 +61,11 @@ run('flattenCommands 注入 kind 字段并保留 builtin/skill 顺序', () => {
 
 run('fallbackCommands 返回基础 builtin 命令', () => {
   const r = fallbackCommands();
-  assert.equal(r.length, 7);
+  assert.equal(r.length, 10);
   assert.ok(r.every((x) => x.kind === 'builtin'));
-  assert.deepEqual(r.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp', 'rc', 'remote-control']);
+  assert.deepEqual(r.map((x) => x.name), [
+    'init', 'compact', 'goal', 'plan', 'turn', 'btw', 'side', 'lsp', 'rc', 'remote-control',
+  ]);
 });
 
 run('slashCommandKindPresentation 只返回 glyph 与 label,颜色由 UI 统一处理', () => {
@@ -108,8 +110,11 @@ run('flattenCommands 把 opencode commands 放在 builtin 和 skill 之间', () 
 run('commandsWithFallback:空响应回退到基础命令', () => {
   const r1 = commandsWithFallback(null);
   const r2 = commandsWithFallback({ builtins: [], skills: [] });
-  assert.deepEqual(r1.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp', 'rc', 'remote-control']);
-  assert.deepEqual(r2.map((x) => x.name), ['init', 'compact', 'goal', 'plan', 'lsp', 'rc', 'remote-control']);
+  const expected = [
+    'init', 'compact', 'goal', 'plan', 'turn', 'btw', 'side', 'lsp', 'rc', 'remote-control',
+  ];
+  assert.deepEqual(r1.map((x) => x.name), expected);
+  assert.deepEqual(r2.map((x) => x.name), expected);
 });
 
 run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合', () => {
@@ -127,6 +132,9 @@ run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合',
     'builtin:compact',
     'builtin:goal',
     'builtin:plan',
+    'builtin:turn',
+    'builtin:btw',
+    'builtin:side',
     'builtin:lsp',
     'builtin:rc',
     'builtin:remote-control',
@@ -144,6 +152,9 @@ run('commandsWithFallback:保留 command kind 并放在基础 builtin 后', () =
     'builtin:compact',
     'builtin:goal',
     'builtin:plan',
+    'builtin:turn',
+    'builtin:btw',
+    'builtin:side',
     'builtin:lsp',
     'builtin:rc',
     'builtin:remote-control',
@@ -161,6 +172,9 @@ run('commandsWithFallback:skills-only 响应也补上基础命令', () => {
     'builtin:compact',
     'builtin:goal',
     'builtin:plan',
+    'builtin:turn',
+    'builtin:btw',
+    'builtin:side',
     'builtin:lsp',
     'builtin:rc',
     'builtin:remote-control',
@@ -178,6 +192,9 @@ run('commandsWithFallback:partial builtin 响应补齐缺失基础命令', () =>
     'builtin:compact',
     'builtin:goal',
     'builtin:plan',
+    'builtin:turn',
+    'builtin:btw',
+    'builtin:side',
     'builtin:lsp',
     'builtin:rc',
     'builtin:remote-control',
@@ -198,6 +215,9 @@ run('commandsWithFallback:额外 builtin 保留在基础命令之后', () => {
     'builtin:compact',
     'builtin:goal',
     'builtin:plan',
+    'builtin:turn',
+    'builtin:btw',
+    'builtin:side',
     'builtin:lsp',
     'builtin:rc',
     'builtin:remote-control',

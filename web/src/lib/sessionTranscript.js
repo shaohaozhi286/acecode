@@ -735,6 +735,7 @@ export function createTranscriptState(overrides = {}) {
   return {
     items: [],
     busy: false,
+    activeTurnId: '',
     turns: 0,
     title: '',
     status: 'idle',
@@ -1097,6 +1098,7 @@ export function reduceTranscriptEvent(state, msg) {
       const outcome = typeof p.outcome === 'string' ? p.outcome : '';
       const completedOutcome = !outcome || outcome === 'completed';
       next.busy = !!p.busy;
+      next.activeTurnId = next.busy ? String(p.turn_id || '') : '';
       next.status = next.busy ? 'running' : 'idle';
       if (next.busy && !wasBusy) {
         // 回合开始 → 重置桌面通知用的回合标记
@@ -1127,6 +1129,7 @@ export function reduceTranscriptEvent(state, msg) {
       const outcome = typeof p.outcome === 'string' ? p.outcome : '';
       const completedOutcome = !outcome || outcome === 'completed';
       next.busy = false;
+      next.activeTurnId = '';
       next.status = 'idle';
       next.activity = null;
       finalizeStreaming(next);
@@ -1142,6 +1145,7 @@ export function reduceTranscriptEvent(state, msg) {
     }
     case 'error':
       next.busy = false;
+      next.activeTurnId = '';
       next.status = 'error';
       next.error = p.reason || '';
       next.activity = null;
@@ -1153,6 +1157,7 @@ export function reduceTranscriptEvent(state, msg) {
       break;
     case 'turn_aborted':
       next.busy = false;
+      next.activeTurnId = '';
       next.status = 'idle';
       next.activity = null;
       finalizeStreaming(next);
@@ -1243,9 +1248,11 @@ export function loadTranscriptHistory(state, data = {}) {
   }
   if (data.busy === true) {
     next.busy = true;
+    next.activeTurnId = String(data.active_turn_id || data.activeTurnId || '');
     next.status = 'running';
   } else if (data.busy === false && next.status !== 'error') {
     next.busy = false;
+    next.activeTurnId = '';
     next.status = 'idle';
   }
 

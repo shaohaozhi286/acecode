@@ -1,5 +1,10 @@
 export const LEGACY_DEFAULT_SINGLE_LAYOUT = { sidebar: 200, sidePanel: 280 };
-export const DEFAULT_SINGLE_LAYOUT = { sidebar: 270, sidePanel: 280, previewPanel: 640 };
+export const DEFAULT_SINGLE_LAYOUT = {
+  sidebar: 270,
+  sidePanel: 280,
+  previewPanel: 640,
+  previewPanelUserSized: false,
+};
 
 export const MIN_SIDEBAR_WIDTH = 160;
 export const MAX_SIDEBAR_WIDTH = 360;
@@ -15,7 +20,46 @@ export function validateLayoutWidths(v) {
     && typeof v.sidebar === 'number' && Number.isFinite(v.sidebar)
     && typeof v.sidePanel === 'number' && Number.isFinite(v.sidePanel)
     && (v.previewPanel == null
-      || (typeof v.previewPanel === 'number' && Number.isFinite(v.previewPanel)));
+      || (typeof v.previewPanel === 'number' && Number.isFinite(v.previewPanel)))
+    && (v.previewPanelUserSized == null
+      || typeof v.previewPanelUserSized === 'boolean');
+}
+
+export function previewPanelWidthIsUserSized(layout) {
+  if (typeof layout?.previewPanelUserSized === 'boolean') {
+    return layout.previewPanelUserSized;
+  }
+  return typeof layout?.previewPanel === 'number'
+    && Number.isFinite(layout.previewPanel)
+    && layout.previewPanel !== DEFAULT_SINGLE_LAYOUT.previewPanel;
+}
+
+export function normalizeSingleLayoutPreference(layout) {
+  const current = validateLayoutWidths(layout) ? layout : DEFAULT_SINGLE_LAYOUT;
+  const legacyDefaults = current.sidebar === LEGACY_DEFAULT_SINGLE_LAYOUT.sidebar
+    && current.sidePanel === LEGACY_DEFAULT_SINGLE_LAYOUT.sidePanel;
+  const sidebar = legacyDefaults ? DEFAULT_SINGLE_LAYOUT.sidebar : current.sidebar;
+  const sidePanel = legacyDefaults ? DEFAULT_SINGLE_LAYOUT.sidePanel : current.sidePanel;
+  const previewPanel = current.previewPanel == null
+    ? DEFAULT_SINGLE_LAYOUT.previewPanel
+    : current.previewPanel;
+  const previewPanelUserSized = previewPanelWidthIsUserSized(current);
+
+  if (
+    current.sidebar === sidebar
+    && current.sidePanel === sidePanel
+    && current.previewPanel === previewPanel
+    && current.previewPanelUserSized === previewPanelUserSized
+  ) {
+    return current;
+  }
+  return {
+    ...current,
+    sidebar,
+    sidePanel,
+    previewPanel,
+    previewPanelUserSized,
+  };
 }
 
 function finiteRoundedWidth(value) {
@@ -114,6 +158,7 @@ export function solveSingleContentLayout({
   sidePanelCollapsed = false,
   previewPanelVisible = false,
   previewPanelMaximized = false,
+  previewPanelAutoFit = false,
 } = {}) {
   const total = Math.max(0, finiteRoundedWidth(contentWidth));
   const sideVisible = !!sidePanelVisible && !sidePanelCollapsed;
@@ -149,6 +194,13 @@ export function solveSingleContentLayout({
   }
 
   const availableForChatAndPreview = Math.max(0, total - side);
+  if (previewPanelAutoFit) {
+    const balancedPreviewMaximum = Math.max(
+      MIN_PREVIEW_PANEL_WIDTH,
+      Math.floor(availableForChatAndPreview / 2),
+    );
+    preview = Math.min(preview, balancedPreviewMaximum);
+  }
   let chat = availableForChatAndPreview - preview;
   if (chat < MIN_CHAT_WIDTH) {
     const maxPreviewWithChatMinimum = Math.max(

@@ -59,10 +59,11 @@ import {
 import { homeRefFromWorkspace, noHomeWorkspaceOption } from './lib/homeWorkspaceSelection.js';
 import {
   DEFAULT_SINGLE_LAYOUT,
-  LEGACY_DEFAULT_SINGLE_LAYOUT,
+  normalizeSingleLayoutPreference,
   normalizePreviewPanelWidth,
   normalizeSidePanelWidth,
   normalizeSidebarWidth,
+  previewPanelWidthIsUserSized,
   validateLayoutWidths,
 } from './lib/singleLayout.js';
 import { initInactiveSelection } from './lib/inactiveSelection.js';
@@ -149,6 +150,7 @@ export function App() {
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [singleLayout, setSingleLayout] = usePreference(
     SINGLE_LAYOUT_STORAGE_KEY, DEFAULT_SINGLE_LAYOUT, validateLayoutWidths);
+  const previewPanelUserSized = previewPanelWidthIsUserSized(singleLayout);
   const [uiPrefs, setUiPrefs] = usePreference(
     UI_PREFS_STORAGE_KEY, DEFAULT_UI_PREFS, validateUiPrefs);
   const [consoleDock, setConsoleDock] = usePreference(
@@ -346,16 +348,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    setSingleLayout((prev) => {
-      if (prev?.sidebar === LEGACY_DEFAULT_SINGLE_LAYOUT.sidebar
-          && prev?.sidePanel === LEGACY_DEFAULT_SINGLE_LAYOUT.sidePanel) {
-        return DEFAULT_SINGLE_LAYOUT;
-      }
-      if (prev && prev.previewPanel == null) {
-        return { ...prev, previewPanel: DEFAULT_SINGLE_LAYOUT.previewPanel };
-      }
-      return prev;
-    });
+    setSingleLayout((prev) => normalizeSingleLayoutPreference(prev));
   }, [setSingleLayout]);
 
   const probe = useCallback(async () => {
@@ -1112,7 +1105,10 @@ export function App() {
         sidePanelVisible,
         sidePanelCollapsed: sidePanelNavigationCollapsed,
       });
-      return previewPanel === prev.previewPanel ? prev : { ...prev, previewPanel };
+      if (previewPanel === prev.previewPanel && prev.previewPanelUserSized === true) {
+        return prev;
+      }
+      return { ...prev, previewPanel, previewPanelUserSized: true };
     });
   }, [
     activeRef?.id,
@@ -1352,6 +1348,7 @@ export function App() {
                 sidePanelWidth={singleLayout.sidePanel}
                 onSidePanelResize={setSidePanelWidth}
                 previewPanelWidth={singleLayout.previewPanel}
+                previewPanelAutoFit={!previewPanelUserSized}
                 onPreviewPanelResize={setPreviewPanelWidth}
                 onPreviewPanelVisibleChange={setPreviewPanelVisible}
                 sidePanelCollapsed={sidePanelCollapsed}

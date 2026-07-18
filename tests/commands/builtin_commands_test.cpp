@@ -11,14 +11,17 @@
 #include "tool/tool_executor.hpp"
 #include "utils/token_tracker.hpp"
 #include "utils/paths.hpp"
+#include "../agent_loop/stub_provider.hpp"
 
 #include <cstdlib>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <random>
+#include <thread>
 
 #ifdef _WIN32
 #include <stdlib.h>
@@ -283,6 +286,152 @@ public:
     acecode::AgentLoop loop_;
 };
 
+class CommandTestProvider : public acecode_test::StubLlmProvider {
+public:
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>& messages,
+        const std::vector<acecode::ToolDef>& tools) override {
+        {
+            std::lock_guard<std::mutex> lk(side_mu_);
+            ++side_calls_;
+            side_tools_empty_ = side_tools_empty_ && tools.empty();
+            if (!messages.empty()) {
+                side_prompts_.push_back(messages.back().content);
+            }
+        }
+        side_cv_.notify_all();
+        acecode::ChatResponse response;
+        response.content = "detached answer";
+        response.finish_reason = "stop";
+        return response;
+    }
+
+    bool wait_for_side_calls(int count) {
+        std::unique_lock<std::mutex> lk(side_mu_);
+        return side_cv_.wait_for(lk, std::chrono::seconds(5), [this, count] {
+            return side_calls_ >= count;
+        });
+    }
+
+    int side_calls() const {
+        std::lock_guard<std::mutex> lk(side_mu_);
+        return side_calls_;
+    }
+
+    bool side_tools_empty() const {
+        std::lock_guard<std::mutex> lk(side_mu_);
+        return side_tools_empty_;
+    }
+
+    std::vector<std::string> side_prompts() const {
+        std::lock_guard<std::mutex> lk(side_mu_);
+        return side_prompts_;
+    }
+
+private:
+    mutable std::mutex side_mu_;
+    std::condition_variable side_cv_;
+    int side_calls_ = 0;
+    bool side_tools_empty_ = true;
+    std::vector<std::string> side_prompts_;
+};
+
+class TurnCommandHarness {
+public:
+    TurnCommandHarness()
+        : cwd_(temp_cwd("turn"))
+        , provider_(std::make_shared<CommandTestProvider>())
+        , loop_(
+              [this] { return provider_; },
+              tools_,
+              callbacks(),
+              cwd_.string(),
+              perms_) {
+        acecode::register_builtin_commands(registry_);
+    }
+
+    ~TurnCommandHarness() {
+        loop_.shutdown();
+        fs::remove_all(cwd_);
+    }
+
+    acecode::CommandContext context() {
+        return {
+            state_,
+            loop_,
+            nullptr,
+            config_,
+            tracker_,
+            perms_,
+        };
+    }
+
+    bool dispatch(const std::string& text) {
+        auto ctx = context();
+        return registry_.dispatch(text, ctx);
+    }
+
+    std::string wait_for_active_turn() {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto id = loop_.active_turn_id();
+            if (!id.empty()) return id;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return loop_.active_turn_id();
+    }
+
+    bool wait_until_idle() {
+        std::unique_lock<std::mutex> lk(mu_);
+        return cv_.wait_for(lk, std::chrono::seconds(10), [this] {
+            return saw_busy_ && !busy_;
+        });
+    }
+
+    bool wait_for_tui_message(const std::string& needle) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lk(state_.mu);
+                for (const auto& message : state_.conversation) {
+                    if (message.content.find(needle) != std::string::npos) {
+                        return true;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return false;
+    }
+
+    acecode::AgentCallbacks callbacks() {
+        acecode::AgentCallbacks value;
+        value.on_busy_changed = [this](bool busy) {
+            std::lock_guard<std::mutex> lk(mu_);
+            busy_ = busy;
+            saw_busy_ = saw_busy_ || busy;
+            cv_.notify_all();
+        };
+        return value;
+    }
+
+    fs::path cwd_;
+    std::shared_ptr<CommandTestProvider> provider_;
+    acecode::ToolExecutor tools_;
+    acecode::PermissionManager perms_;
+    acecode::TuiState state_;
+    acecode::AppConfig config_;
+    acecode::TokenTracker tracker_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool busy_ = false;
+    bool saw_busy_ = false;
+    acecode::AgentLoop loop_;
+    acecode::CommandRegistry registry_;
+};
+
 } // namespace
 
 TEST(BuiltinCommands, NewIsRegisteredAsClearAlias) {
@@ -293,6 +442,76 @@ TEST(BuiltinCommands, NewIsRegisteredAsClearAlias) {
     ASSERT_TRUE(registry.has_command("clear"));
     ASSERT_TRUE(registry.has_command("new"));
     EXPECT_EQ(registry.commands().at("new").description, "Alias for /clear");
+}
+
+TEST(BuiltinCommands, TurnBtwAndSideCommandsAreRegistered) {
+    acecode::CommandRegistry registry;
+    acecode::register_builtin_commands(registry);
+
+    EXPECT_TRUE(registry.has_command("turn"));
+    EXPECT_TRUE(registry.has_command("btw"));
+    EXPECT_TRUE(registry.has_command("side"));
+}
+
+TEST(BuiltinCommands, TurnCommandSteersTheCurrentlyRunningTurn) {
+    TurnCommandHarness h;
+    h.provider_->set_latency_ms(100);
+    h.provider_->push_text("intermediate");
+    h.provider_->push_text("final");
+    h.loop_.submit("start");
+    ASSERT_FALSE(h.wait_for_active_turn().empty());
+
+    ASSERT_TRUE(h.dispatch("/turn keep the public API stable"));
+    ASSERT_FALSE(h.state_.conversation.empty());
+    EXPECT_EQ(
+        h.state_.conversation.back().content,
+        "Guidance accepted for the active turn.");
+    ASSERT_TRUE(h.wait_until_idle());
+    ASSERT_EQ(h.provider_->turn_count(), 2);
+
+    const auto request = h.provider_->messages_for_turn(1);
+    ASSERT_FALSE(request.empty());
+    EXPECT_EQ(request.back().role, "user");
+    EXPECT_NE(
+        request.back().content.find("keep the public API stable"),
+        std::string::npos);
+}
+
+TEST(BuiltinCommands, SideQuestionAliasesValidateTheirOwnUsage) {
+    TurnCommandHarness h;
+    ASSERT_TRUE(h.dispatch("/btw"));
+    ASSERT_TRUE(h.dispatch("/side"));
+    ASSERT_GE(h.state_.conversation.size(), 2u);
+    EXPECT_EQ(
+        h.state_.conversation[h.state_.conversation.size() - 2].content,
+        "Usage: /btw <question>");
+    EXPECT_EQ(
+        h.state_.conversation.back().content,
+        "Usage: /side <question>");
+}
+
+TEST(BuiltinCommands, BtwAndSideRunEquivalentDetachedAsyncQuestions) {
+    TurnCommandHarness h;
+    h.provider_->push_text("main answer");
+    h.loop_.submit("establish context");
+    ASSERT_TRUE(h.wait_until_idle());
+    const auto main_message_count = h.loop_.messages().size();
+
+    ASSERT_TRUE(h.dispatch("/btw explain one"));
+    ASSERT_TRUE(h.provider_->wait_for_side_calls(1));
+    ASSERT_TRUE(h.wait_for_tui_message("[/btw] detached answer"));
+
+    ASSERT_TRUE(h.dispatch("/side explain two"));
+    ASSERT_TRUE(h.provider_->wait_for_side_calls(2));
+    ASSERT_TRUE(h.wait_for_tui_message("[/side] detached answer"));
+
+    EXPECT_EQ(h.provider_->side_calls(), 2);
+    EXPECT_TRUE(h.provider_->side_tools_empty());
+    const auto prompts = h.provider_->side_prompts();
+    ASSERT_EQ(prompts.size(), 2u);
+    EXPECT_NE(prompts[0].find("explain one"), std::string::npos);
+    EXPECT_NE(prompts[1].find("explain two"), std::string::npos);
+    EXPECT_EQ(h.loop_.messages().size(), main_message_count);
 }
 
 TEST(BuiltinCommands, FeedbackRejectsInvalidUpgradeUrlLocally) {

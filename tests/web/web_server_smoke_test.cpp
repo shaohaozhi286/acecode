@@ -209,6 +209,88 @@ private:
     bool released_ = false;
 };
 
+class TurnSteeringProvider : public acecode::LlmProvider {
+public:
+    acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>&,
+                               const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse response;
+        response.content = "side";
+        response.finish_reason = "stop";
+        return response;
+    }
+
+    void chat_stream(
+        const std::vector<acecode::ChatMessage>& messages,
+        const std::vector<acecode::ToolDef>&,
+        const acecode::StreamCallback& callback,
+        std::atomic<bool>* abort_flag = nullptr) override {
+        int call_index = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            call_index = call_count_++;
+            requests_.push_back(messages);
+            if (call_index == 0) first_started_ = true;
+        }
+        cv_.notify_all();
+
+        if (call_index == 0) {
+            std::unique_lock<std::mutex> lk(mu_);
+            while (!first_released_ &&
+                   !(abort_flag && abort_flag->load())) {
+                cv_.wait_for(lk, 10ms);
+            }
+        }
+
+        acecode::StreamEvent delta;
+        delta.type = acecode::StreamEventType::Delta;
+        delta.content = call_index == 0 ? "intermediate" : "final";
+        callback(delta);
+        acecode::StreamEvent done;
+        done.type = acecode::StreamEventType::Done;
+        callback(done);
+    }
+
+    bool wait_for_first_started(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lk(mu_);
+        return cv_.wait_for(lk, timeout, [this] { return first_started_; });
+    }
+
+    void release_first() {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            first_released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    int call_count() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return call_count_;
+    }
+
+    std::vector<acecode::ChatMessage> request(int index) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (index < 0 ||
+            static_cast<std::size_t>(index) >= requests_.size()) {
+            return {};
+        }
+        return requests_[static_cast<std::size_t>(index)];
+    }
+
+    std::string name() const override { return "turn-steering-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "turn-steering-stub"; }
+    void set_model(const std::string&) override {}
+
+private:
+    mutable std::mutex mu_;
+    std::condition_variable cv_;
+    bool first_started_ = false;
+    bool first_released_ = false;
+    int call_count_ = 0;
+    std::vector<std::vector<acecode::ChatMessage>> requests_;
+};
+
 struct WebServerFixture {
     acecode::ToolExecutor tools;
     acecode::PermissionManager template_perm;
@@ -2988,6 +3070,119 @@ TEST(WebServerHttp, PostMessageQueuesInputInDaemonSession) {
         if (!found) std::this_thread::sleep_for(20ms);
     }
     EXPECT_TRUE(found) << "HTTP submit should be owned by daemon session";
+}
+
+TEST(WebServerHttp, TurnSteerValidatesIdentityAndCommitsAcceptedInput) {
+    WebServerFixture fx;
+    auto create = cpr::Post(
+        cpr::Url{fx.url("/api/sessions")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({})"});
+    ASSERT_EQ(create.status_code, 201) << create.text;
+    const std::string sid =
+        json::parse(create.text)["session_id"].get<std::string>();
+
+    auto missing_expected = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/turn/steer")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"text":"guide"})"});
+    ASSERT_EQ(missing_expected.status_code, 400) << missing_expected.text;
+    EXPECT_EQ(
+        json::parse(missing_expected.text)["error"],
+        "EXPECTED_TURN_ID_REQUIRED");
+
+    auto unknown = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/missing-session/turn/steer")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"text":"guide","expected_turn_id":"turn-1"})"});
+    ASSERT_EQ(unknown.status_code, 404) << unknown.text;
+    EXPECT_EQ(json::parse(unknown.text)["error"], "UNKNOWN_SESSION");
+
+    auto unknown_structured = cpr::Post(
+        cpr::Url{fx.url(
+            "/api/sessions/missing-session/turn/steer")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({
+            "contexts":[{"type":"browser","url":"https://example.test"}],
+            "expected_turn_id":"turn-1"
+        })"});
+    ASSERT_EQ(unknown_structured.status_code, 404)
+        << unknown_structured.text;
+    EXPECT_EQ(
+        json::parse(unknown_structured.text)["error"],
+        "UNKNOWN_SESSION");
+
+    auto idle = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/turn/steer")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"text":"guide","expected_turn_id":"turn-1"})"});
+    ASSERT_EQ(idle.status_code, 409) << idle.text;
+    EXPECT_EQ(json::parse(idle.text)["error"], "NO_ACTIVE_TURN");
+
+    auto entry = fx.registry->acquire(sid);
+    ASSERT_TRUE(entry);
+    ASSERT_TRUE(entry->provider_slot);
+    auto provider = std::make_shared<TurnSteeringProvider>();
+    {
+        std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+        entry->provider_slot->provider = provider;
+    }
+    entry->loop->submit("start");
+    ASSERT_TRUE(provider->wait_for_first_started(2s));
+    const std::string turn_id = entry->loop->active_turn_id();
+    ASSERT_FALSE(turn_id.empty());
+
+    auto runtime = cpr::Get(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/messages")});
+    ASSERT_EQ(runtime.status_code, 200) << runtime.text;
+    EXPECT_EQ(json::parse(runtime.text)["active_turn_id"], turn_id);
+
+    auto mismatch = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/turn/steer")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{
+            {"text", "wrong turn"},
+            {"expected_turn_id", "replacement-turn"},
+        }.dump()});
+    ASSERT_EQ(mismatch.status_code, 409) << mismatch.text;
+    auto mismatch_body = json::parse(mismatch.text);
+    EXPECT_EQ(mismatch_body["error"], "TURN_MISMATCH");
+    EXPECT_EQ(mismatch_body["active_turn_id"], turn_id);
+
+    auto accepted = cpr::Post(
+        cpr::Url{fx.url("/api/sessions/" + sid + "/turn/steer")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{
+            {"text", "keep the API stable"},
+            {"expected_turn_id", turn_id},
+            {"client_message_id", "guide-http-1"},
+        }.dump()});
+    ASSERT_EQ(accepted.status_code, 202) << accepted.text;
+    auto accepted_body = json::parse(accepted.text);
+    EXPECT_TRUE(accepted_body["accepted"].get<bool>());
+    EXPECT_EQ(accepted_body["turn_id"], turn_id);
+    EXPECT_EQ(accepted_body["client_message_id"], "guide-http-1");
+
+    provider->release_first();
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (entry->loop->is_busy() &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_FALSE(entry->loop->is_busy());
+    ASSERT_EQ(provider->call_count(), 2);
+
+    const auto second_request = provider->request(1);
+    ASSERT_FALSE(second_request.empty());
+    EXPECT_EQ(second_request.back().role, "user");
+    EXPECT_NE(
+        second_request.back().content.find("keep the API stable"),
+        std::string::npos);
+    EXPECT_EQ(
+        second_request.back().metadata.value("client_message_id", ""),
+        "guide-http-1");
+    EXPECT_TRUE(second_request.back().metadata.value("turn_steer", false));
+    EXPECT_EQ(second_request.back().metadata.value("turn_id", ""), turn_id);
 }
 
 TEST(WebServerHttp, UploadAttachmentAndSubmitContentParts) {

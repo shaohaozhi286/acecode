@@ -30,12 +30,12 @@ export function buildQueueCardItem(item) {
     statusKind = 'failed';
     showRetry = true;
   } else if (state === QUEUED_INPUT_STATE.GUIDING) {
-    statusLabel = '引导中…';
+    statusLabel = queued.acceptedAt ? '等待当前回合接收…' : '正在提交引导…';
     statusKind = 'guiding';
     dimmed = true;
   }
   const hasText = String(item?.content || '').trim().length > 0;
-  const canGuide = hasText && attachmentCount === 0 && contextCount === 0 &&
+  const canGuide = (hasText || attachmentCount > 0 || contextCount > 0) &&
     (state === QUEUED_INPUT_STATE.QUEUED || state === QUEUED_INPUT_STATE.FAILED);
   return {
     queuedId: queued.id || '',

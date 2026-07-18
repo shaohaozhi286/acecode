@@ -9,11 +9,13 @@ import {
   createChatInputQueueState,
   enqueueQueuedInput,
   finishQueuedGuidance,
+  markQueuedGuidanceAccepted,
   markQueuedInputFailed,
   markQueuedInputSending,
   nextQueuedInput,
   queuedInputRequestPayload,
   queuedInputsForSession,
+  restoreUncommittedGuidanceForSession,
   retryQueuedInput,
 } from './chatInputQueue.js';
 
@@ -55,24 +57,89 @@ run('nextQueuedInput 保持 FIFO 且发送中时不取下一条', () => {
   assert.equal(nextQueuedInput(state, 's1'), null);
 });
 
-run('引导中项目暂停 FIFO，成功取消，失败恢复原状态', () => {
+run('引导中项目暂停 FIFO，HTTP 接受后等待消息事件，失败恢复原状态', () => {
   let state = createChatInputQueueState();
   state = enqueueQueuedInput(state, { sessionId: 's1', text: 'side question', now: 100 });
   state = enqueueQueuedInput(state, { sessionId: 's1', text: 'later question', now: 101 });
   const id = nextQueuedInput(state, 's1').queued.id;
 
-  state = beginQueuedGuidance(state, id);
+  state = beginQueuedGuidance(state, id, { turnId: 'turn-1', now: 150 });
   assert.equal(queuedInputsForSession(state, 's1')[0].queued.state, QUEUED_INPUT_STATE.GUIDING);
+  assert.equal(queuedInputsForSession(state, 's1')[0].queued.steerTurnId, 'turn-1');
   assert.equal(nextQueuedInput(state, 's1'), null);
 
   state = finishQueuedGuidance(state, id, { succeeded: false });
   assert.equal(queuedInputsForSession(state, 's1')[0].queued.state, QUEUED_INPUT_STATE.QUEUED);
   assert.equal(nextQueuedInput(state, 's1').queued.id, id);
 
-  state = beginQueuedGuidance(state, id);
-  state = finishQueuedGuidance(state, id, { succeeded: true });
+  state = beginQueuedGuidance(state, id, { turnId: 'turn-1', now: 200 });
+  state = markQueuedGuidanceAccepted(state, id, { turnId: 'turn-1', now: 220 });
+  assert.equal(queuedInputsForSession(state, 's1').length, 2);
+  assert.equal(queuedInputsForSession(state, 's1')[0].queued.acceptedAt, 220);
+  state = completeQueuedInputForMessage(state, {
+    sessionId: 's1',
+    content: 'expanded guidance',
+    clientMessageId: id,
+    ts: 240,
+  });
   assert.equal(queuedInputsForSession(state, 's1').length, 1);
   assert.equal(nextQueuedInput(state, 's1').content, 'later question');
+});
+
+run('回合结束但未提交的引导恢复为原排队状态', () => {
+  let state = createChatInputQueueState();
+  state = enqueueQueuedInput(state, { sessionId: 's1', text: 'guide me', now: 100 });
+  const id = nextQueuedInput(state, 's1').queued.id;
+  state = beginQueuedGuidance(state, id, { turnId: 'turn-1', now: 150 });
+  state = markQueuedGuidanceAccepted(state, id, { now: 160 });
+  state = restoreUncommittedGuidanceForSession(state, 's1');
+  const restored = queuedInputsForSession(state, 's1')[0];
+  assert.equal(restored.queued.state, QUEUED_INPUT_STATE.QUEUED);
+  assert.equal(restored.queued.acceptedAt, undefined);
+  assert.equal(restored.queued.steerTurnId, undefined);
+});
+
+run('空闲会话恢复只处理目标 session 且无引导时保持引用', () => {
+  let state = createChatInputQueueState();
+  state = enqueueQueuedInput(state, { sessionId: 's1', text: 'first', now: 100 });
+  state = enqueueQueuedInput(state, { sessionId: 's2', text: 'second', now: 101 });
+  const [first, second] = queuedInputsForSession(
+    state,
+    's1',
+    { includeDone: true },
+  ).concat(queuedInputsForSession(state, 's2', { includeDone: true }));
+  state = beginQueuedGuidance(state, first.queued.id, { turnId: 'turn-1' });
+  state = beginQueuedGuidance(state, second.queued.id, { turnId: 'turn-2' });
+
+  const restored = restoreUncommittedGuidanceForSession(state, 's1');
+  assert.equal(
+    queuedInputsForSession(restored, 's1')[0].queued.state,
+    QUEUED_INPUT_STATE.QUEUED,
+  );
+  assert.equal(
+    queuedInputsForSession(restored, 's2')[0].queued.state,
+    QUEUED_INPUT_STATE.GUIDING,
+  );
+  assert.equal(
+    restoreUncommittedGuidanceForSession(restored, 'missing'),
+    restored,
+  );
+});
+
+run('引导只能按 client id 完成，不按相同文本误配', () => {
+  let state = createChatInputQueueState();
+  state = enqueueQueuedInput(state, { sessionId: 's1', text: 'same', now: 100 });
+  const id = nextQueuedInput(state, 's1').queued.id;
+  state = beginQueuedGuidance(state, id, { turnId: 'turn-1' });
+  const unchanged = completeQueuedInputForMessage(state, {
+    sessionId: 's1',
+    content: 'same',
+    ts: 200,
+  });
+  assert.equal(
+    queuedInputsForSession(unchanged, 's1')[0].queued.state,
+    QUEUED_INPUT_STATE.GUIDING,
+  );
 });
 
 run('附件 payload 可以在空文本时排队并保留发送体', () => {

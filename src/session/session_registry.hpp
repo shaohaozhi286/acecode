@@ -124,24 +124,6 @@ struct SessionRegistryDeps {
                                      auto_title_generator;
 };
 
-enum class SideQuestionStatus {
-    Ok,
-    InvalidQuestion,
-    UnknownSession,
-    ContextNotReady,
-    ProviderUnavailable,
-    Failed,
-};
-
-struct SideQuestionResult {
-    SideQuestionStatus status = SideQuestionStatus::Failed;
-    std::string question;
-    std::string answer;
-    std::string error;
-};
-
-constexpr std::size_t kMaxSideQuestionBytes = 16000;
-
 class SessionRegistry {
 public:
     explicit SessionRegistry(SessionRegistryDeps deps);

@@ -124,6 +124,7 @@ Session list endpoints return arrays of objects shaped like:
   "attention_state": "read",
   "read_state": "read",
   "busy": false,
+  "active_turn_id": "",
   "status_cursor": 0,
   "update_cursor": 0,
   "read_cursor": 0
@@ -212,6 +213,7 @@ when known.
 | GET | `/api/sessions/:id/messages` | transcript snapshot or event replay |
 | POST | `/api/sessions/:id/export-markdown` | choose a folder and export the visible transcript as Markdown |
 | POST | `/api/sessions/:id/messages` | queue user input |
+| POST | `/api/sessions/:id/turn/steer` | append input to the matching active turn |
 | POST | `/api/sessions/:id/attachments` | upload session attachment |
 | GET | `/api/sessions/:id/attachments/:attachment_id/blob` | download attachment bytes |
 | POST | `/api/sessions/:id/commands` | run daemon builtin slash command |
@@ -623,6 +625,7 @@ When `since=0` or omitted, returns a full snapshot object:
   "events": [],
   "messages": [],
   "busy": false,
+  "active_turn_id": "",
   "turn_count": 4,
   "permission_mode": "default",
   "token_usage": null,
@@ -717,10 +720,53 @@ If the text is a skill slash command for the session workspace, the daemon
 expands it to the skill invocation prompt and records `metadata.display_text`.
 Returns `202 {"queued":true}`.
 
+### `POST /api/sessions/:id/turn/steer`
+
+Appends structured user input to the currently running regular agent turn.
+The request accepts the same `text`, `attachments`, `contexts`, and optional
+`client_message_id` fields as the ordinary messages endpoint, plus the required
+turn identity:
+
+```json
+{
+  "text": "Keep the public API stable",
+  "client_message_id": "queued-session-id-1",
+  "expected_turn_id": "initial-user-message-uuid"
+}
+```
+
+The expected id must equal `active_turn_id` from a session summary, the initial
+messages snapshot, or the latest `busy_changed` event. The equality check and
+FIFO enqueue happen atomically. Accepted input is committed as a normal visible
+user message at the next model-request boundary, remains in the same busy turn,
+and preserves structured content and `client_message_id`.
+
+Acceptance is not the durable commit acknowledgement. A successful request
+returns `202`:
+
+```json
+{
+  "accepted": true,
+  "turn_id": "initial-user-message-uuid",
+  "client_message_id": "queued-session-id-1"
+}
+```
+
+Clients should keep pending UI until the canonical user `message` event with
+the matching `metadata.client_message_id` arrives. If the turn terminates
+before commit, its terminal busy event lets the client restore that pending
+input.
+
+Errors use structured codes: `400 EXPECTED_TURN_ID_REQUIRED` or
+`INVALID_TURN_INPUT`, `404 UNKNOWN_SESSION`, `409 NO_ACTIVE_TURN`,
+`TURN_NOT_STEERABLE`, or `TURN_MISMATCH`, and
+`429 TURN_STEER_QUEUE_FULL`. A mismatch response includes the current
+`active_turn_id`.
+
 ### `POST /api/sessions/:id/side-question`
 
-Runs one isolated `/btw` side question against the active session's latest
-thread-safe provider-facing context snapshot:
+Runs one isolated `/btw` or `/side` side question against the active session's
+latest thread-safe provider-facing context snapshot:
 
 ```json
 {"question":"Why did the current approach choose a mutex?"}
@@ -1814,10 +1860,14 @@ Session event `type` values from `SessionEventKind`:
 - `done`
 - `error`
 
-For an agent turn's terminal transition, `busy_changed` includes
-`{"busy":false,"outcome":"completed|error|aborted"}` and the following
-`done` frame repeats the same `outcome`. Other busy cycles such as compaction
-may omit it. Clients should only treat `completed` as a successful turn.
+The start of a regular agent turn includes
+`{"busy":true,"turn_id":"initial-user-message-uuid"}`. That id stays stable
+across tool calls, model retries, and accepted steering input. For the terminal
+transition, `busy_changed` includes
+`{"busy":false,"outcome":"completed|error|aborted","turn_id":"..."}`
+and the following `done` frame repeats the same `outcome`. Other busy cycles
+such as compaction may omit it. Clients should only treat `completed` as a
+successful turn.
 
 `transcript_replace` is for retry/recovery cleanup. Normal compact success
 appends visible marker messages and a hidden checkpoint instead.

@@ -19,6 +19,7 @@
 #include <atomic>
 #include <thread>
 #include <condition_variable>
+#include <deque>
 #include <queue>
 #include <map>
 #include <optional>
@@ -179,6 +180,12 @@ public:
     // Returns true while the worker is processing a submitted turn.
     bool is_busy() const { return busy_.load(); }
 
+    // Append input to the active regular turn. The expected id check and FIFO
+    // append happen under one lock, matching Codex turn/steer race semantics.
+    TurnSteerResult steer_input(const std::string& expected_turn_id,
+                                const UserInput& input);
+    std::string active_turn_id() const;
+
     // Legacy cancel alias
     void cancel() { abort(); }
 
@@ -196,6 +203,13 @@ public:
     // which would race the active turn. The snapshot is intentionally detached
     // from transcript/session persistence.
     std::vector<ChatMessage> side_question_context_snapshot() const;
+    SideQuestionResult ask_side_question(const std::string& question);
+    using SideQuestionCallback =
+        std::function<void(SideQuestionResult)>;
+    // Runs the detached provider call without blocking the TUI thread. Worker
+    // lifetime is owned by AgentLoop and callbacks are suppressed on shutdown.
+    bool ask_side_question_async(std::string question,
+                                 SideQuestionCallback callback);
 
     const std::string& cwd() const { return cwd_; }
 
@@ -292,6 +306,7 @@ public:
 
 private:
     void worker_main();
+    void join_side_question_threads();
     void run_agent(const std::string& user_message);
     void run_agent_with_input(const UserInput& input,
                               bool hidden_goal_context = false);
@@ -317,6 +332,14 @@ private:
     // 在每次模型请求前消费 pending steering 标记,把 budget_limit /
     // objective_updated 提示以 hidden_goal_context user 消息注入。
     void maybe_inject_goal_steering();
+    void begin_active_turn(const std::string& turn_id);
+    void commit_turn_steering_input(UserInput input,
+                                    const std::string& turn_id);
+    // Worker-only. Drains pending input and returns true when at least one
+    // message was committed. When close_if_empty is true, an empty queue closes
+    // acceptance under the same lock, eliminating the final-response race.
+    bool drain_active_turn_inputs(bool close_if_empty);
+    std::size_t close_active_turn_and_discard();
     bool maybe_run_auto_compact();
     bool active_estimate_exceeds_auto_threshold() const;
     void apply_compact_result(const CompactResult& result, const std::string& trigger);
@@ -362,6 +385,7 @@ private:
         ChatMessage user_msg;
         bool visible_timed_turn = false;
         std::string turn_user_uuid;
+        std::string active_turn_id;
         std::int64_t turn_started_at_ms = 0;
     };
     UserTurnInfo prepare_user_turn(const UserInput& input, bool hidden_goal_context);
@@ -450,6 +474,9 @@ private:
     std::vector<ChatMessage> messages_;
     mutable std::mutex side_question_context_mu_;
     std::vector<ChatMessage> side_question_context_;
+    std::mutex side_question_threads_mu_;
+    std::vector<std::thread> side_question_threads_;
+    std::atomic<bool> side_question_shutdown_{false};
     std::atomic<bool> abort_requested_{false};
     std::atomic<bool> busy_{false};
     std::string cwd_;
@@ -494,6 +521,12 @@ private:
     std::atomic<bool> pending_goal_budget_limit_steering_{false};
     std::atomic<bool> pending_goal_objective_steering_{false};
     std::map<std::string, std::chrono::steady_clock::time_point> recent_safe_edit_failures_;
+
+    static constexpr std::size_t kMaxPendingTurnSteers = 128;
+    mutable std::mutex active_turn_mu_;
+    std::string active_turn_id_;
+    bool active_turn_accepting_ = false;
+    std::deque<UserInput> pending_turn_inputs_;
 
     // Worker thread and task queue
     std::thread worker_thread_;

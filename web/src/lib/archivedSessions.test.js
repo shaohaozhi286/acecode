@@ -4,6 +4,7 @@ import {
   archivedSessionTarget,
   removeArchivedSessionsByKey,
   selectedArchivedSessions,
+  shouldToggleArchivedSessionRow,
 } from './archivedSessions.js';
 
 function test(name, fn) {
@@ -46,4 +47,15 @@ test('invalid archived rows do not participate in selection or removal', () => {
   assert.equal(archivedSessionKey(invalid), '');
   assert.deepEqual(selectedArchivedSessions([invalid], new Set([''])), []);
   assert.deepEqual(removeArchivedSessionsByKey([invalid], new Set([''])), [invalid]);
+});
+
+test('archived row toggles outside interactive controls', () => {
+  const target = (interactiveMatch) => ({
+    closest: () => interactiveMatch,
+  });
+
+  assert.equal(shouldToggleArchivedSessionRow(target(null)), true);
+  assert.equal(shouldToggleArchivedSessionRow(target({ tagName: 'BUTTON' })), false);
+  assert.equal(shouldToggleArchivedSessionRow(target({ tagName: 'INPUT' })), false);
+  assert.equal(shouldToggleArchivedSessionRow(null), true);
 });

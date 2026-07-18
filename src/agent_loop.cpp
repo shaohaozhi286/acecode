@@ -45,6 +45,39 @@ namespace {
 constexpr const char* kDefaultNoModelConfiguredPrompt =
     u8"请先配置大模型服务。";
 
+bool has_meaningful_user_input(const UserInput& input) {
+    if (input.has_content_parts()) return true;
+    return std::any_of(input.text.begin(), input.text.end(), [](unsigned char ch) {
+        return std::isspace(ch) == 0;
+    });
+}
+
+std::string trim_ascii_copy(const std::string& raw) {
+    std::size_t first = 0;
+    while (first < raw.size() &&
+           std::isspace(static_cast<unsigned char>(raw[first])) != 0) {
+        ++first;
+    }
+    std::size_t last = raw.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(raw[last - 1])) != 0) {
+        --last;
+    }
+    return raw.substr(first, last - first);
+}
+
+ChatMessage build_side_question_message(const std::string& question) {
+    ChatMessage message;
+    message.role = "user";
+    message.content =
+        "[SYSTEM NOTE] Answer the side question below using the conversation "
+        "context above. This is a separate, read-only, one-turn question. "
+        "Do not call tools, do not continue the main task, and do not claim "
+        "that you changed files or session state. Answer directly and "
+        "concisely.\n\nSide question:\n" + question;
+    return message;
+}
+
 std::int64_t now_epoch_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -580,6 +613,7 @@ void AgentLoop::clear_stale_abort_request() {
 }
 
 void AgentLoop::shutdown() {
+    side_question_shutdown_.store(true);
     {
         std::lock_guard<std::mutex> lk(queue_mu_);
         shutdown_requested_ = true;
@@ -588,6 +622,18 @@ void AgentLoop::shutdown() {
     queue_cv_.notify_one();
     if (worker_thread_.joinable()) {
         worker_thread_.join();
+    }
+    join_side_question_threads();
+}
+
+void AgentLoop::join_side_question_threads() {
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard<std::mutex> lk(side_question_threads_mu_);
+        threads.swap(side_question_threads_);
+    }
+    for (auto& thread : threads) {
+        if (thread.joinable()) thread.join();
     }
 }
 
@@ -647,6 +693,64 @@ void AgentLoop::submit(const UserInput& input) {
         task_queue_.push(std::move(task));
     }
     queue_cv_.notify_one();
+}
+
+TurnSteerResult AgentLoop::steer_input(
+    const std::string& expected_turn_id,
+    const UserInput& input) {
+    if (expected_turn_id.empty()) {
+        return {
+            TurnSteerStatus::InvalidInput,
+            {},
+            "expected turn id is required",
+        };
+    }
+    if (!has_meaningful_user_input(input)) {
+        return {
+            TurnSteerStatus::InvalidInput,
+            {},
+            "steering input is empty",
+        };
+    }
+
+    std::lock_guard<std::mutex> lk(active_turn_mu_);
+    if (!active_turn_accepting_ || active_turn_id_.empty()) {
+        return {
+            busy_.load()
+                ? TurnSteerStatus::NonSteerable
+                : TurnSteerStatus::NoActiveTurn,
+            {},
+            busy_.load()
+                ? "the busy operation is not steerable"
+                : "no active turn",
+        };
+    }
+    if (expected_turn_id != active_turn_id_) {
+        return {
+            TurnSteerStatus::TurnMismatch,
+            active_turn_id_,
+            "expected turn does not match the active turn",
+        };
+    }
+    if (pending_turn_inputs_.size() >= kMaxPendingTurnSteers) {
+        return {
+            TurnSteerStatus::QueueFull,
+            active_turn_id_,
+            "active turn steering queue is full",
+        };
+    }
+
+    pending_turn_inputs_.push_back(input);
+    return {
+        TurnSteerStatus::Accepted,
+        active_turn_id_,
+        "accepted",
+    };
+}
+
+std::string AgentLoop::active_turn_id() const {
+    std::lock_guard<std::mutex> lk(active_turn_mu_);
+    return active_turn_accepting_ ? active_turn_id_ : std::string{};
 }
 
 void AgentLoop::submit_shell(std::string command) {
@@ -1335,6 +1439,88 @@ void AgentLoop::maybe_inject_goal_steering() {
     }
 }
 
+void AgentLoop::begin_active_turn(const std::string& turn_id) {
+    std::lock_guard<std::mutex> lk(active_turn_mu_);
+    pending_turn_inputs_.clear();
+    active_turn_id_ = turn_id;
+    active_turn_accepting_ = !turn_id.empty();
+}
+
+void AgentLoop::commit_turn_steering_input(
+    UserInput input,
+    const std::string& turn_id) {
+    ChatMessage message;
+    message.role = "user";
+    message.content = std::move(input.text);
+    message.content_parts = std::move(input.content_parts);
+    message.metadata = std::move(input.metadata);
+    if (!message.metadata.is_object()) {
+        message.metadata = nlohmann::json::object();
+    }
+    if (!input.display_text.empty() && input.display_text != message.content) {
+        message.metadata["display_text"] = std::move(input.display_text);
+    }
+    message.metadata["turn_steer"] = true;
+    message.metadata["turn_id"] = turn_id;
+    ensure_user_message_identity(message);
+
+    messages_.push_back(message);
+    if (session_manager_) {
+        session_manager_->on_message(message);
+    }
+
+    const std::string display = message.metadata.value(
+        "display_text", message.content);
+    if (callbacks_.on_message) {
+        callbacks_.on_message("user", display, false);
+    }
+
+    nlohmann::json event = {
+        {"role", "user"},
+        {"content", message.content},
+        {"is_tool", false},
+        {"id", message.uuid},
+        {"metadata", message.metadata},
+    };
+    if (message.content_parts.is_array() && !message.content_parts.empty()) {
+        event["content_parts"] = message.content_parts;
+    }
+    events_.emit(SessionEventKind::Message, std::move(event));
+    LOG_INFO("[turn/steer] committed input to active turn " + turn_id);
+}
+
+bool AgentLoop::drain_active_turn_inputs(bool close_if_empty) {
+    std::deque<UserInput> pending;
+    std::string turn_id;
+    {
+        std::lock_guard<std::mutex> lk(active_turn_mu_);
+        if (!active_turn_accepting_ || active_turn_id_.empty()) return false;
+        if (pending_turn_inputs_.empty()) {
+            if (close_if_empty) {
+                active_turn_accepting_ = false;
+                active_turn_id_.clear();
+            }
+            return false;
+        }
+        turn_id = active_turn_id_;
+        pending.swap(pending_turn_inputs_);
+    }
+
+    for (auto& input : pending) {
+        commit_turn_steering_input(std::move(input), turn_id);
+    }
+    return true;
+}
+
+std::size_t AgentLoop::close_active_turn_and_discard() {
+    std::lock_guard<std::mutex> lk(active_turn_mu_);
+    const std::size_t dropped = pending_turn_inputs_.size();
+    pending_turn_inputs_.clear();
+    active_turn_accepting_ = false;
+    active_turn_id_.clear();
+    return dropped;
+}
+
 void AgentLoop::inject_shell_turn(const std::string& cmd,
                                   const std::string& stdout_text,
                                   const std::string& stderr_text,
@@ -1393,6 +1579,7 @@ AgentLoop::UserTurnInfo AgentLoop::prepare_user_turn(const UserInput& input,
         user_msg.metadata["hidden_goal_context"] = true;
     }
     ensure_user_message_identity(user_msg);
+    info.active_turn_id = user_msg.uuid;
     info.visible_timed_turn =
         !hidden_goal_context &&
         !(user_msg.metadata.is_object() && user_msg.metadata.value("hidden_goal_context", false));
@@ -1420,10 +1607,14 @@ AgentLoop::UserTurnInfo AgentLoop::prepare_user_turn(const UserInput& input,
         events_.emit(SessionEventKind::Message, msg_event);
     }
 
+    begin_active_turn(info.active_turn_id);
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);
     }
-    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{{"busy", true}});
+    events_.emit(SessionEventKind::BusyChanged, nlohmann::json{
+        {"busy", true},
+        {"turn_id", info.active_turn_id},
+    });
 
     return info;
 }
@@ -1516,6 +1707,87 @@ void AgentLoop::publish_side_question_context(
 std::vector<ChatMessage> AgentLoop::side_question_context_snapshot() const {
     std::lock_guard<std::mutex> lk(side_question_context_mu_);
     return side_question_context_;
+}
+
+SideQuestionResult AgentLoop::ask_side_question(
+    const std::string& raw_question) {
+    SideQuestionResult result;
+    result.question = trim_ascii_copy(raw_question);
+    if (result.question.empty() ||
+        result.question.size() > kMaxSideQuestionBytes) {
+        result.status = SideQuestionStatus::InvalidQuestion;
+        result.error = result.question.empty()
+            ? "question required"
+            : "question too long";
+        return result;
+    }
+
+    auto context = side_question_context_snapshot();
+    if (context.empty()) {
+        result.status = SideQuestionStatus::ContextNotReady;
+        result.error = "side-question context not ready";
+        return result;
+    }
+
+    std::shared_ptr<LlmProvider> provider;
+    if (provider_accessor_) provider = provider_accessor_();
+    if (!provider) {
+        result.status = SideQuestionStatus::ProviderUnavailable;
+        result.error = "session provider unavailable";
+        return result;
+    }
+
+    context.push_back(build_side_question_message(result.question));
+    try {
+        ChatResponse response = provider->chat(context, {});
+        result.answer = trim_ascii_copy(response.content);
+        if (response.finish_reason == "error") {
+            result.status = SideQuestionStatus::Failed;
+            result.error = result.answer.empty()
+                ? "side-question provider call failed"
+                : result.answer;
+            result.answer.clear();
+            return result;
+        }
+        if (response.has_tool_calls()) {
+            result.status = SideQuestionStatus::Failed;
+            result.error = "side-question response requested tools";
+            result.answer.clear();
+            return result;
+        }
+        if (result.answer.empty()) {
+            result.status = SideQuestionStatus::Failed;
+            result.error = "side-question response was empty";
+            return result;
+        }
+    } catch (const std::exception& e) {
+        result.status = SideQuestionStatus::Failed;
+        result.error = e.what();
+        return result;
+    } catch (...) {
+        result.status = SideQuestionStatus::Failed;
+        result.error = "side-question provider call failed";
+        return result;
+    }
+
+    result.status = SideQuestionStatus::Ok;
+    return result;
+}
+
+bool AgentLoop::ask_side_question_async(
+    std::string question,
+    SideQuestionCallback callback) {
+    std::lock_guard<std::mutex> lk(side_question_threads_mu_);
+    if (side_question_shutdown_.load()) return false;
+    side_question_threads_.emplace_back(
+        [this, question = std::move(question),
+         callback = std::move(callback)]() mutable {
+            auto result = ask_side_question(question);
+            if (!side_question_shutdown_.load() && callback) {
+                callback(std::move(result));
+            }
+        });
+    return true;
 }
 
 AgentLoop::ProviderCallResult AgentLoop::call_provider_and_collect(
@@ -2942,6 +3214,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
 
         // Goal steering:budget_limit / objective_updated 提示在下一次模型
         // 请求前注入(hidden_goal_context user 消息,进 API 与持久化,UI 不显示)。
+        drain_active_turn_inputs(false);
         maybe_inject_goal_steering();
 
         // Phase 2: Build API request messages
@@ -3144,6 +3417,9 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             if (maybe_continue_from_stop_hook(provider_result.accumulated.content)) {
                 continue;
             }
+            if (drain_active_turn_inputs(true)) {
+                continue;
+            }
             break;
         }
 
@@ -3160,6 +3436,10 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
             step_usage);
         if (terminator_fired &&
             maybe_continue_from_stop_hook(provider_result.accumulated.content)) {
+            terminator_fired = false;
+            continue;
+        }
+        if (terminator_fired && drain_active_turn_inputs(true)) {
             terminator_fired = false;
             continue;
         }
@@ -3205,9 +3485,18 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(false);
     }
+    const std::size_t dropped_steers = close_active_turn_and_discard();
+    if (dropped_steers > 0) {
+        LOG_WARN("[turn/steer] discarded " + std::to_string(dropped_steers) +
+                 " uncommitted input(s) while closing turn " +
+                 turn_info.active_turn_id);
+    }
     busy_ = false;
     events_.emit(SessionEventKind::BusyChanged, nlohmann::json{
-        {"busy", false}, {"outcome", turn_timing_status}});
+        {"busy", false},
+        {"outcome", turn_timing_status},
+        {"turn_id", turn_info.active_turn_id},
+    });
     events_.emit(SessionEventKind::Done, nlohmann::json{
         {"outcome", turn_timing_status}});
     maybe_continue_goal();

@@ -41,6 +41,7 @@ import {
   archivedSessionTarget,
   removeArchivedSessionsByKey,
   selectedArchivedSessions,
+  shouldToggleArchivedSessionRow,
 } from '../lib/archivedSessions.js';
 import { formatUsageTokens, normalizeUsageStats, usageDataNote } from '../lib/usageStats.js';
 import {
@@ -2207,7 +2208,15 @@ function SectionArchived() {
             return (
               <div
                 key={target.key || item.id}
-                className="flex items-center gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2"
+                onClick={(event) => {
+                  if (shouldToggleArchivedSessionRow(event.target)) toggleSelected(item);
+                }}
+                className={clsx(
+                  'flex items-center gap-3 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2 transition',
+                  deleting
+                    ? 'cursor-wait opacity-60'
+                    : 'cursor-pointer hover:bg-surface-hi',
+                )}
               >
                 <input
                   type="checkbox"

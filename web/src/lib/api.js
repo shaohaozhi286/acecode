@@ -211,6 +211,14 @@ export function createApi(base = null) {
         : { text: payload };
       return request('POST', `/api/sessions/${encodeURIComponent(id)}/messages`, body, base);
     },
+    steerTurn:        (id, payload)  => request(
+      'POST',
+      `/api/sessions/${encodeURIComponent(id)}/turn/steer`,
+      payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload
+        : { text: payload },
+      base,
+    ),
     uploadSessionAttachment: (id, attachment) =>
       request('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`, attachment, base),
     executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),

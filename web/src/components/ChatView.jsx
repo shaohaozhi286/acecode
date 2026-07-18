@@ -63,11 +63,13 @@ import {
   enqueueQueuedInput,
   finishQueuedGuidance,
   hasSendingQueuedInput,
+  markQueuedGuidanceAccepted,
   markQueuedInputCompleted,
   markQueuedInputFailed,
   markQueuedInputSending,
   nextQueuedInput,
   queuedInputRequestPayload,
+  restoreUncommittedGuidanceForSession,
   retryQueuedInput,
 } from '../lib/chatInputQueue.js';
 import { findStickyUserContext, sameStickyUserContext, scrollTopForStickySourceRow } from '../lib/stickyUserContext.js';
@@ -506,7 +508,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, previewPanelAutoFit = false, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -544,6 +546,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const {
     items,
     busy,
+    activeTurnId,
     turns,
     title,
     status: transcriptStatus,
@@ -694,6 +697,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const [layoutWidth, setLayoutWidth] = useState(0);
   const sidePanelResizeActiveRef = useRef(false);
   const previewPanelResizeActiveRef = useRef(false);
+  const renderedPreviewPanelWidthRef = useRef(previewPanelWidth);
   const [composerValue, setComposerValue] = useState('');
   const [composerAttachments, setComposerAttachments] = useState([]);
   const [composerContexts, setComposerContexts] = useState([]);
@@ -1907,35 +1911,32 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     updateQueueState((prev) => retryQueuedInput(prev, queuedId));
   }, [updateQueueState]);
 
-  const runSideQuestion = useCallback((rawQuestion, { queuedId = '', recordHistory = false } = {}) => {
+  const runSideQuestion = useCallback((
+    rawQuestion,
+    { command = 'btw', recordHistory = false } = {},
+  ) => {
     const question = String(rawQuestion || '').trim();
     const targetSid = sidRef.current;
     if (!targetSid) {
-      toast({ kind: 'err', text: '请先在已有会话中使用 /btw' });
+      toast({ kind: 'err', text: '请先在已有会话中使用 /btw 或 /side' });
       return null;
     }
     if (!question) {
-      toast({ kind: 'err', text: '用法：/btw <问题>' });
+      toast({ kind: 'err', text: `用法：/${command} <问题>` });
       return null;
     }
     if (sideQuestionInFlightRef.current) {
-      toast({ kind: 'err', text: '已有引导问题正在回答，请稍候' });
+      toast({ kind: 'err', text: '已有旁路提问正在回答，请稍候' });
       return null;
     }
 
     sideQuestionInFlightRef.current = true;
     const requestEpoch = sideQuestionEpochRef.current;
-    if (queuedId) {
-      updateQueueState((prev) => beginQueuedGuidance(prev, queuedId));
-    }
-    if (recordHistory) recordInputHistory(`/btw ${question}`);
+    if (recordHistory) recordInputHistory(`/${command} ${question}`);
     setSideQuestion({ status: 'loading', question, answer: '', error: '' });
 
     return api.askSideQuestion(targetSid, question)
       .then((result) => {
-        if (queuedId) {
-          updateQueueState((prev) => finishQueuedGuidance(prev, queuedId, { succeeded: true }));
-        }
         if (sidRef.current === targetSid && sideQuestionEpochRef.current === requestEpoch) {
           setSideQuestion({
             status: 'success',
@@ -1947,10 +1948,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         return true;
       })
       .catch((e) => {
-        if (queuedId) {
-          updateQueueState((prev) => finishQueuedGuidance(prev, queuedId, { succeeded: false }));
-        }
-        const message = e?.message || '引导请求失败';
+        const message = e?.message || '旁路提问请求失败';
         if (sidRef.current === targetSid && sideQuestionEpochRef.current === requestEpoch) {
           setSideQuestion({ status: 'error', question, answer: '', error: message });
         }
@@ -1959,11 +1957,51 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       .finally(() => {
         sideQuestionInFlightRef.current = false;
       });
-  }, [api, recordInputHistory, updateQueueState]);
+  }, [api, recordInputHistory]);
 
-  const guideQueued = useCallback((queuedId, content) => {
-    runSideQuestion(content, { queuedId });
-  }, [runSideQuestion]);
+  const guideQueued = useCallback((queuedId) => {
+    const targetSid = sidRef.current;
+    const expectedTurnId = String(activeTurnId || '');
+    if (!targetSid || !busy || !expectedTurnId) {
+      toast({ kind: 'err', text: '当前没有可引导的运行中回合' });
+      return null;
+    }
+    const queuedItem = queueStateRef.current.items.find(
+      (item) => item?.queued?.id === queuedId,
+    );
+    const requestPayload = queuedInputRequestPayload(queuedItem);
+    if (!requestPayload) {
+      toast({ kind: 'err', text: '找不到这条排队消息' });
+      return null;
+    }
+
+    updateQueueState((prev) => beginQueuedGuidance(
+      prev,
+      queuedId,
+      { turnId: expectedTurnId },
+    ));
+    return api.steerTurn(targetSid, {
+      ...requestPayload,
+      expected_turn_id: expectedTurnId,
+    })
+      .then((result) => {
+        updateQueueState((prev) => markQueuedGuidanceAccepted(
+          prev,
+          queuedId,
+          { turnId: result?.turn_id || expectedTurnId },
+        ));
+        return true;
+      })
+      .catch((e) => {
+        updateQueueState((prev) => finishQueuedGuidance(
+          prev,
+          queuedId,
+          { succeeded: false },
+        ));
+        toast({ kind: 'err', text: '引导提交失败:' + (e?.message || '未知错误') });
+        return false;
+      });
+  }, [activeTurnId, api, busy, updateQueueState]);
 
   const sendInputOrBuiltin = useCallback((targetSid, payload) => {
     const text = payloadText(payload);
@@ -1986,15 +2024,59 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const route = inputRouteForText(payload.text);
     if (route.kind === 'side_question') {
       if (hasExtras) {
-        toast({ kind: 'err', text: '/btw 暂不支持附件或上下文，请仅提交文字问题' });
+        toast({ kind: 'err', text: `/${route.command} 暂不支持附件或上下文，请仅提交文字问题` });
         return;
       }
-      const started = runSideQuestion(route.question, { recordHistory: true });
+      const started = runSideQuestion(route.question, {
+        command: route.command,
+        recordHistory: true,
+      });
       if (started) {
         clearCurrentSessionDraft();
         clearComposerExtras();
         restoreChatInputFocusSoon(false);
       }
+      return;
+    }
+    if (route.kind === 'turn_steer') {
+      if (!sid) {
+        toast({ kind: 'err', text: '请先在运行中的会话里使用 /turn' });
+        return;
+      }
+      if (!busy || !activeTurnId) {
+        toast({ kind: 'err', text: '当前没有可引导的运行中回合' });
+        return;
+      }
+      if (!route.guidance && !hasExtras) {
+        toast({ kind: 'err', text: '用法：/turn <引导内容>' });
+        return;
+      }
+      if (composerSubmitting) return;
+
+      const targetSid = sid;
+      const expectedTurnId = activeTurnId;
+      const steerPayload = {
+        ...payload,
+        text: route.guidance,
+        expected_turn_id: expectedTurnId,
+        client_message_id:
+          `turn-${targetSid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      };
+      setComposerSubmitting(true);
+      api.steerTurn(targetSid, steerPayload)
+        .then(() => {
+          recordInputHistory(route.display_text);
+          clearCurrentSessionDraft();
+          clearComposerExtras();
+          toast({ kind: 'ok', text: '引导已提交，等待当前回合接收' });
+        })
+        .catch((e) => {
+          toast({ kind: 'err', text: '引导提交失败:' + (e?.message || '未知错误') });
+        })
+        .finally(() => {
+          setComposerSubmitting(false);
+          restoreChatInputFocusSoon(false);
+        });
       return;
     }
     const isBuiltin = !hasExtras && route.kind === 'builtin';
@@ -2105,7 +2187,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
       })
       .finally(() => setComposerSubmitting(false));
-  }, [sid, busy, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon, setTailFollowFromAction, runSideQuestion]);
+  }, [sid, busy, activeTurnId, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon, setTailFollowFromAction, runSideQuestion]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -2151,10 +2233,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const wasBusy = prevBusyRef.current;
     prevBusyRef.current = busy;
     if (!sid || busy) return;
+    const restored = restoreUncommittedGuidanceForSession(
+      queueStateRef.current,
+      sid,
+    );
+    if (restored !== queueStateRef.current) {
+      updateQueueState(restored);
+    }
     if (wasBusy || !hasSendingQueuedInput(queueState, sid)) {
       drainQueuedInput();
     }
-  }, [busy, drainQueuedInput, queueState, sid]);
+  }, [busy, drainQueuedInput, queueState, sid, updateQueueState]);
 
   useEffect(() => {
     if (!sid || items.length === 0) return;
@@ -2356,7 +2445,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     event.preventDefault();
     const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
     const startX = event.clientX;
-    const startWidth = previewPanelWidth;
+    const startWidth = renderedPreviewPanelWidthRef.current;
     document.body.classList.add('ace-resizing');
     if (event.pointerId != null) event.currentTarget.setPointerCapture?.(event.pointerId);
 
@@ -2378,7 +2467,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     window.addEventListener('pointercancel', onStop, { once: true });
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onStop, { once: true });
-  }, [onPreviewPanelResize, previewPanelWidth, sid]);
+  }, [onPreviewPanelResize, sid]);
 
   const onPreviewPanelHandleKeyDown = useCallback((event) => {
     if (!onPreviewPanelResize) return;
@@ -2387,9 +2476,9 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       event.preventDefault();
       const delta = event.key === 'ArrowLeft' ? step : -step;
       const contentWidth = layoutRef.current?.getBoundingClientRect().width || 0;
-      onPreviewPanelResize(previewPanelWidth + delta, contentWidth);
+      onPreviewPanelResize(renderedPreviewPanelWidthRef.current + delta, contentWidth);
     }
-  }, [onPreviewPanelResize, previewPanelWidth]);
+  }, [onPreviewPanelResize]);
 
   // fork: 调后端 POST /api/sessions/:id/fork,成功后切到新 session(同 ref)。
   // 失败弹 toast 不打断当前 session。新 session 不会自动启 turn,
@@ -2827,8 +2916,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     sidePanelCollapsed: sidePanelNavigationCollapsed,
     previewPanelVisible,
     previewPanelMaximized,
+    previewPanelAutoFit,
   }), [
     layoutWidth,
+    previewPanelAutoFit,
     previewPanelMaximized,
     previewPanelVisible,
     previewPanelWidth,
@@ -2839,6 +2930,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const effectiveChatWidth = layoutWidth > 0 ? contentLayout.chatWidth : 0;
   const effectivePreviewPanelWidth = layoutWidth > 0 ? contentLayout.previewPanelWidth : previewPanelWidth;
   const effectiveSidePanelWidth = layoutWidth > 0 ? contentLayout.sidePanelWidth : sidePanelWidth;
+  renderedPreviewPanelWidthRef.current = effectivePreviewPanelWidth;
 
   useEffect(() => {
     if (!sid) return;
@@ -3634,7 +3726,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         onCancel={cancelQueued}
         onRetry={retryQueued}
         onGuide={guideQueued}
-        guideDisabled={sideQuestion?.status === 'loading'}
+        guideDisabled={!busy || !activeTurnId}
       />
       <InputBar
         ref={inputRef}

@@ -593,6 +593,9 @@ json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMe
     o["id"]            = s.id;
     o["active"]        = true;
     o["status"]        = s.busy ? "running" : "idle";
+    if (!s.active_turn_id.empty()) {
+        o["active_turn_id"] = s.active_turn_id;
+    }
     o["workspace_hash"] = workspace_hash;
     o["cwd"]           = cwd;
     o["no_workspace"]  = no_workspace;
@@ -696,6 +699,11 @@ void WebServer::Impl::append_session_runtime_snapshot(json& wrapper,
             }
             if (entry->loop) {
                 wrapper["busy"] = entry->loop->is_busy();
+                const std::string active_turn_id =
+                    entry->loop->active_turn_id();
+                if (!active_turn_id.empty()) {
+                    wrapper["active_turn_id"] = active_turn_id;
+                }
             }
             if (entry->sm) {
                 meta = entry->sm->load_session_meta(session_id);

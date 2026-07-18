@@ -16,6 +16,11 @@ export function archivedSessionKey(item) {
   return archivedSessionTarget(item).key;
 }
 
+export function shouldToggleArchivedSessionRow(target) {
+  if (!target || typeof target.closest !== 'function') return true;
+  return !target.closest('button, input, a, select, textarea');
+}
+
 function keySet(keys) {
   if (keys instanceof Set) return keys;
   return new Set(Array.isArray(keys) ? keys : []);

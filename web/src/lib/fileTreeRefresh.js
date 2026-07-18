@@ -43,3 +43,51 @@ export function fileTreeReloadPaths(expandedDirs) {
   }
   return paths;
 }
+
+const FILE_TREE_ROW_FIELDS = ['name', 'path', 'kind'];
+
+export function fileTreeDirectoryEntriesEqual(currentEntries, incomingEntries) {
+  if (currentEntries === incomingEntries) return true;
+  if (!Array.isArray(currentEntries) || !Array.isArray(incomingEntries)) return false;
+  if (currentEntries.length !== incomingEntries.length) return false;
+
+  for (let index = 0; index < currentEntries.length; index += 1) {
+    const current = currentEntries[index] || {};
+    const incoming = incomingEntries[index] || {};
+    for (const field of FILE_TREE_ROW_FIELDS) {
+      if (safeString(current[field]) !== safeString(incoming[field])) return false;
+    }
+  }
+  return true;
+}
+
+export function reconcileFileTreeDirectory(treeCache, path, incomingEntries) {
+  const currentCache = treeCache instanceof Map ? treeCache : new Map();
+  const directoryPath = safeString(path);
+  const nextEntries = Array.isArray(incomingEntries) ? incomingEntries : [];
+  if (
+    currentCache.has(directoryPath)
+    && fileTreeDirectoryEntriesEqual(currentCache.get(directoryPath), nextEntries)
+  ) {
+    return currentCache;
+  }
+
+  const nextCache = new Map(currentCache);
+  nextCache.set(directoryPath, nextEntries);
+  return nextCache;
+}
+
+export function fileTreeDirectoryRequestKey(cwd, path) {
+  return `${safeString(cwd)}\u0000${safeString(path)}`;
+}
+
+export function beginFileTreeDirectoryRequest(inFlightRequests, cwd, path) {
+  const requestKey = fileTreeDirectoryRequestKey(cwd, path);
+  if (inFlightRequests.has(requestKey)) return null;
+  inFlightRequests.add(requestKey);
+  return requestKey;
+}
+
+export function finishFileTreeDirectoryRequest(inFlightRequests, requestKey) {
+  inFlightRequests.delete(requestKey);
+}

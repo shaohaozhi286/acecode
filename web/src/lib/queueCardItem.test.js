@@ -81,19 +81,27 @@ run('buildQueueCardItem FAILED 缺 error 时回退默认文案', () => {
 run('buildQueueCardItem GUIDING 显示引导中且不重复显示按钮', () => {
   const card = buildQueueCardItem(makeItem(QUEUED_INPUT_STATE.GUIDING, 'hi'));
   assert.equal(card.statusKind, 'guiding');
-  assert.equal(card.statusLabel, '引导中…');
+  assert.equal(card.statusLabel, '正在提交引导…');
   assert.equal(card.dimmed, true);
   assert.equal(card.canGuide, false);
+
+  const accepted = makeItem(QUEUED_INPUT_STATE.GUIDING, 'hi');
+  accepted.queued.acceptedAt = 100;
+  assert.equal(buildQueueCardItem(accepted).statusLabel, '等待当前回合接收…');
 });
 
-run('附件或上下文排队项不显示引导按钮', () => {
+run('附件或上下文排队项也可以作为结构化引导', () => {
   const attachmentItem = makeItem(QUEUED_INPUT_STATE.QUEUED, 'with file');
   attachmentItem.queued.payload.attachments = [{ id: 'att-1' }];
-  assert.equal(buildQueueCardItem(attachmentItem).canGuide, false);
+  assert.equal(buildQueueCardItem(attachmentItem).canGuide, true);
 
   const contextItem = makeItem(QUEUED_INPUT_STATE.FAILED, 'with context');
   contextItem.queued.payload.contexts = [{ type: 'selection' }];
-  assert.equal(buildQueueCardItem(contextItem).canGuide, false);
+  assert.equal(buildQueueCardItem(contextItem).canGuide, true);
+
+  const attachmentOnly = makeItem(QUEUED_INPUT_STATE.QUEUED, '');
+  attachmentOnly.queued.payload.attachments = [{ id: 'att-2' }];
+  assert.equal(buildQueueCardItem(attachmentOnly).canGuide, true);
 });
 
 run('buildQueueCardItem 缺 queued 字段时不崩溃,默认按 QUEUED 渲染', () => {

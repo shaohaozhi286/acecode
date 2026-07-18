@@ -34,6 +34,21 @@ const FALLBACK_BUILTINS = Object.freeze([
   }),
   Object.freeze({
     kind: 'builtin',
+    name: 'turn',
+    description: 'Guide the active turn at its next model boundary',
+  }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'btw',
+    description: 'Ask a detached one-turn side question',
+  }),
+  Object.freeze({
+    kind: 'builtin',
+    name: 'side',
+    description: 'Alias for /btw',
+  }),
+  Object.freeze({
+    kind: 'builtin',
     name: 'lsp',
     description: 'Show LSP server status (connected/broken/not installed)',
   }),

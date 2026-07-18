@@ -63,6 +63,22 @@ bool LocalSessionClient::send_input(const std::string& session_id, const UserInp
     return true;
 }
 
+TurnSteerResult LocalSessionClient::steer_input(
+    const std::string& session_id,
+    const std::string& expected_turn_id,
+    const UserInput& input) {
+    auto entry = registry_.acquire(session_id);
+    if (!entry || !entry->loop) {
+        LOG_WARN("[client] steer_input on unknown session " + session_id);
+        return {
+            TurnSteerStatus::UnknownSession,
+            {},
+            "unknown session",
+        };
+    }
+    return entry->loop->steer_input(expected_turn_id, input);
+}
+
 BuiltinCommandResult LocalSessionClient::execute_builtin_command(
     const std::string& session_id,
     const BuiltinCommandRequest& request) {
