@@ -7,7 +7,19 @@
 //
 // 没有 sessionId 时显示 Codex 风格新任务主页(首条消息提交时才创建 session)。
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  Component,
+  Fragment,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { flushSync } from 'react-dom';
 import { createApi } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
 import { renderMarkdown } from '../lib/markdown.js';
@@ -20,6 +32,7 @@ import { SideQuestionCard } from './SideQuestionCard.jsx';
 import { GitSessionPill } from './GitSessionPill.jsx';
 import { LspIndicator } from './LspIndicator.jsx';
 import { QuestionPicker } from './QuestionPicker.jsx';
+import { PermissionCard } from './PermissionCard.jsx';
 import { StickyUserContext } from './StickyUserContext.jsx';
 import { SidePanel } from './SidePanel.jsx';
 import { SubagentPanel } from './SubagentPanel.jsx';
@@ -107,6 +120,12 @@ import { notifySessionListChanged } from '../lib/sessionListEvents.js';
 import { MIN_CHAT_WIDTH, solveSingleContentLayout } from '../lib/singleLayout.js';
 import { completionSummaryMarkdown } from '../lib/taskCompleteSummary.js';
 import {
+  activeConversationTurnIndex as resolveActiveConversationTurnIndex,
+  activatedConversationTurnIndex as resolveActivatedConversationTurnIndex,
+  buildConversationTurnPreviews,
+  shouldShowConversationTurnScrubber,
+} from '../lib/conversationTurnScrubber.js';
+import {
   PREVIEW_TAB_TYPES,
   activePreviewTab,
   activatePreviewTab,
@@ -155,6 +174,22 @@ import {
   todoDockSignature,
   validateDockDismissals,
 } from '../lib/changeDockDismissal.js';
+
+const LazyConversationTurnScrubber = lazy(
+  () => import('./ConversationTurnScrubber.jsx'),
+);
+
+class ConversationTurnScrubberBoundary extends Component {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed ? null : this.props.children;
+  }
+}
 
 function isEditableElement(el) {
   if (!el || el === document.body || el === document.documentElement) return false;
@@ -471,12 +506,12 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
-  // PUB 模型池负载:每 30s 轮询一次缓存快照,失败静默(监控不可用不影响主流程)。
+  // 模型池负载:每 30s 轮询一次缓存快照,失败静默(监控不可用不影响主流程)。
   useEffect(() => {
     let alive = true;
     const fetchPool = () => {
@@ -506,7 +541,22 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
         : '错误:' + (reason || ''),
     }),
   });
-  const { items, busy, turns, title, status: transcriptStatus, streamingId, tokenUsage, goal, todos, todoSummary, activity, applyEvent, setTitle: setTranscriptTitle } = transcript;
+  const {
+    items,
+    busy,
+    turns,
+    title,
+    status: transcriptStatus,
+    loadState: transcriptLoadState,
+    streamingId,
+    tokenUsage,
+    goal,
+    todos,
+    todoSummary,
+    activity,
+    applyEvent,
+    setTitle: setTranscriptTitle,
+  } = transcript;
 
   // 后台任务(spawn_subagent 子会话):数据 hook 常驻(运行中任务保持 WS
   // 订阅,权限/问题请求才能冒泡到主会话 UI),面板本身按需打开。
@@ -605,7 +655,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const [modelListLoaded, setModelListLoaded] = useState(false);
   const [homeModelName, setHomeModelName] = useState('');
   const [modelState, setModelState] = useState(null);
-  // PUB 模型池负载快照(每 30s 轮询 /api/model-pool-status)。
+  // 模型池负载快照(每 30s 轮询 /api/model-pool-status)。
   const [poolModels, setPoolModels] = useState([]);
   const [pendingModelName, setPendingModelName] = useState('');
   const [modelSwitching, setModelSwitching] = useState(false);
@@ -719,9 +769,62 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   ), [renderedItems, streamingId]);
   const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
+  const conversationTurnRafRef = useRef(0);
+  const conversationTurnsRef = useRef([]);
+  const conversationTurnActivationRef = useRef(null);
   const searchJumpRetryRef = useRef({ frame: 0, timer: 0 });
   const [stickyUserContext, setStickyUserContext] = useState(null);
+  const [conversationTurnState, setConversationTurnState] = useState({
+    sid: '',
+    turns: [],
+  });
+  const [activeConversationTurn, setActiveConversationTurn] = useState(-1);
+  const preparedConversationTurns = useMemo(
+    () => (
+      conversationTurnState.sid === sid
+        ? conversationTurnState.turns
+        : []
+    ),
+    [conversationTurnState, sid],
+  );
+  const showConversationTurnScrubber = shouldShowConversationTurnScrubber(
+    preparedConversationTurns,
+  );
   const searchJumpOrdinal = useMemo(() => searchJumpOrdinalFromRef(ref), [ref]);
+
+  useEffect(() => {
+    if (!sid || transcriptLoadState !== 'loaded') return undefined;
+
+    let cancelled = false;
+    let frame = 0;
+    let idle = 0;
+    let timer = 0;
+    const prepare = () => {
+      if (cancelled) return;
+      const nextTurns = buildConversationTurnPreviews(itemsRef.current, { busy });
+      if (cancelled) return;
+      setConversationTurnState({ sid, turns: nextTurns });
+    };
+
+    frame = window.requestAnimationFrame(() => {
+      frame = 0;
+      if (cancelled) return;
+      if (typeof window.requestIdleCallback === 'function') {
+        idle = window.requestIdleCallback(prepare, { timeout: 450 });
+        return;
+      }
+      timer = window.setTimeout(prepare, 0);
+    });
+
+    return () => {
+      cancelled = true;
+      if (frame) window.cancelAnimationFrame(frame);
+      if (idle && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idle);
+      }
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [busy, lastUserTurnKey, sid, transcriptLoadState]);
 
   const homeWorkspacePreferenceHash = homeWorkspaceSelection?.workspaceHash || '';
   const persistHomeWorkspaceHash = useCallback((hash = '') => {
@@ -1309,7 +1412,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     setQueueState(next);
   }, []);
 
-  const measureStickyContext = useCallback(() => {
+  const measureStickyContext = useCallback((rowMetrics = null) => {
     const el = scrollRef.current;
     if (!el) {
       setStickyUserContext(null);
@@ -1317,7 +1420,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     }
     const nextContext = findStickyUserContext({
       items: itemsRef.current,
-      rowMetrics: collectRowMetrics(el),
+      rowMetrics: Array.isArray(rowMetrics) ? rowMetrics : collectRowMetrics(el),
       scrollTop: el.scrollTop,
       clientHeight: el.clientHeight,
       scrollHeight: el.scrollHeight,
@@ -1334,6 +1437,56 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       measureStickyContext();
     });
   }, [measureStickyContext]);
+
+  const measureConversationTurn = useCallback((rowMetrics = null) => {
+    const el = scrollRef.current;
+    const turnsForRail = conversationTurnsRef.current;
+    if (!el || turnsForRail.length === 0) {
+      conversationTurnActivationRef.current = null;
+      setActiveConversationTurn(-1);
+      return;
+    }
+    const activation = conversationTurnActivationRef.current;
+    const activatedIndex = activation?.sid === sid
+      ? resolveActivatedConversationTurnIndex(
+        turnsForRail,
+        activation,
+        el.scrollTop,
+      )
+      : -1;
+    if (activatedIndex >= 0) {
+      setActiveConversationTurn((previous) => (
+        previous === activatedIndex ? previous : activatedIndex
+      ));
+      return;
+    }
+    conversationTurnActivationRef.current = null;
+    const nextIndex = resolveActiveConversationTurnIndex(
+      turnsForRail,
+      Array.isArray(rowMetrics) ? rowMetrics : collectRowMetrics(el),
+      el.scrollTop,
+    );
+    setActiveConversationTurn((previous) => (
+      previous === nextIndex ? previous : nextIndex
+    ));
+  }, [sid]);
+
+  const scheduleTranscriptMeasures = useCallback(() => {
+    if (stickyRafRef.current) {
+      cancelAnimationFrame(stickyRafRef.current);
+      stickyRafRef.current = 0;
+    }
+    if (conversationTurnRafRef.current) {
+      cancelAnimationFrame(conversationTurnRafRef.current);
+    }
+    conversationTurnRafRef.current = requestAnimationFrame(() => {
+      conversationTurnRafRef.current = 0;
+      const el = scrollRef.current;
+      const rowMetrics = collectRowMetrics(el);
+      measureStickyContext(rowMetrics);
+      measureConversationTurn(rowMetrics);
+    });
+  }, [measureConversationTurn, measureStickyContext]);
 
   const setTailFollowFromAction = useCallback((action) => {
     tailFollowStateRef.current = nextChatTailFollowState(tailFollowStateRef.current, action);
@@ -1364,8 +1517,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       });
       scrollActivityRef.current.prev = metrics;
     }
-    scheduleStickyMeasure();
-  }, [scheduleStickyMeasure, setTailFollowFromAction]);
+    scheduleTranscriptMeasures();
+  }, [scheduleTranscriptMeasures, setTailFollowFromAction]);
 
   // 滚轮上滚是最明确的"用户想往回看"信号,不等 scroll 事件的启发式判定,
   // 直接暂停跟随(仅回合进行中生效,见 pauseTailFollowForReview 内的门)。
@@ -1411,6 +1564,42 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     requestAnimationFrame(scheduleStickyMeasure);
     window.setTimeout(scheduleStickyMeasure, 220);
   }, [scheduleStickyMeasure]);
+
+  const jumpToConversationTurn = useCallback((turn, index) => {
+    const el = scrollRef.current;
+    const targetId = String(turn?.itemId || '');
+    if (!el || !targetId) return;
+
+    const targetRow = Array.from(el.querySelectorAll('[data-chat-row="true"]'))
+      .find((row) => row.getAttribute('data-chat-item-id') === targetId);
+    if (!targetRow) return;
+
+    const containerRect = el.getBoundingClientRect();
+    const rowRect = targetRow.getBoundingClientRect();
+    const targetScrollTop = scrollTopForStickySourceRow({
+      scrollTop: el.scrollTop,
+      containerTop: containerRect.top,
+      rowTop: rowRect.top,
+      topInset: 20,
+    });
+
+    pauseTailFollowForReview();
+    conversationTurnActivationRef.current = {
+      sid,
+      itemId: targetId,
+      scrollTop: el.scrollTop,
+    };
+    flushSync(() => {
+      setActiveConversationTurn(index);
+    });
+    el.scrollTop = targetScrollTop;
+    conversationTurnActivationRef.current = {
+      sid,
+      itemId: targetId,
+      scrollTop: el.scrollTop,
+    };
+    window.requestAnimationFrame(scheduleTranscriptMeasures);
+  }, [pauseTailFollowForReview, scheduleTranscriptMeasures, sid]);
 
   const focusChatInput = useCallback((force = false) => {
     if (questionRequest) return;
@@ -1472,7 +1661,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     });
 
     return cancelTailFollowScroll;
-  }, [renderedItems, busy, changeDockBottomPadding, sid, cancelTailFollowScroll]);
+  }, [renderedItems, permissionRequests, busy, changeDockBottomPadding, sid, cancelTailFollowScroll]);
 
   useLayoutEffect(() => {
     const previous = searchJumpRetryRef.current || {};
@@ -1558,18 +1747,33 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
 
   useLayoutEffect(() => {
     itemsRef.current = renderedItems;
-    scheduleStickyMeasure();
-  }, [renderedItems, scheduleStickyMeasure]);
+    scheduleTranscriptMeasures();
+  }, [renderedItems, scheduleTranscriptMeasures]);
+
+  useLayoutEffect(() => {
+    scheduleTranscriptMeasures();
+  }, [permissionRequests, scheduleTranscriptMeasures]);
+
+  useLayoutEffect(() => {
+    conversationTurnsRef.current = preparedConversationTurns;
+    scheduleTranscriptMeasures();
+  }, [preparedConversationTurns, scheduleTranscriptMeasures]);
 
   useEffect(() => {
+    conversationTurnActivationRef.current = null;
     setStickyUserContext(null);
-    scheduleStickyMeasure();
-  }, [sid, scheduleStickyMeasure]);
+    setActiveConversationTurn(-1);
+    scheduleTranscriptMeasures();
+  }, [sid, scheduleTranscriptMeasures]);
 
   useEffect(() => () => {
     if (stickyRafRef.current) {
       cancelAnimationFrame(stickyRafRef.current);
       stickyRafRef.current = 0;
+    }
+    if (conversationTurnRafRef.current) {
+      cancelAnimationFrame(conversationTurnRafRef.current);
+      conversationTurnRafRef.current = 0;
     }
   }, []);
 
@@ -1577,28 +1781,28 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const el = scrollRef.current;
     if (!el) return undefined;
 
-    const onResize = () => scheduleStickyMeasure();
+    const onResize = () => scheduleTranscriptMeasures();
     window.addEventListener('resize', onResize);
 
     let mutationObserver = null;
     if (typeof MutationObserver !== 'undefined') {
-      mutationObserver = new MutationObserver(scheduleStickyMeasure);
+      mutationObserver = new MutationObserver(scheduleTranscriptMeasures);
       mutationObserver.observe(el, { childList: true, subtree: true, characterData: true });
     }
 
     let resizeObserver = null;
     if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(scheduleStickyMeasure);
+      resizeObserver = new ResizeObserver(scheduleTranscriptMeasures);
       resizeObserver.observe(el);
     }
 
-    scheduleStickyMeasure();
+    scheduleTranscriptMeasures();
     return () => {
       window.removeEventListener('resize', onResize);
       mutationObserver?.disconnect();
       resizeObserver?.disconnect();
     };
-  }, [sid, scheduleStickyMeasure]);
+  }, [sid, scheduleTranscriptMeasures]);
 
   useEffect(() => {
     if (sid || !ref?.homeWorkspaceExplicit) return;
@@ -2389,7 +2593,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     const normalized = normalizeModelState(modelState);
     return normalized ? [normalized, ...modelOptions] : modelOptions;
   }, [modelOptions, modelState]);
-  // 当前/首屏模型的 PUB 池负载(按 model id 精确匹配 modelPoolName;非 PUB → null)。
+  // 当前/首屏模型的池负载(按 model id 精确匹配 modelPoolName;未命中 → null)。
   const currentModelLoad = useMemo(
     () => pickModelLoad(poolModels, modelState?.model),
     [poolModels, modelState],
@@ -3102,17 +3306,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       <div className="h-9 px-3 flex items-center justify-between bg-surface border-b border-border shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[13px] font-semibold text-fg truncate">{title}</span>
-          {sid && onFindInConversation && (
-            <button
-              type="button"
-              onClick={onFindInConversation}
-              className="w-6 h-6 rounded-md text-fg-mute flex items-center justify-center shrink-0 transition hover:bg-surface-hi hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/25"
-              title="搜索当前对话内容 (Ctrl+F)"
-              aria-label="搜索当前对话内容"
-            >
-              <VsIcon name="search" size={14} />
-            </button>
-          )}
           <span
             className={clsx(
               'px-2.5 py-0.5 rounded-full text-[10px] font-medium border whitespace-nowrap',
@@ -3124,6 +3317,17 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
           </span>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {sid && onFindInConversation && (
+            <button
+              type="button"
+              onClick={onFindInConversation}
+              className="w-6 h-6 rounded-md text-fg-mute flex items-center justify-center shrink-0 transition hover:bg-surface-hi hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/25"
+              title="搜索当前对话内容 (Ctrl+F)"
+              aria-label="搜索当前对话内容"
+            >
+              <VsIcon name="search" size={14} />
+            </button>
+          )}
           {sid && (
             <LspIndicator
               api={api}
@@ -3352,10 +3556,39 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
               />
             </div>
           ))}
-          {busy && !hasVisibleStreamingAssistant && (!hasActiveTool || activity?.phase === 'permission_waiting') && (
+          {permissionRequests.map((request) => (
+            <div
+              key={`permission-${request.request_id}`}
+              className="ace-chat-row flex flex-col ace-chat-row-assistant-gutter"
+              data-chat-row="true"
+              data-chat-item-id={`permission-${request.request_id}`}
+              data-chat-kind="permission"
+            >
+              <PermissionCard
+                request={request}
+                originLabel={request.origin_label || ''}
+                onDecision={onPermissionDecision}
+              />
+            </div>
+          ))}
+          {busy
+              && !hasVisibleStreamingAssistant
+              && (!hasActiveTool || activity?.phase === 'permission_waiting')
+              && !(activity?.phase === 'permission_waiting' && permissionRequests.length > 0) && (
             <ActivityIndicator activity={activity} showAceCodeAvatar={showAceCodeAvatar} />
           )}
         </div>
+        {showConversationTurnScrubber && (
+          <ConversationTurnScrubberBoundary key={sid}>
+            <Suspense fallback={null}>
+              <LazyConversationTurnScrubber
+                turns={preparedConversationTurns}
+                activeIndex={activeConversationTurn}
+                onJump={jumpToConversationTurn}
+              />
+            </Suspense>
+          </ConversationTurnScrubberBoundary>
+        )}
         <StickyUserContext context={stickyUserContext} onJumpToSource={jumpToStickyUserSource} />
         {showChangeDock && (
           <ChangeGlassDock

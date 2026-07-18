@@ -36,6 +36,7 @@ import {
   notifySessionListChanged,
 } from '../lib/sessionListEvents.js';
 import { sessionHasPendingQuestion } from '../lib/pendingQuestions.js';
+import { sessionHasPendingPermission } from '../lib/permissionRequestQueue.js';
 import { pickExistingWorkspace } from '../lib/workspacePicker.js';
 import {
   applyStatusSnapshot,
@@ -47,10 +48,11 @@ import {
   workspaceHasUnread,
 } from '../lib/sessionStatus.js';
 import {
+  expandedSessionListsAfterWorkspaceCollapseAll,
   reconcileSidebarSessions,
   sessionListNeedsRevealExpansion,
   sessionMatchesRevealTarget,
-  sidebarSessionHasWorktree,
+  sidebarSessionMarker,
   sidebarRevealTarget,
   sidebarSessionProjection,
   upsertSidebarSession,
@@ -408,6 +410,7 @@ function SessionRow({
   active,
   pinned = false,
   pinEnabled = true,
+  pendingPermission = false,
   pendingQuestion = false,
   onSelect,
   onTogglePin,
@@ -423,7 +426,7 @@ function SessionRow({
   const workspaceHash = s.workspace_hash || s.workspaceHash || '';
   const rowKey = pinned ? pinnedSessionKey(workspaceHash, s.id) : '';
   const title = sessionDisplayTitle(s, s.name || '');
-  const worktreeSession = sidebarSessionHasWorktree(s);
+  const sessionMarker = sidebarSessionMarker(s);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
   const committingRef = useRef(false);
@@ -583,14 +586,22 @@ function SessionRow({
         </button>
       )}
       <span className="flex min-w-0 items-center justify-end gap-1">
-        {!editing && pendingQuestion && (
+        {!editing && pendingPermission ? (
+          <span
+            data-sidebar-permission-prompt="true"
+            className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
+            title="等待用户处理权限请求"
+          >
+            权限请求
+          </span>
+        ) : !editing && pendingQuestion ? (
           <span
             className="shrink-0 rounded-full border border-ok-border bg-ok-bg px-2 py-[1px] text-[11px] font-medium leading-[18px] text-ok"
             title="等待用户回复 AskUserQuestion"
           >
             等待回复
           </span>
-        )}
+        ) : null}
         {!editing && (
           <span className="ace-sidebar-meta-text text-[13px] text-fg-mute shrink-0">{relativeTime(s.updated_at || s.created_at)}</span>
         )}
@@ -604,17 +615,21 @@ function SessionRow({
           }}
           className={clsx(
             'w-5 h-7 rounded flex items-center justify-center shrink-0 text-fg-mute hover:text-fg hover:bg-surface-hi transition',
-            worktreeSession
+            sessionMarker
               ? 'opacity-100'
               : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
           )}
           title="归档"
-          aria-label={worktreeSession ? '工作树会话，归档' : '归档'}
+          aria-label={sessionMarker === 'loop'
+            ? '循环任务，归档'
+            : sessionMarker === 'worktree'
+              ? '工作树会话，归档'
+              : '归档'}
         >
-          {worktreeSession ? (
+          {sessionMarker ? (
             <span className="relative block w-[14px] h-[14px]" aria-hidden="true">
               <VsIcon
-                name="worktree"
+                name={sessionMarker === 'loop' ? 'alarm' : 'worktree'}
                 size={14}
                 className="absolute inset-0 opacity-100 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0"
               />
@@ -800,6 +815,7 @@ function WorkspaceGroup({
   onTogglePin,
   onArchive,
   onRenameSession,
+  pendingPermissionSessionIds,
   pendingQuestionSessionIds,
   sessionsLoading = false,
   opencodeImportCount = 0,
@@ -947,6 +963,7 @@ function WorkspaceGroup({
                   key={s.id}
                   s={s}
                   active={sessionMatchesRevealTarget(s, activeTarget) || (!activeTarget?.sessionId && s.id === activeId)}
+                  pendingPermission={sessionHasPendingPermission(s, pendingPermissionSessionIds)}
                   pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
                   onSelect={onSelect}
                   onTogglePin={onTogglePin}
@@ -985,6 +1002,7 @@ function NoWorkspaceSessionGroup({
   onSelect,
   onArchive,
   onRenameSession,
+  pendingPermissionSessionIds,
   pendingQuestionSessionIds,
 }) {
   const projectedSessions = sidebarSessionProjection(sessions, sessionListExpanded);
@@ -1004,6 +1022,7 @@ function NoWorkspaceSessionGroup({
               s={s}
               active={sessionMatchesRevealTarget(s, activeTarget) || (!activeTarget?.sessionId && s.id === activeId)}
               pinEnabled={false}
+              pendingPermission={sessionHasPendingPermission(s, pendingPermissionSessionIds)}
               pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
               onSelect={onSelect}
               onArchive={onArchive}
@@ -1040,6 +1059,7 @@ export function Sidebar({
   onSearchTasks,
   workspaceActivationRequest = null,
   onOpenSettingsSection,
+  pendingPermissionSessionIds = new Set(),
   pendingQuestionSessionIds = new Set(),
 }) {
   const [workspaces,  setWorkspaces]  = useState([]);
@@ -1543,7 +1563,7 @@ export function Sidebar({
 
       updateExpanded((prev) => {
         const next = new Set(prev);
-        if (shouldAutoExpandWorkspace) {
+        if (!workspaceCollapseAllRef.current) {
           for (const w of withActive) if (w.active) next.add(w.hash);
           if (revealWorkspaceHash && availableHashes.has(revealWorkspaceHash)) next.add(revealWorkspaceHash);
         }
@@ -1771,7 +1791,11 @@ export function Sidebar({
         (session.workspace_hash || session.workspaceHash || '') === revealTarget.workspaceHash
       ));
 
-    if (!revealTarget.noWorkspace && revealTarget.workspaceHash) {
+    if (
+      !revealTarget.noWorkspace
+      && revealTarget.workspaceHash
+      && !workspaceCollapseAllRef.current
+    ) {
       updateExpanded((prev) => {
         if (prev.has(revealTarget.workspaceHash)) return prev;
         return new Set(prev).add(revealTarget.workspaceHash);
@@ -2304,7 +2328,10 @@ export function Sidebar({
   const collapseAllWorkspaces = useCallback(() => {
     workspaceCollapseAllRef.current = true;
     updateExpanded(new Set());
-  }, [updateExpanded]);
+    setExpandedSessionLists((previous) => (
+      expandedSessionListsAfterWorkspaceCollapseAll(previous, workspaces)
+    ));
+  }, [updateExpanded, workspaces]);
 
   const sidebarNavCallbacks = {
     onNewTask,
@@ -2360,6 +2387,7 @@ export function Sidebar({
                       s={s}
                       pinned
                       active={sessionMatchesRevealTarget(s, revealTarget) || (!revealTarget.sessionId && s.id === activeId)}
+                      pendingPermission={sessionHasPendingPermission(s, pendingPermissionSessionIds)}
                       pendingQuestion={sessionHasPendingQuestion(s, pendingQuestionSessionIds)}
                       dragging={pinnedDragState?.sourceKey === rowKey}
                       dropPlacement={pinnedDragState?.targetKey === rowKey ? pinnedDragState.placement : ''}
@@ -2393,6 +2421,7 @@ export function Sidebar({
                 onSelect={(session) => selectSession({ noWorkspace: true }, session)}
                 onArchive={archiveSession}
                 onRenameSession={renameSession}
+                pendingPermissionSessionIds={pendingPermissionSessionIds}
                 pendingQuestionSessionIds={pendingQuestionSessionIds}
               />
             )}
@@ -2453,6 +2482,7 @@ export function Sidebar({
                       onTogglePin={togglePinnedSession}
                       onArchive={archiveSession}
                       onRenameSession={renameSession}
+                      pendingPermissionSessionIds={pendingPermissionSessionIds}
                       pendingQuestionSessionIds={pendingQuestionSessionIds}
                       sessionsLoading={sessionLoadingWorkspaces.has(ws.hash) || !sessionLoadedWorkspaces.has(ws.hash)}
                       opencodeImportCount={opencodeImportPreviews.get(ws.hash)?.count || 0}

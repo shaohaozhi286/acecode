@@ -82,6 +82,15 @@ std::string strip_common_prefix(std::string s) {
 
 } // namespace
 
+bool is_generated_session_error_title(const std::string& title) {
+    std::size_t i = 0;
+    while (i < title.size() &&
+           std::isspace(static_cast<unsigned char>(title[i])) != 0) {
+        ++i;
+    }
+    return title.compare(i, 7, "[Error]") == 0;
+}
+
 std::string sanitize_generated_session_title(std::string raw) {
     std::string title = title_from_json_or_raw(ensure_utf8(raw));
     title = strip_wrapping_quotes(strip_common_prefix(collapse_whitespace(title)));
@@ -116,8 +125,15 @@ std::optional<std::string> generate_session_title(
     user.content = input;
 
     ChatResponse response = provider.chat({system, user}, {});
+    if (response.finish_reason == "error" ||
+        response.has_tool_calls() ||
+        is_generated_session_error_title(response.content)) {
+        return std::nullopt;
+    }
     std::string title = sanitize_generated_session_title(response.content);
-    if (title.empty()) return std::nullopt;
+    if (title.empty() || is_generated_session_error_title(title)) {
+        return std::nullopt;
+    }
     return title;
 }
 

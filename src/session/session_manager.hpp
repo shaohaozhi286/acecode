@@ -12,6 +12,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 namespace acecode {
 
@@ -145,7 +146,18 @@ public:
     bool try_set_generated_session_title(std::string title);
     bool try_set_generated_session_title_for_session(const std::string& session_id,
                                                      std::string title);
-    bool mark_auto_title_generation_started();
+    // Start the initial hidden title request, or consume one pending retry.
+    // The returned text is the original visible input that the worker must use.
+    std::optional<std::string> begin_auto_title_generation(std::string visible_input);
+    // Complete one worker attempt. When the main turn already completed, a
+    // failed initial attempt atomically reserves and returns the single retry.
+    std::optional<std::string> finish_auto_title_generation_for_session(
+        const std::string& session_id,
+        bool succeeded);
+    // Mark the visible turn outcome. A completed turn atomically reserves and
+    // returns a retry when the initial title attempt already failed.
+    std::optional<std::string> mark_auto_title_turn_finished(
+        const std::string& status);
 
     // Set the in-memory archive state for the current session and persist it
     // immediately when metadata already exists.
@@ -156,6 +168,10 @@ public:
     // otherwise on lazy creation). Pass empty string to clear.
     void set_parent_session_id(std::string parent_id);
     std::string current_parent_session_id() const;
+
+    // Persist the daemon-owned LOOP/run that directly created this session.
+    // This is provenance only and does not restore LOOP runtime policy.
+    void set_loop_origin(std::string loop_id, std::string loop_run_id);
 
     // 会话当前的 worktree 状态(enter_worktree / --worktree 写入,
     // exit_worktree 清空)。持久化到 .meta.json,resume 时恢复。
@@ -192,6 +208,7 @@ private:
     bool ensure_created();  // Lazy creation of session files on first message
     void update_meta();     // Write current metadata to disk
     bool try_set_generated_session_title_locked(std::string title);
+    void reset_auto_title_state_locked();
     std::string extract_summary(const std::string& content) const;
     bool acquire_writer_lease_locked();
     void refresh_writer_lease_locked();
@@ -218,7 +235,12 @@ private:
     std::string created_at_;
     std::string pending_title_;
     std::string title_source_;
-    bool auto_title_generation_attempted_ = false;
+    std::string auto_title_input_;
+    std::string auto_title_session_id_;
+    int auto_title_generation_attempts_ = 0;
+    bool auto_title_generation_in_flight_ = false;
+    bool auto_title_retry_pending_ = false;
+    bool auto_title_first_turn_completed_ = false;
     bool user_title_touched_ = false;
     std::string input_draft_;
     std::string permission_mode_ = "default";
@@ -230,6 +252,8 @@ private:
     bool writer_lease_active_ = false;
     bool archived_ = false;
     std::string parent_session_id_;
+    std::string loop_id_;
+    std::string loop_run_id_;
     WorktreeSessionInfo worktree_;
     FileCheckpointStore checkpoint_store_;
     std::unique_ptr<ThreadGoalStore> goal_store_;

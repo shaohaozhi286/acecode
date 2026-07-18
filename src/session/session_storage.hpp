@@ -54,6 +54,12 @@ struct SessionMeta {
     // 子会话依然被识别为后台任务,而不是泄漏进侧栏。空时序列化省略。
     std::string parent_session_id;
 
+    // Daemon-owned LOOP provenance. This is display/history metadata only:
+    // resuming the session does not reactivate LOOP execution policy.
+    // Empty loop_id means this session was not directly created by a LOOP run.
+    std::string loop_id;
+    std::string loop_run_id;
+
     // Sidebar archive state. Missing field in legacy metadata is false.
     bool archived = false;
 

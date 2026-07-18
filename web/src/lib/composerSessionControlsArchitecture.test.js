@@ -84,3 +84,11 @@ run('model refresh lives in the integrated model menu', () => {
     'ace-composer-model-options',
   ]);
 });
+
+run('model selector shows its label without the legacy A glyph', () => {
+  const component = source('components/ComposerSessionControls.jsx');
+  const styles = source('styles/globals.css');
+
+  assert.doesNotMatch(component, /ModelGlyph|ace-composer-model-glyph/);
+  assert.doesNotMatch(styles, /\.ace-composer-model-glyph/);
+});

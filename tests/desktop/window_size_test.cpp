@@ -29,5 +29,37 @@ TEST(WindowSizeTest, NormalizesDegenerateInputsToPositiveDimensions) {
     EXPECT_EQ(size.height, 1);
 }
 
+TEST(WindowSizeTest, SafeMarginsPreservePreferredSizeWhenItFits) {
+    const auto size =
+        fit_desktop_window_to_safe_work_area({1280, 820}, {1920, 1040}, 96);
+
+    EXPECT_EQ(size.width, 1280);
+    EXPECT_EQ(size.height, 820);
+}
+
+TEST(WindowSizeTest, SafeMarginsConstrainShortDisplayHeight) {
+    const auto size =
+        fit_desktop_window_to_safe_work_area({1280, 820}, {1536, 731}, 96);
+
+    EXPECT_EQ(size.width, 1280);
+    EXPECT_EQ(size.height, 611);
+}
+
+TEST(WindowSizeTest, SafeMarginsScaleWithMonitorDpi) {
+    const auto size =
+        fit_desktop_window_to_safe_work_area({1280, 820}, {1536, 731}, 144);
+
+    EXPECT_EQ(size.width, 1280);
+    EXPECT_EQ(size.height, 551);
+}
+
+TEST(WindowSizeTest, SafeMarginsNormalizeDegenerateWorkArea) {
+    const auto size =
+        fit_desktop_window_to_safe_work_area({1280, 820}, {0, -20}, 96);
+
+    EXPECT_EQ(size.width, 1);
+    EXPECT_EQ(size.height, 1);
+}
+
 } // namespace
 } // namespace acecode::desktop

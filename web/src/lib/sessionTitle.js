@@ -8,10 +8,17 @@ export function titleFromMessages(messages = []) {
   return '';
 }
 
+export function isGeneratedErrorTitle(session) {
+  const s = session || {};
+  const title = typeof s.title === 'string' ? s.title.trimStart() : '';
+  const source = String(s.title_source ?? s.titleSource ?? '');
+  return source === 'generated' && title.startsWith('[Error]');
+}
+
 export function isUntitledNewSession(session) {
   const s = session || {};
   const explicit = typeof s.title === 'string' ? s.title.trim() : '';
-  if (explicit) return false;
+  if (explicit && !isGeneratedErrorTitle(s)) return false;
 
   const summary = typeof s.summary === 'string' ? s.summary.trim() : '';
   if (summary) return false;
@@ -75,7 +82,7 @@ export function withNewSessionDisplayTitles(sessions = []) {
 export function sessionDisplayTitle(session, fallback = '') {
   const s = session || {};
   const explicit = typeof s.title === 'string' ? s.title.trim() : '';
-  if (explicit) return explicit;
+  if (explicit && !isGeneratedErrorTitle(s)) return explicit;
 
   const summary = typeof s.summary === 'string' ? s.summary.trim() : '';
   if (summary) return summary;

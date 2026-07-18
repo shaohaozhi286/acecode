@@ -74,6 +74,8 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.archived      = true;
     in.no_workspace  = true;
     in.parent_session_id = "20260419-110000-ffff";
+    in.loop_id = "loop-1";
+    in.loop_run_id = "run-1";
 
     SessionStorage::write_meta(meta_path, in);
     SessionMeta out = SessionStorage::read_meta(meta_path);
@@ -109,6 +111,8 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.archived,      in.archived);
     EXPECT_EQ(out.no_workspace,  in.no_workspace);
     EXPECT_EQ(out.parent_session_id, in.parent_session_id);
+    EXPECT_EQ(out.loop_id, in.loop_id);
+    EXPECT_EQ(out.loop_run_id, in.loop_run_id);
 }
 
 // 场景:普通会话(非 spawn_subagent 子会话)的 parent_session_id 为空,
@@ -176,6 +180,8 @@ TEST(SessionStorage, LegacyMetaWithoutTitle) {
     EXPECT_EQ(out.session_token_usage.total_tokens, 0);
     EXPECT_TRUE(out.todos.empty())
         << "legacy meta without 'todos' must deserialize to an empty checklist";
+    EXPECT_TRUE(out.loop_id.empty());
+    EXPECT_TRUE(out.loop_run_id.empty());
     EXPECT_FALSE(out.archived)
         << "legacy meta without 'archived' must deserialize to false";
 }
@@ -201,6 +207,38 @@ TEST(SessionStorage, LegacyMetaWithTitleGetsLegacySource) {
     SessionMeta out = SessionStorage::read_meta(meta_path);
     EXPECT_EQ(out.title, "old title");
     EXPECT_EQ(out.title_source, "legacy");
+}
+
+TEST(SessionStorage, GeneratedProviderErrorTitleReadsAsUntitled) {
+    auto dir = make_unique_tmp_dir("generated_error_title");
+    auto meta_path = (dir / "generated-error.meta.json").string();
+
+    SessionMeta in;
+    in.id = "generated-error";
+    in.cwd = "/tmp/project";
+    in.title = "  [Error] Connection failed";
+    in.title_source = "generated";
+    SessionStorage::write_meta(meta_path, in);
+
+    SessionMeta out = SessionStorage::read_meta(meta_path);
+    EXPECT_TRUE(out.title.empty());
+    EXPECT_TRUE(out.title_source.empty());
+}
+
+TEST(SessionStorage, UserProviderErrorShapedTitleIsPreserved) {
+    auto dir = make_unique_tmp_dir("user_error_title");
+    auto meta_path = (dir / "user-error.meta.json").string();
+
+    SessionMeta in;
+    in.id = "user-error";
+    in.cwd = "/tmp/project";
+    in.title = "[Error] Custom incident label";
+    in.title_source = "user";
+    SessionStorage::write_meta(meta_path, in);
+
+    SessionMeta out = SessionStorage::read_meta(meta_path);
+    EXPECT_EQ(out.title, in.title);
+    EXPECT_EQ(out.title_source, "user");
 }
 
 // 场景:SessionMeta.title 为空时,write_meta 必须跳过该字段,而不是写成
@@ -232,6 +270,8 @@ TEST(SessionStorage, EmptyTitleIsOmittedOnWrite) {
         << "empty pre_plan_permission_mode should be omitted from the serialized JSON; got: " << content;
     EXPECT_EQ(content.find("\"todos\""), std::string::npos)
         << "empty todos should be omitted from the serialized JSON; got: " << content;
+    EXPECT_EQ(content.find("\"loop_execution\""), std::string::npos)
+        << "empty LOOP provenance should be omitted from the serialized JSON; got: " << content;
 }
 
 // 场景:pre_plan_permission_mode 只能保存非 Plan mode。坏值和 "plan"

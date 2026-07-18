@@ -10,8 +10,12 @@
 #include "session/event_dispatcher.hpp"
 #include "session/permission_prompter.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 using acecode::AsyncPrompter;
@@ -50,6 +54,25 @@ EventDispatcher::SubscriptionId subscribe_responder(
     });
 }
 
+struct LifecycleLog {
+    std::mutex mu;
+    std::vector<SessionEvent> events;
+
+    void record(const SessionEvent& event) {
+        if (event.kind != SessionEventKind::PermissionRequest &&
+            event.kind != SessionEventKind::PermissionClosed) {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(mu);
+        events.push_back(event);
+    }
+
+    std::vector<SessionEvent> snapshot() {
+        std::lock_guard<std::mutex> lk(mu);
+        return events;
+    }
+};
+
 } // namespace
 
 // 场景: AsyncPrompter::prompt 被 worker thread 调,listener 收到 PermissionRequest
@@ -58,13 +81,26 @@ TEST(AsyncPrompter, AllowDecisionUnblocksPrompt) {
     EventDispatcher d;
     AsyncPrompter prompter(d, 5s);
     ResponderState state;
+    LifecycleLog lifecycle;
     auto sub = subscribe_responder(d, prompter, PermissionDecisionChoice::Allow, state);
+    auto lifecycle_sub = d.subscribe([&](const SessionEvent& e) { lifecycle.record(e); });
 
     auto result = prompter.prompt("bash", "{\"command\":\"ls\"}", nullptr);
     EXPECT_EQ(result, PermissionResult::Allow);
     EXPECT_TRUE(state.got);
     EXPECT_FALSE(state.request_id.empty());
+
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0].kind, SessionEventKind::PermissionRequest);
+    EXPECT_EQ(events[1].kind, SessionEventKind::PermissionClosed);
+    EXPECT_LT(events[0].seq, events[1].seq);
+    EXPECT_EQ(events[1].payload.value("request_id", std::string{}), state.request_id);
+    EXPECT_EQ(events[1].payload.value("choice", std::string{}), "allow");
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}), "decision");
+
     d.unsubscribe(sub);
+    d.unsubscribe(lifecycle_sub);
 }
 
 // 场景: Deny 路径必须返回 PermissionResult::Deny。
@@ -72,11 +108,18 @@ TEST(AsyncPrompter, DenyDecisionReturnsDeny) {
     EventDispatcher d;
     AsyncPrompter prompter(d, 5s);
     ResponderState state;
+    LifecycleLog lifecycle;
     auto sub = subscribe_responder(d, prompter, PermissionDecisionChoice::Deny, state);
+    auto lifecycle_sub = d.subscribe([&](const SessionEvent& e) { lifecycle.record(e); });
 
     auto result = prompter.prompt("bash", "{}", nullptr);
     EXPECT_EQ(result, PermissionResult::Deny);
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[1].payload.value("choice", std::string{}), "deny");
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}), "decision");
     d.unsubscribe(sub);
+    d.unsubscribe(lifecycle_sub);
 }
 
 // 场景: AllowSession 必须映射到 PermissionResult::AlwaysAllow,让 AgentLoop
@@ -85,11 +128,18 @@ TEST(AsyncPrompter, AllowSessionMapsToAlwaysAllow) {
     EventDispatcher d;
     AsyncPrompter prompter(d, 5s);
     ResponderState state;
+    LifecycleLog lifecycle;
     auto sub = subscribe_responder(d, prompter, PermissionDecisionChoice::AllowSession, state);
+    auto lifecycle_sub = d.subscribe([&](const SessionEvent& e) { lifecycle.record(e); });
 
     auto result = prompter.prompt("bash", "{}", nullptr);
     EXPECT_EQ(result, PermissionResult::AlwaysAllow);
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[1].payload.value("choice", std::string{}), "allow_session");
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}), "decision");
     d.unsubscribe(sub);
+    d.unsubscribe(lifecycle_sub);
 }
 
 // 场景: 超时(spec 规定 5 分钟,这里测试用 200ms)必须返回 Deny + 推 error 事件
@@ -99,10 +149,14 @@ TEST(AsyncPrompter, TimeoutReturnsDenyAndEmitsError) {
     AsyncPrompter prompter(d, 200ms);
 
     bool saw_timeout_error = false;
+    std::uint64_t timeout_error_seq = 0;
+    LifecycleLog lifecycle;
     auto sub = d.subscribe([&](const SessionEvent& e) {
+        lifecycle.record(e);
         if (e.kind == SessionEventKind::Error &&
             e.payload.value("reason", std::string{}) == "permission_timeout") {
             saw_timeout_error = true;
+            timeout_error_seq = e.seq;
         }
     });
 
@@ -114,6 +168,13 @@ TEST(AsyncPrompter, TimeoutReturnsDenyAndEmitsError) {
     EXPECT_GE(elapsed, 200ms) << "至少要等到 timeout 才返回";
     EXPECT_LE(elapsed, 500ms) << "超时返回不应等太久";
     EXPECT_TRUE(saw_timeout_error) << "超时必须 emit error 事件让前端看到";
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[1].kind, SessionEventKind::PermissionClosed);
+    EXPECT_EQ(events[1].payload.value("choice", std::string{}), "deny");
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}), "timeout");
+    EXPECT_LT(events[1].seq, timeout_error_seq)
+        << "close 必须先于 timeout error,避免后台客户端先退订而漏掉 close";
     d.unsubscribe(sub);
 }
 
@@ -122,6 +183,8 @@ TEST(AsyncPrompter, TimeoutReturnsDenyAndEmitsError) {
 TEST(AsyncPrompter, AbortFlagShortCircuitsToDeny) {
     EventDispatcher d;
     AsyncPrompter prompter(d, 5s);
+    LifecycleLog lifecycle;
+    auto sub = d.subscribe([&](const SessionEvent& e) { lifecycle.record(e); });
 
     std::atomic<bool> abort_flag{false};
     std::thread aborter([&] {
@@ -136,6 +199,11 @@ TEST(AsyncPrompter, AbortFlagShortCircuitsToDeny) {
 
     EXPECT_EQ(result, PermissionResult::Deny);
     EXPECT_LE(elapsed, 500ms) << "abort 后应快速返回(50ms 轮询 + 100ms 触发延迟)";
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[1].payload.value("choice", std::string{}), "deny");
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}), "abort");
+    d.unsubscribe(sub);
 }
 
 // 场景: 未知 request_id 的 notify_decision 必须是 no-op,不能崩溃 / 抛异常。
@@ -143,8 +211,36 @@ TEST(AsyncPrompter, AbortFlagShortCircuitsToDeny) {
 TEST(AsyncPrompter, NotifyUnknownRequestIdIsNoOp) {
     EventDispatcher d;
     AsyncPrompter prompter(d, 5s);
+    LifecycleLog lifecycle;
+    auto sub = d.subscribe([&](const SessionEvent& e) { lifecycle.record(e); });
     EXPECT_NO_THROW(prompter.notify_decision("nonexistent-id",
                                               PermissionDecisionChoice::Allow));
+    EXPECT_TRUE(lifecycle.snapshot().empty());
+    d.unsubscribe(sub);
+}
+
+// 场景:客户端重发/多客户端同时提交同一个 request_id 时只接受第一个决策,
+// 并且只能产生一条 permission_closed。
+TEST(AsyncPrompter, DuplicateDecisionUsesFirstChoiceAndClosesOnce) {
+    EventDispatcher d;
+    AsyncPrompter prompter(d, 5s);
+    LifecycleLog lifecycle;
+    auto sub = d.subscribe([&](const SessionEvent& e) {
+        lifecycle.record(e);
+        if (e.kind != SessionEventKind::PermissionRequest) return;
+        const auto request_id = e.payload.value("request_id", std::string{});
+        prompter.notify_decision(request_id, PermissionDecisionChoice::Allow);
+        prompter.notify_decision(request_id, PermissionDecisionChoice::Deny);
+    });
+
+    EXPECT_EQ(prompter.prompt("bash", "{}", nullptr), PermissionResult::Allow);
+
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[1].kind, SessionEventKind::PermissionClosed);
+    EXPECT_EQ(events[1].payload.value("choice", std::string{}), "allow");
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}), "decision");
+    d.unsubscribe(sub);
 }
 
 // 场景(子代理权限冒泡修复):子代理刚起步就要权限时,前端可能晚于
@@ -156,6 +252,8 @@ TEST(AsyncPrompter, NotifyUnknownRequestIdIsNoOp) {
 TEST(AsyncPrompter, SnapshotReturnsPendingRequestUntilResolved) {
     EventDispatcher d;
     AsyncPrompter prompter(d, 5s);
+    LifecycleLog lifecycle;
+    auto lifecycle_sub = d.subscribe([&](const SessionEvent& e) { lifecycle.record(e); });
 
     ResponderState state;
     auto sub = d.subscribe([&](const SessionEvent& e) {
@@ -191,8 +289,12 @@ TEST(AsyncPrompter, SnapshotReturnsPendingRequestUntilResolved) {
     worker.join();
     EXPECT_TRUE(prompter.snapshot_pending_requests().empty())
         << "已决请求不应再被补发";
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}), "decision");
 
     d.unsubscribe(sub);
+    d.unsubscribe(lifecycle_sub);
 }
 
 // 场景: 用户在权限弹窗已经出现时切换到 Yolo,daemon 会批量 Allow 所有
@@ -200,6 +302,8 @@ TEST(AsyncPrompter, SnapshotReturnsPendingRequestUntilResolved) {
 TEST(AsyncPrompter, ResolveAllAllowsPendingPrompt) {
     EventDispatcher d;
     AsyncPrompter prompter(d, 5s);
+    LifecycleLog lifecycle;
+    auto lifecycle_sub = d.subscribe([&](const SessionEvent& e) { lifecycle.record(e); });
 
     ResponderState state;
     auto sub = d.subscribe([&](const SessionEvent& e) {
@@ -225,5 +329,11 @@ TEST(AsyncPrompter, ResolveAllAllowsPendingPrompt) {
 
     worker.join();
     EXPECT_EQ(result.load(), PermissionResult::Allow);
+    const auto events = lifecycle.snapshot();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[1].payload.value("choice", std::string{}), "allow");
+    EXPECT_EQ(events[1].payload.value("reason", std::string{}),
+              "permission_mode_change");
     d.unsubscribe(sub);
+    d.unsubscribe(lifecycle_sub);
 }

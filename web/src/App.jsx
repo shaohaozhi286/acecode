@@ -40,7 +40,6 @@ import { Sidebar } from './components/Sidebar.jsx';
 import { ChatView } from './components/ChatView.jsx';
 import { SearchPalette } from './components/SearchPalette.jsx';
 import { TokenPrompt } from './components/TokenPrompt.jsx';
-import { PermissionModal } from './components/PermissionModal.jsx';
 import { SettingsPage } from './components/SettingsPage.jsx';
 import { DesktopContextMenu } from './components/DesktopContextMenu.jsx';
 import { Toaster, toast } from './components/Toast.jsx';
@@ -86,8 +85,14 @@ import {
   updateJobIsActive,
 } from './lib/updateJob.js';
 import {
+  clearResolvedPermissionRequests,
+  closePermissionRequest,
+  hasUnresolvedPermission,
+  markPermissionSubmitting,
+  pendingPermissionSessionIds,
+  permissionOriginLabel,
   pushPermissionRequest,
-  removePermissionRequest,
+  visiblePermissionRequests,
 } from './lib/permissionRequestQueue.js';
 import {
   desktopGuidedTourHasModel,
@@ -130,6 +135,9 @@ export function App() {
   // 用于:1) 子任务的 question_request 在主会话可见;2) 权限/问题弹窗的
   // 「来自后台任务」来源标记。
   const [subagentIndex, setSubagentIndex] = useState({ parentId: '', titles: {} });
+  // 已经发现过的 child -> parent/title 关系跨会话切换保留,供后台权限请求
+  // 在父会话不活跃时仍能把侧边栏提示和系统通知路由到父会话。
+  const [subagentDirectory, setSubagentDirectory] = useState({ owners: {}, titles: {} });
   const [searchOpen,   setSearchOpen]   = useState(false);
   const [conversationFindRequest, setConversationFindRequest] = useState(0);
   const [workspaceActivationRequest, setWorkspaceActivationRequest] = useState(null);
@@ -162,6 +170,7 @@ export function App() {
   const healthRef = useRef(health);
   const visibleSessionRef = useRef(null);
   const subagentIndexRef = useRef(subagentIndex);
+  const subagentDirectoryRef = useRef(subagentDirectory);
   const notificationContextRef = useRef({
     assistantText: new Map(),
     titles: new Map(),
@@ -195,7 +204,7 @@ export function App() {
   const guidedTourAutoAttemptedRef = useRef(false);
   const guidedTourHasActiveSession = !!(activeRef?.sessionId || activeRef?.id);
   const guidedTourBlocked = showSettings || searchOpen || updateDialogOpen
-    || permReqs.length > 0 || questionReqs.length > 0;
+    || questionReqs.length > 0;
 
   useEffect(() => initInactiveSelection(), []);
   useEffect(() => {
@@ -204,6 +213,7 @@ export function App() {
   useEffect(() => { activeRefRef.current = activeRef; }, [activeRef]);
   useEffect(() => { healthRef.current = health; }, [health]);
   useEffect(() => { subagentIndexRef.current = subagentIndex; }, [subagentIndex]);
+  useEffect(() => { subagentDirectoryRef.current = subagentDirectory; }, [subagentDirectory]);
   useEffect(() => {
     const sessionId = activeRef?.sessionId || activeRef?.id || '';
     const chatVisible = view === 'single'
@@ -565,6 +575,17 @@ export function App() {
       if (title) context.titles.set(sessionId, title);
     };
 
+    const permissionOwnerForSession = (sessionId) => {
+      if (!sessionId) return '';
+      const directory = subagentDirectoryRef.current || {};
+      if (directory.owners?.[sessionId]) return directory.owners[sessionId];
+      const currentIndex = subagentIndexRef.current || {};
+      if (currentIndex.parentId && currentIndex.titles?.[sessionId]) {
+        return currentIndex.parentId;
+      }
+      return sessionId;
+    };
+
     const sendDesktopNotification = (type, msg, payload) => {
       const sessionId = payload.session_id || msg.session_id || '';
       if (!sessionId) return;
@@ -614,7 +635,10 @@ export function App() {
       const msg = e.detail || {};
       const payload = { ...(msg.payload || {}) };
       if (msg.session_id && !payload.session_id) payload.session_id = msg.session_id;
-      if (msg.type === 'question_request' && !payload.session_id) {
+      if ((msg.type === 'question_request'
+          || msg.type === 'permission_request'
+          || msg.type === 'permission_closed')
+          && !payload.session_id) {
         const current = activeRefRef.current || {};
         payload.session_id = current.sessionId || current.id || '';
       }
@@ -647,6 +671,9 @@ export function App() {
           context.assistantText.delete(sessionId);
           monitor.retain(sessionId);
         } else {
+          if (payload.outcome) {
+            setPermReqs((prev) => clearResolvedPermissionRequests(prev, sessionId));
+          }
           finishMonitoredSession(sessionId, msg, payload);
         }
       }
@@ -666,8 +693,20 @@ export function App() {
       }
       if (msg.type === 'permission_request') {
         if (sessionId) monitor.retain(sessionId);
-        setPermReqs((prev) => pushPermissionRequest(prev, payload));
-        sendDesktopNotification('permission', msg, payload);
+        const ownerSessionId = permissionOwnerForSession(sessionId);
+        setPermReqs((prev) => pushPermissionRequest(prev, payload, {
+          ownerSessionId: ownerSessionId !== sessionId ? ownerSessionId : '',
+        }));
+        sendDesktopNotification('permission', msg, {
+          ...payload,
+          session_id: ownerSessionId || sessionId,
+        });
+      }
+      if (msg.type === 'permission_closed') {
+        const ownerSessionId = permissionOwnerForSession(sessionId);
+        setPermReqs((prev) => closePermissionRequest(prev, payload, {
+          ownerSessionId: ownerSessionId !== sessionId ? ownerSessionId : '',
+        }));
       }
       if (msg.type === 'question_request') {
         if (sessionId) monitor.retain(sessionId);
@@ -678,9 +717,16 @@ export function App() {
         setQuestionReqs((prev) => removePendingQuestionRequest(prev, payload.request_id));
       }
       if (msg.type === 'done' && sessionId) {
+        setPermReqs((prev) => clearResolvedPermissionRequests(prev, sessionId));
         finishMonitoredSession(sessionId, msg, payload);
       }
-      if ((msg.type === 'error' || msg.type === 'turn_aborted') && sessionId) {
+      const permissionTimeoutDiagnostic = msg.type === 'error'
+        && payload.reason === 'permission_timeout'
+        && !!payload.request_id;
+      if ((msg.type === 'error' || msg.type === 'turn_aborted')
+          && sessionId
+          && !permissionTimeoutDiagnostic) {
+        setPermReqs((prev) => clearResolvedPermissionRequests(prev, sessionId));
         context.assistantText.delete(sessionId);
         monitor.release(sessionId);
       }
@@ -973,19 +1019,29 @@ export function App() {
   }, [health, navigateToRef]);
 
   const handleSubagentTasksChange = useCallback((info) => {
-    setSubagentIndex({
-      parentId: info?.parentId || '',
-      titles: info?.titles && typeof info.titles === 'object' ? info.titles : {},
+    const parentId = info?.parentId || '';
+    const titles = info?.titles && typeof info.titles === 'object' ? info.titles : {};
+    setSubagentIndex({ parentId, titles });
+    if (!parentId || Object.keys(titles).length === 0) return;
+    setSubagentDirectory((previous) => {
+      const owners = { ...previous.owners };
+      const mergedTitles = { ...previous.titles };
+      for (const [childId, title] of Object.entries(titles)) {
+        if (!childId) continue;
+        owners[childId] = parentId;
+        mergedTitles[childId] = title;
+      }
+      const next = { owners, titles: mergedTitles };
+      subagentDirectoryRef.current = next;
+      return next;
     });
   }, []);
 
-  const handlePermissionModeChanged = useCallback(({ sessionId, mode }) => {
-    if (mode !== 'yolo' || !sessionId) return;
-    setPermReqs((prev) => prev.filter((req) => {
-      const reqSid = req?.session_id || activeRef?.sessionId || activeRef?.id || '';
-      return reqSid !== sessionId;
-    }));
-  }, [activeRef?.id, activeRef?.sessionId]);
+  const handlePermissionDecision = useCallback((request, choice) => {
+    if (!request?.request_id || !choice) return;
+    setPermReqs((prev) => markPermissionSubmitting(prev, request.request_id, choice));
+    connection.sendDecision(request.request_id, choice, request.session_id);
+  }, []);
 
   const handleDesktopNotificationsChanged = useCallback((notifications) => {
     setHealth((previous) => {
@@ -1123,6 +1179,27 @@ export function App() {
   }, [resumeAndOpenSession]);
   const activeRefConsoleCwd = consoleCwdForContext({ activeRef, health });
   const preferredConsoleCwd = activeId ? activeRefConsoleCwd : (consoleCwd || activeRefConsoleCwd);
+  const permissionOwnership = useMemo(() => ({
+    owners: subagentDirectory.owners,
+    titles: {
+      ...subagentDirectory.titles,
+      ...subagentIndex.titles,
+    },
+    parentId: subagentIndex.parentId,
+  }), [subagentDirectory, subagentIndex]);
+  const visiblePermissionEntries = useMemo(
+    () => visiblePermissionRequests(permReqs, activeId, permissionOwnership)
+      .map((entry) => ({
+        ...entry,
+        origin_label: permissionOriginLabel(entry, permissionOwnership),
+      })),
+    [activeId, permReqs, permissionOwnership],
+  );
+  const visiblePermissionUnresolved = hasUnresolvedPermission(visiblePermissionEntries);
+  const pendingPermissionSessionIdsForSidebar = useMemo(
+    () => pendingPermissionSessionIds(permReqs, activeId, permissionOwnership),
+    [activeId, permReqs, permissionOwnership],
+  );
   const pendingQuestionSessionIdsForSidebar = useMemo(
     () => pendingQuestionSessionIds(questionReqs, activeId),
     [questionReqs, activeId],
@@ -1153,8 +1230,7 @@ export function App() {
 
   const sidebarCollapsed = view !== 'single'
     || (projectSidebarCollapsed && !guidedTourPreparing && !guidedTourRun);
-  const permReq = permReqs[0] || null;
-  const visibleQuestionReq = !permReq
+  const visibleQuestionReq = !visiblePermissionUnresolved
     ? questionReqs.find((req) => {
         const reqSid = req?.session_id || '';
         if (!reqSid || (activeId && reqSid === activeId)) return true;
@@ -1172,7 +1248,7 @@ export function App() {
     desktopMode: desktopModeRef.current,
     chatVisible: view === 'single' && !activeRef?.loop,
     blockingSurfaceOpen: showSettings || searchOpen || updateDialogOpen
-      || !!permReq || !!visibleQuestionReq || guidedTourPreparing || guidedTourRun,
+      || !!visibleQuestionReq || guidedTourPreparing || guidedTourRun,
   });
   const conversationFindEnabled = canOpenConversationFind({
     view,
@@ -1181,7 +1257,7 @@ export function App() {
     showSettings,
     searchOpen,
     updateDialogOpen,
-    permissionOpen: !!permReq,
+    permissionOpen: false,
     questionOpen: !!visibleQuestionReq,
     guidedTourPreparing,
     guidedTourRun,
@@ -1236,6 +1312,7 @@ export function App() {
           onSearchTasks={() => setSearchOpen(true)}
           workspaceActivationRequest={workspaceActivationRequest}
           onOpenSettingsSection={openSettingsSection}
+          pendingPermissionSessionIds={pendingPermissionSessionIdsForSidebar}
           pendingQuestionSessionIds={pendingQuestionSessionIdsForSidebar}
         />
         {view === 'single' && !sidebarCollapsed && (
@@ -1285,9 +1362,10 @@ export function App() {
                 sidePanelMaximized={sidePanelMaximized}
                 onToggleSidePanelMaximized={toggleSidePanelMaximized}
                 showAceCodeAvatar={showAceCodeAvatar}
+                permissionRequests={visiblePermissionEntries}
+                onPermissionDecision={handlePermissionDecision}
                 questionRequest={visibleQuestionReq}
                 onQuestionResolve={resolveVisibleQuestion}
-                onPermissionModeChanged={handlePermissionModeChanged}
                 onSubagentTasksChange={handleSubagentTasksChange}
               />
             )}
@@ -1309,7 +1387,6 @@ export function App() {
             initialNavKey={settingsNavKey}
             health={health}
             activeSessionId={activeId}
-            onPermissionModeChanged={handlePermissionModeChanged}
             onDesktopNotificationsChanged={handleDesktopNotificationsChanged}
             onReplayGuidedTour={desktopGuidedTourModeEligible(desktopModeRef.current)
               ? replayGuidedTour
@@ -1325,21 +1402,6 @@ export function App() {
           onSelectSession={handleSelectSession}
           onSelectWorkspace={handleSelectWorkspace}
         />
-        {permReq      && (
-          <PermissionModal
-            // key 强制按请求重挂载:队首 A→B 切换时若复用实例,Modal 内部
-            // show=false 的透明遮罩会挡住整页且 B 的弹窗不可见(A 刚经历
-            // 关闭动画),resolvedRef 也会残留上一条的已回应状态。
-            key={permReq.request_id}
-            request={permReq}
-            originLabel={permReq.session_id && subagentIndex.titles[permReq.session_id]
-              ? `来自后台任务:${subagentIndex.titles[permReq.session_id]}`
-              : ''}
-            // 按 request_id 幂等移除。切勿盲删队首:关闭路径可能多次触发
-            // onResolve,窗口内到达的下一条请求会被误删(权限弹窗失踪 bug)。
-            onResolve={(requestId) => setPermReqs((prev) => removePermissionRequest(prev, requestId))}
-          />
-        )}
       </div>
       <FramelessResizeHandles />
       <GlobalFindOverlay

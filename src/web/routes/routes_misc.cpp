@@ -720,7 +720,7 @@ void WebServer::Impl::register_health() {
             return r;
         });
 
-        // GET /api/model-pool-status: PUB 模型池负载快照(load-monitor 缓存)。
+        // GET /api/model-pool-status:模型池负载快照(load-monitor 缓存)。
         // 非敏感数据,与 /api/health 一样不强制 token,便于前端轮询展示负载。
         // 服务未启动 / 尚无数据时 models 为空数组,前端自然不显示负载指示。
         CROW_ROUTE(app, "/api/model-pool-status").methods(crow::HTTPMethod::GET)

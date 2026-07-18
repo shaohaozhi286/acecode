@@ -27,6 +27,8 @@
 #include "session_client.hpp"
 #include "session_manager.hpp"
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -115,6 +117,11 @@ struct SessionRegistryDeps {
     // Empty = ~/.acecode/cache/no-workspace. Tests may override to avoid
     // creating cache directories in the real user home.
     std::string                      no_workspace_cache_root;
+    // Optional hidden-title runner override for embedders and deterministic
+    // registry tests. Production callers leave this empty and use the
+    // configured model provider.
+    std::function<std::optional<std::string>(const std::string&)>
+                                     auto_title_generator;
 };
 
 enum class SideQuestionStatus {
@@ -242,6 +249,9 @@ private:
                                                      const SessionMeta* resumed_meta);
     void restore_loop_history(SessionEntry& entry,
                               const std::vector<ChatMessage>& messages) const;
+    void start_auto_title_attempt(const std::string& id, std::string text);
+    void handle_auto_title_turn_finished(const std::string& id,
+                                         const std::string& status);
 
     SessionRegistryDeps                                          deps_;
     mutable std::mutex                                            mu_;
@@ -250,6 +260,7 @@ private:
     ExternalCommandHandler                                        external_command_handler_;
     mutable std::mutex                                            title_threads_mu_;
     std::vector<std::thread>                                      title_threads_;
+    std::atomic<bool>                                              shutting_down_{false};
 };
 
 } // namespace acecode

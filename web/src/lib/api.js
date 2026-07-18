@@ -130,7 +130,7 @@ async function request(method, path, body, base) {
 export function createApi(base = null) {
   return {
     health:           ()             => request('GET',    '/api/health', undefined, base),
-    // PUB 模型池负载快照(每 30s 轮询展示负载)。非敏感、无需 token。
+    // 模型池负载快照(每 30s 轮询展示精确匹配 modelPoolName 的负载)。无需 token。
     modelPoolStatus:  ()             => request('GET',    '/api/model-pool-status', undefined, base),
     // 控制台 PTY(add-console-dock):loopback-only,daemon 端 16 会话上限(429)。
     createPty:        (opts={})      => request('POST',   '/api/pty', opts, base),

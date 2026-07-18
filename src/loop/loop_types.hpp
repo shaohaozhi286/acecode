@@ -47,6 +47,7 @@ struct LoopDefinition {
     std::string workspace_cwd;
     std::string model_name;
     std::string permission_mode = "yolo"; // default | yolo
+    bool use_worktree = false;
     LoopSchedule schedule;
     std::string schedule_expr;
     std::optional<std::int64_t> next_run_at_ms;

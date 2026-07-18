@@ -104,6 +104,43 @@ TEST(SessionManagerRewind, ForkWritesTrimmedSessionAndKeepsOriginalListed) {
     fs::remove_all(cwd);
 }
 
+TEST(SessionManagerRewind, LoopOriginPersistsButDoesNotPropagateToFork) {
+    auto cwd = make_temp_cwd("loop_origin");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    fs::remove_all(project_dir);
+
+    SessionManager sm;
+    sm.start_session(cwd.string(), "test-provider", "test-model");
+    sm.set_loop_origin("loop-1", "run-1");
+
+    ChatMessage first = user_msg("u1", "scheduled prompt");
+    sm.on_message(first);
+    const std::string original_id = sm.current_session_id();
+    ASSERT_FALSE(original_id.empty());
+
+    auto original_meta = SessionStorage::read_meta(
+        SessionStorage::meta_path(project_dir, original_id));
+    EXPECT_EQ(original_meta.loop_id, "loop-1");
+    EXPECT_EQ(original_meta.loop_run_id, "run-1");
+
+    const std::string fork_id = sm.fork_active_session({first});
+    ASSERT_FALSE(fork_id.empty());
+    auto fork_meta = SessionStorage::read_meta(
+        SessionStorage::meta_path(project_dir, fork_id));
+    EXPECT_TRUE(fork_meta.loop_id.empty());
+    EXPECT_TRUE(fork_meta.loop_run_id.empty());
+
+    ASSERT_FALSE(sm.resume_session(original_id).empty());
+    sm.set_input_draft("keep provenance through metadata rewrites");
+    original_meta = SessionStorage::read_meta(
+        SessionStorage::meta_path(project_dir, original_id));
+    EXPECT_EQ(original_meta.loop_id, "loop-1");
+    EXPECT_EQ(original_meta.loop_run_id, "run-1");
+
+    fs::remove_all(project_dir);
+    fs::remove_all(cwd);
+}
+
 TEST(SessionManagerRewind, ResumeReconstructsCheckpointState) {
     auto cwd = make_temp_cwd("resume");
     auto project_dir = SessionStorage::get_project_dir(cwd.string());

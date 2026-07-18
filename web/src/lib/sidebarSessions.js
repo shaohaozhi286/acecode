@@ -55,6 +55,38 @@ export function sidebarSessionHasWorktree(session = {}) {
     .some((value) => String(value || '').trim().length > 0);
 }
 
+export function sidebarSessionMarker(session = {}) {
+  const loopExecution = session?.loop_execution || session?.loopExecution;
+  if (loopExecution && typeof loopExecution === 'object') {
+    const hasLoopOrigin = [loopExecution.loop_id, loopExecution.loopId, loopExecution.run_id, loopExecution.runId]
+      .some((value) => String(value || '').trim().length > 0);
+    if (hasLoopOrigin) return 'loop';
+  }
+  return sidebarSessionHasWorktree(session) ? 'worktree' : '';
+}
+
+export function expandedSessionListsAfterWorkspaceCollapseAll(
+  currentExpanded = new Set(),
+  workspaces = [],
+) {
+  const next = currentExpanded instanceof Set
+    ? new Set(currentExpanded)
+    : new Set();
+  const list = Array.isArray(workspaces) ? workspaces : [];
+  list.forEach((workspace) => {
+    const hash = typeof workspace === 'string'
+      ? workspace.trim()
+      : String(
+        workspace?.hash
+        || workspace?.workspace_hash
+        || workspace?.workspaceHash
+        || '',
+      ).trim();
+    if (hash) next.add(hash);
+  });
+  return next;
+}
+
 export function sidebarSessionProjection(sessions = [], expanded = false, limit = SIDEBAR_SESSION_COLLAPSE_LIMIT) {
   const list = Array.isArray(sessions) ? sessions : [];
   const max = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : SIDEBAR_SESSION_COLLAPSE_LIMIT;

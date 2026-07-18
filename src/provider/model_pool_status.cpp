@@ -5,7 +5,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <cctype>
 #include <cmath>
 #include <utility>
 
@@ -57,14 +56,6 @@ ModelLoadTier model_load_tier(int usage_rate) {
 int effective_context_window(long long max_window_tokens) {
     if (max_window_tokens <= 0) return 0;
     return static_cast<int>(std::llround(0.8 * static_cast<double>(max_window_tokens)));
-}
-
-bool is_pub_model(const std::string& model) {
-    if (model.size() < 3) return false;
-    auto up = [](char c) {
-        return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    };
-    return up(model[0]) == 'P' && up(model[1]) == 'U' && up(model[2]) == 'B';
 }
 
 ModelPoolFetchResult default_model_pool_fetch(const std::string& url) {

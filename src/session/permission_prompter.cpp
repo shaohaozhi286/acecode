@@ -44,7 +44,9 @@ PermissionResult AsyncPrompter::prompt(const std::string& tool_name,
     // 阻塞等响应 / abort / 超时。abort_flag 用 50ms 节奏轮询 — 不算热循环,
     // worker thread 多 50ms 退出延迟可接受。
     auto deadline = std::chrono::steady_clock::now() + timeout_;
-    PermissionResult result = PermissionResult::Deny;
+    PermissionDecisionChoice final_choice = PermissionDecisionChoice::Deny;
+    std::string close_reason = "abort";
+    bool timed_out = false;
 
     while (true) {
         std::unique_lock<std::mutex> lk(pending->mu);
@@ -52,18 +54,25 @@ PermissionResult AsyncPrompter::prompt(const std::string& tool_name,
             [&] { return pending->responded; });
 
         if (got) {
-            result = to_permission_result(pending->choice);
+            final_choice = pending->choice;
+            close_reason = pending->reason;
             break;
         }
         if (abort_flag && abort_flag->load()) {
-            break; // Deny
+            pending->choice = PermissionDecisionChoice::Deny;
+            pending->reason = "abort";
+            pending->responded = true;
+            final_choice = pending->choice;
+            close_reason = pending->reason;
+            break;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-            // 超时: spec 要求推 error 事件 + 视为 deny
-            events_.emit(SessionEventKind::Error, nlohmann::json{
-                {"reason",     "permission_timeout"},
-                {"request_id", req_id},
-            });
+            pending->choice = PermissionDecisionChoice::Deny;
+            pending->reason = "timeout";
+            pending->responded = true;
+            final_choice = pending->choice;
+            close_reason = pending->reason;
+            timed_out = true;
             break;
         }
     }
@@ -73,7 +82,22 @@ PermissionResult AsyncPrompter::prompt(const std::string& tool_name,
         std::lock_guard<std::mutex> lk(pending_mu_);
         pending_.erase(req_id);
     }
-    return result;
+
+    events_.emit(SessionEventKind::PermissionClosed, nlohmann::json{
+        {"request_id", req_id},
+        {"choice",     to_string(final_choice)},
+        {"reason",     close_reason},
+    });
+
+    if (timed_out) {
+        // 先发布 close 再保留既有 timeout error。后台 Web 客户端收到 error
+        // 时可能释放 session 订阅,close 必须先到才能避免留下不可操作的旧卡片。
+        events_.emit(SessionEventKind::Error, nlohmann::json{
+            {"reason",     "permission_timeout"},
+            {"request_id", req_id},
+        });
+    }
+    return to_permission_result(final_choice);
 }
 
 void AsyncPrompter::notify_decision(const std::string& request_id,
@@ -87,7 +111,9 @@ void AsyncPrompter::notify_decision(const std::string& request_id,
     }
     {
         std::lock_guard<std::mutex> lk(p->mu);
+        if (p->responded) return;
         p->choice = choice;
+        p->reason = "decision";
         p->responded = true;
     }
     p->cv.notify_all();
@@ -135,6 +161,7 @@ void AsyncPrompter::resolve_all(PermissionDecisionChoice choice) {
             std::lock_guard<std::mutex> lk(p->mu);
             if (p->responded) continue;
             p->choice = choice;
+            p->reason = "permission_mode_change";
             p->responded = true;
         }
         p->cv.notify_all();

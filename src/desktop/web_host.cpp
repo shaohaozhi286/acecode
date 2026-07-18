@@ -444,6 +444,7 @@ namespace {
 
 constexpr wchar_t kHostWindowClassName[] = L"ACECodeDesktopHostWindow";
 constexpr wchar_t kHostWindowPreviousProcProperty[] = L"ACECodeDesktopHostPreviousProc";
+constexpr wchar_t kHostWindowStartupMonitorProperty[] = L"ACECodeDesktopStartupMonitor";
 constexpr int kFramelessDragHeightDip = 44;
 
 // WM_USER 区私有消息:绕过 close_request_handler 直接走 DestroyWindow。
@@ -486,20 +487,68 @@ int dpi_scale(int value, UINT dpi) {
     return static_cast<int>((static_cast<long long>(value) * static_cast<long long>(dpi)) / 96);
 }
 
+UINT monitor_dpi(HMONITOR monitor) {
+    if (monitor) {
+        if (HMODULE shcore = ::LoadLibraryW(L"Shcore.dll")) {
+            using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+            auto get_dpi = reinterpret_cast<GetDpiForMonitorFn>(
+                ::GetProcAddress(shcore, "GetDpiForMonitor"));
+            UINT dpi_x = 96;
+            UINT dpi_y = 96;
+            if (get_dpi && SUCCEEDED(get_dpi(monitor, 0, &dpi_x, &dpi_y)) &&
+                dpi_x > 0) {
+                ::FreeLibrary(shcore);
+                return dpi_x;
+            }
+            ::FreeLibrary(shcore);
+        }
+    }
+
+    HDC hdc = ::GetDC(nullptr);
+    const int fallback_dpi = hdc ? ::GetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    if (hdc) ::ReleaseDC(nullptr, hdc);
+    return fallback_dpi > 0 ? static_cast<UINT>(fallback_dpi) : 96U;
+}
+
+RECT monitor_work_rect(HMONITOR monitor) {
+    RECT fallback{
+        0,
+        0,
+        ::GetSystemMetrics(SM_CXSCREEN),
+        ::GetSystemMetrics(SM_CYSCREEN),
+    };
+    if (!monitor) return fallback;
+
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!::GetMonitorInfoW(monitor, &info)) return fallback;
+    return info.rcWork;
+}
+
 void apply_minimum_track_size(HWND hwnd, MINMAXINFO* info) {
     if (!info) return;
-    const UINT dpi = ::GetDpiForWindow(hwnd);
+    HMONITOR monitor = reinterpret_cast<HMONITOR>(
+        ::GetPropW(hwnd, kHostWindowStartupMonitorProperty));
+    if (!monitor) {
+        monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    }
+    UINT dpi = monitor_dpi(monitor);
+    if (dpi == 0) {
+        dpi = ::GetDpiForWindow(hwnd);
+    }
+    if (dpi == 0) dpi = 96;
+
     LONG preferred_width = static_cast<LONG>(
         dpi_scale(kMinimumDesktopWindowWidth, dpi));
     LONG maximum_width = std::numeric_limits<LONG>::max();
-    if (HMONITOR monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) {
-        MONITORINFO monitor_info{};
-        monitor_info.cbSize = sizeof(monitor_info);
-        if (::GetMonitorInfoW(monitor, &monitor_info)) {
-            maximum_width = std::max<LONG>(
-                1, monitor_info.rcWork.right - monitor_info.rcWork.left);
-            preferred_width = std::min(preferred_width, maximum_width);
-        }
+    if (monitor) {
+        const RECT work_area = monitor_work_rect(monitor);
+        const auto safe_default = fit_desktop_window_to_safe_work_area(
+            {kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight},
+            {work_area.right - work_area.left, work_area.bottom - work_area.top},
+            static_cast<int>(dpi));
+        maximum_width = std::max<LONG>(1, safe_default.width);
+        preferred_width = std::min(preferred_width, maximum_width);
     }
     info->ptMinTrackSize.x = std::min(
         maximum_width,
@@ -519,22 +568,6 @@ HMONITOR active_monitor() {
         }
     }
     return ::MonitorFromWindow(nullptr, MONITOR_DEFAULTTOPRIMARY);
-}
-
-RECT active_monitor_work_rect() {
-    RECT fallback{
-        0,
-        0,
-        ::GetSystemMetrics(SM_CXSCREEN),
-        ::GetSystemMetrics(SM_CYSCREEN),
-    };
-    HMONITOR monitor = active_monitor();
-    if (!monitor) return fallback;
-
-    MONITORINFO mi{};
-    mi.cbSize = sizeof(mi);
-    if (!::GetMonitorInfoW(monitor, &mi)) return fallback;
-    return mi.rcWork;
 }
 
 void resize_webview_widget(HWND hwnd) {
@@ -1019,11 +1052,13 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
     HINSTANCE instance = ::GetModuleHandleW(nullptr);
     if (!register_host_window_class(instance)) return nullptr;
 
-    target_monitor = active_monitor_work_rect();
-    const auto initial_size = clamp_window_size_to_work_area(
+    HMONITOR startup_monitor = active_monitor();
+    target_monitor = monitor_work_rect(startup_monitor);
+    const auto initial_size = fit_desktop_window_to_safe_work_area(
         {kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight},
         {target_monitor.right - target_monitor.left,
-         target_monitor.bottom - target_monitor.top});
+         target_monitor.bottom - target_monitor.top},
+        static_cast<int>(monitor_dpi(startup_monitor)));
     const int x = target_monitor.right + 10000;
     const int y = target_monitor.bottom + 10000;
     HWND hwnd = ::CreateWindowExW(
@@ -1040,6 +1075,9 @@ HWND create_offscreen_host_window(RECT& target_monitor) {
         instance,
         nullptr);
     if (hwnd) {
+        if (startup_monitor) {
+            ::SetPropW(hwnd, kHostWindowStartupMonitorProperty, startup_monitor);
+        }
         refresh_non_client_frame(hwnd);
         // WebView2 initialization for an externally-owned parent HWND is more
         // reliable when the parent is already visible. It is offscreen here,
@@ -1605,12 +1643,21 @@ void WebHost::set_size(int width, int height) {
 #else
 #ifdef _WIN32
     RECT work_area = impl_->target_monitor;
+    HMONITOR target_monitor = nullptr;
     if (work_area.right <= work_area.left || work_area.bottom <= work_area.top) {
-        work_area = active_monitor_work_rect();
+        target_monitor = active_monitor();
+        work_area = monitor_work_rect(target_monitor);
+    } else {
+        POINT center{
+            work_area.left + (work_area.right - work_area.left) / 2,
+            work_area.top + (work_area.bottom - work_area.top) / 2,
+        };
+        target_monitor = ::MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
     }
-    const auto clamped = clamp_window_size_to_work_area(
+    const auto clamped = fit_desktop_window_to_safe_work_area(
         {adjusted.first, adjusted.second},
-        {work_area.right - work_area.left, work_area.bottom - work_area.top});
+        {work_area.right - work_area.left, work_area.bottom - work_area.top},
+        static_cast<int>(monitor_dpi(target_monitor)));
     adjusted = {clamped.width, clamped.height};
 #endif
     impl_->w->set_size(adjusted.first, adjusted.second, WEBVIEW_HINT_NONE);
@@ -1631,6 +1678,7 @@ void WebHost::set_visible(bool visible) {
     if (visible && impl_->offscreen_until_ready) {
         center_window_on_monitor(hwnd, impl_->target_monitor);
         impl_->offscreen_until_ready = false;
+        ::RemovePropW(hwnd, kHostWindowStartupMonitorProperty);
     }
     ::ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
     if (visible) {

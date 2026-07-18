@@ -318,16 +318,18 @@ capabilities.
 
 ### `GET /api/model-pool-status`
 
-No auth requirement. Used by the chat UI to show model pool load.
+No auth requirement. Used by the chat UI to show model pool load. A configured
+provider `model` is pool-backed only when it exactly equals a returned
+`modelPoolName`; no naming prefix is required.
 
 ```json
 {
   "models": [
     {
-      "modelPoolName": "pool-a",
-      "usageRate": 0.42,
-      "maxWindowTokens": 128000,
-      "effectiveContextWindow": 128000
+      "modelPoolName": "DeepSeek-V4-Flash",
+      "usageRate": 42,
+      "maxWindowTokens": 150000,
+      "effectiveContextWindow": 120000
     }
   ]
 }
@@ -556,6 +558,16 @@ they never appear in the sidebar or the global search. Query them explicitly:
 
 `SessionSummary` includes a `parent_session_id` field (empty string for normal
 sessions).
+
+Sessions created directly by the LOOP scheduler additionally include persisted
+provenance:
+
+```json
+{"loop_execution":{"loop_id":"loop-id","run_id":"run-id"}}
+```
+
+The field is returned for active and inactive sessions and survives daemon
+restart. Manually forked sessions do not inherit it.
 
 The compatibility `POST /api/sessions` response includes:
 
@@ -1789,6 +1801,7 @@ Session event `type` values from `SessionEventKind`:
 - `tool_update`
 - `tool_end`
 - `permission_request`
+- `permission_closed`
 - `question_request`
 - `question_closed`
 - `usage`
@@ -1832,6 +1845,13 @@ All client frames are JSON:
 | `ping` | `{}` | replies `{"type":"pong"}` |
 
 `decision` uses `choice`, not `decision`, in the payload.
+
+Each `permission_request` is followed by exactly one sequenced
+`permission_closed` event with `{request_id,choice,reason}` when it stops being
+actionable. `choice` is `allow`, `deny`, or `allow_session`; `reason` is
+`decision`, `permission_mode_change`, `abort`, or `timeout`. A timeout still
+emits the existing `error` event with `reason:"permission_timeout"` after the
+close event.
 
 `question_answer.answers[]` entries are:
 
@@ -1990,6 +2010,7 @@ Create/update body:
   "workspace_cwd": "C:/repo",
   "model_name": "gpt-5.5-codex",
   "permission_mode": "yolo",
+  "use_worktree": false,
   "enabled": true,
   "schedule": {
     "kind": "period",
@@ -2005,6 +2026,9 @@ Create/update body:
 
 `workspace_hash` and `workspace_cwd` must either both be present and resolve to
 the same registered workspace, or both be empty for a no-workspace LOOP.
+`use_worktree` is a boolean and defaults to `false` for new definitions. LOOP
+databases upgraded from the pre-option schema preserve existing definitions as
+`true`; clients editing a definition should return the value they read.
 Supported schedules are:
 
 - `period`: `period` is `daily`, `workdays`, or `weekly`; weekly additionally
@@ -2029,11 +2053,13 @@ LOOPs in the same workspace have a future occurrence at the same minute. The
 payload includes `conflict.loop_id`, `loop_name`, and `first_conflict_at_ms`.
 No-workspace LOOPs are exempt.
 
-Execution creates an ordinary visible session. In a Git workspace, the daemon
-prefers an isolated worktree; worktree creation failure fails the run and never
-falls back to direct writes. Non-Git workspaces run directly. LOOP never merges,
-rebases, pushes, or removes its worktree; the final assistant response asks the
-user whether to merge.
+Execution creates an ordinary visible session with `loop_execution` provenance.
+When `use_worktree` is `false`, the task runs directly in the selected workspace.
+When it is `true` and the workspace is a Git repository, the daemon creates an
+isolated worktree; creation failure fails the run and never falls back to direct
+writes. Non-Git workspaces run directly. LOOP never merges, rebases, pushes, or
+removes a worktree; the final assistant response asks the user whether to merge
+only when a worktree was actually created.
 
 Permission behavior is per LOOP session: `default` preserves normal blocking
 permission and AskUserQuestion prompts; `yolo` skips all tool permission prompts

@@ -2,6 +2,8 @@
 
 #include "loop/loop_store.hpp"
 
+#include <sqlite3.h>
+
 #include <filesystem>
 #include <random>
 
@@ -16,6 +18,32 @@ fs::path temp_database(const std::string& hint) {
     fs::remove_all(dir);
     fs::create_directories(dir);
     return dir / "scheduled-loops.sqlite3";
+}
+
+bool create_legacy_database(const fs::path& path) {
+    sqlite3* db = nullptr;
+    const std::string path_text = path.string();
+    if (sqlite3_open(path_text.c_str(), &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    const char* sql =
+        "CREATE TABLE loops("
+        "id TEXT PRIMARY KEY,name TEXT NOT NULL,prompt TEXT NOT NULL,"
+        "workspace_hash TEXT NOT NULL DEFAULT '',workspace_cwd TEXT NOT NULL DEFAULT '',"
+        "model_name TEXT NOT NULL,permission_mode TEXT NOT NULL,"
+        "schedule_json TEXT NOT NULL,schedule_expr TEXT NOT NULL,"
+        "next_run_at_ms INTEGER NULL,enabled INTEGER NOT NULL DEFAULT 1,"
+        "created_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL);"
+        "INSERT INTO loops(id,name,prompt,workspace_hash,workspace_cwd,model_name,"
+        "permission_mode,schedule_json,schedule_expr,next_run_at_ms,enabled,"
+        "created_at_ms,updated_at_ms) VALUES("
+        "'legacy','Legacy','Inspect','hash','C:/workspace/hash','model-a','yolo',"
+        "'{\"kind\":\"once\",\"once_at_ms\":10000}',"
+        "'once:10000',10000,1,1,1);";
+    const int rc = sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    return rc == SQLITE_OK;
 }
 
 LoopDefinition once_loop(const std::string& name,
@@ -62,6 +90,7 @@ TEST(LoopStore, InitializesCrudAndEnableState) {
     ASSERT_TRUE(created.has_value()) << error.message;
     EXPECT_FALSE(created->id.empty());
     EXPECT_EQ(created->next_run_at_ms, 10'000);
+    EXPECT_FALSE(created->use_worktree);
 
     auto listed = store.list_loops(&error);
     ASSERT_EQ(listed.size(), 1u) << error.message;
@@ -70,9 +99,11 @@ TEST(LoopStore, InitializesCrudAndEnableState) {
     auto edit = *created;
     edit.name = "renamed";
     edit.prompt = "updated prompt";
+    edit.use_worktree = true;
     auto updated = store.update_loop(created->id, edit, 2'000, &error);
     ASSERT_TRUE(updated.has_value()) << error.message;
     EXPECT_EQ(updated->name, "renamed");
+    EXPECT_TRUE(updated->use_worktree);
     EXPECT_EQ(updated->created_at_ms, created->created_at_ms);
 
     auto disabled = store.set_loop_enabled(created->id, false, 3'000, &error);
@@ -82,6 +113,26 @@ TEST(LoopStore, InitializesCrudAndEnableState) {
 
     ASSERT_TRUE(store.delete_loop(created->id, &error)) << error.message;
     EXPECT_TRUE(store.list_loops(&error).empty());
+}
+
+TEST(LoopStore, MigratesLegacyLoopsToWorktreeWithoutChangingNewDefault) {
+    const auto path = temp_database("legacy_worktree");
+    ASSERT_TRUE(create_legacy_database(path));
+
+    LoopStore store(path);
+    StoreError error;
+    ASSERT_TRUE(store.initialize(&error)) << error.message;
+
+    auto legacy = store.get_loop("legacy", &error);
+    ASSERT_TRUE(legacy.has_value()) << error.message;
+    EXPECT_TRUE(legacy->use_worktree);
+
+    auto created = store.create_loop(once_loop("new", 20'000), 1'000, &error);
+    ASSERT_TRUE(created.has_value()) << error.message;
+    EXPECT_FALSE(created->use_worktree);
+    auto reloaded = store.get_loop(created->id, &error);
+    ASSERT_TRUE(reloaded.has_value()) << error.message;
+    EXPECT_FALSE(reloaded->use_worktree);
 }
 
 TEST(LoopStore, ConflictUpdateRollsBack) {

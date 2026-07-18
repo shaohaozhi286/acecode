@@ -352,6 +352,7 @@ nlohmann::json loop_to_json(const LoopDefinition& value, bool include_internal) 
         {"workspace_cwd", value.workspace_cwd},
         {"model_name", value.model_name},
         {"permission_mode", value.permission_mode},
+        {"use_worktree", value.use_worktree},
         {"schedule", schedule_to_json(value.schedule)},
         {"next_run_at_ms", value.next_run_at_ms ? nlohmann::json(*value.next_run_at_ms) : nlohmann::json(nullptr)},
         {"enabled", value.enabled},
@@ -392,6 +393,14 @@ bool loop_from_json(const nlohmann::json& json,
             return false;
         }
         parsed.enabled = json["enabled"].get<bool>();
+    }
+    if (json.contains("use_worktree")) {
+        if (!json["use_worktree"].is_boolean()) {
+            set_error(error, "INVALID_USE_WORKTREE", "use_worktree",
+                      "use_worktree must be boolean");
+            return false;
+        }
+        parsed.use_worktree = json["use_worktree"].get<bool>();
     }
     if (!json.contains("schedule") || !schedule_from_json(json["schedule"], parsed.schedule, error)) {
         if (error && error->code.empty()) {

@@ -14,7 +14,7 @@ namespace acecode::loop {
 
 namespace {
 
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;
 
 void set_error(StoreError* error, const std::string& code, const std::string& message) {
     if (!error) return;
@@ -54,6 +54,29 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 
+bool table_has_column(sqlite3* db,
+                      const char* table,
+                      const char* column,
+                      bool& found,
+                      StoreError* error) {
+    found = false;
+    const std::string sql = "PRAGMA table_info(" + std::string(table) + ");";
+    Statement stmt(db, sql.c_str(), error);
+    if (!stmt) return false;
+    int rc = SQLITE_ROW;
+    while ((rc = sqlite3_step(stmt.get())) == SQLITE_ROW) {
+        const unsigned char* value = sqlite3_column_text(stmt.get(), 1);
+        if (value && std::string(reinterpret_cast<const char*>(value)) == column) {
+            found = true;
+        }
+    }
+    if (rc != SQLITE_DONE) {
+        set_error(error, "SQLITE_ERROR", sqlite_message(db, "inspect schema failed"));
+        return false;
+    }
+    return true;
+}
+
 bool bind_text(sqlite3_stmt* stmt, int index, const std::string& value) {
     return sqlite3_bind_text(stmt, index, value.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK;
 }
@@ -87,12 +110,13 @@ LoopDefinition loop_from_row(sqlite3_stmt* stmt, StoreError* error) {
     value.workspace_cwd = column_text(stmt, 4);
     value.model_name = column_text(stmt, 5);
     value.permission_mode = column_text(stmt, 6);
-    const std::string schedule_json = column_text(stmt, 7);
-    value.schedule_expr = column_text(stmt, 8);
-    value.next_run_at_ms = column_optional_i64(stmt, 9);
-    value.enabled = sqlite3_column_int(stmt, 10) != 0;
-    value.created_at_ms = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 11));
-    value.updated_at_ms = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 12));
+    value.use_worktree = sqlite3_column_int(stmt, 7) != 0;
+    const std::string schedule_json = column_text(stmt, 8);
+    value.schedule_expr = column_text(stmt, 9);
+    value.next_run_at_ms = column_optional_i64(stmt, 10);
+    value.enabled = sqlite3_column_int(stmt, 11) != 0;
+    value.created_at_ms = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 12));
+    value.updated_at_ms = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 13));
     try {
         ValidationError validation;
         if (!schedule_from_json(nlohmann::json::parse(schedule_json), value.schedule, &validation)) {
@@ -125,7 +149,7 @@ LoopRun run_from_row(sqlite3_stmt* stmt) {
 
 constexpr const char* kLoopSelectColumns =
     "id,name,prompt,workspace_hash,workspace_cwd,model_name,permission_mode,"
-    "schedule_json,schedule_expr,next_run_at_ms,enabled,created_at_ms,updated_at_ms";
+    "use_worktree,schedule_json,schedule_expr,next_run_at_ms,enabled,created_at_ms,updated_at_ms";
 
 bool bind_loop_write(sqlite3_stmt* stmt, const LoopDefinition& value, bool include_id) {
     int i = 1;
@@ -136,6 +160,7 @@ bool bind_loop_write(sqlite3_stmt* stmt, const LoopDefinition& value, bool inclu
            bind_text(stmt, i++, value.workspace_cwd) &&
            bind_text(stmt, i++, value.model_name) &&
            bind_text(stmt, i++, value.permission_mode) &&
+           sqlite3_bind_int(stmt, i++, value.use_worktree ? 1 : 0) == SQLITE_OK &&
            bind_text(stmt, i++, schedule_to_json(value.schedule).dump()) &&
            bind_text(stmt, i++, value.schedule_expr) &&
            bind_optional_i64(stmt, i++, value.next_run_at_ms) &&
@@ -250,6 +275,7 @@ bool LoopStore::initialize(StoreError* error) {
         "id TEXT PRIMARY KEY,name TEXT NOT NULL,prompt TEXT NOT NULL,"
         "workspace_hash TEXT NOT NULL DEFAULT '',workspace_cwd TEXT NOT NULL DEFAULT '',"
         "model_name TEXT NOT NULL,permission_mode TEXT NOT NULL,"
+        "use_worktree INTEGER NOT NULL DEFAULT 0,"
         "schedule_json TEXT NOT NULL,schedule_expr TEXT NOT NULL,"
         "next_run_at_ms INTEGER NULL,enabled INTEGER NOT NULL DEFAULT 1,"
         "created_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL);"
@@ -265,6 +291,16 @@ bool LoopStore::initialize(StoreError* error) {
         "CREATE INDEX IF NOT EXISTS loop_runs_loop_idx ON loop_runs(loop_id,scheduled_at_ms DESC);"
         "CREATE INDEX IF NOT EXISTS loop_runs_active_idx ON loop_runs(status,owner_id);";
     if (!exec_sql(db_, schema, error)) return false;
+    bool has_use_worktree = false;
+    if (!table_has_column(db_, "loops", "use_worktree", has_use_worktree, error)) {
+        return false;
+    }
+    if (!has_use_worktree &&
+        !exec_sql(db_,
+                  "ALTER TABLE loops ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1;",
+                  error)) {
+        return false;
+    }
     Statement migration(db_,
         "INSERT OR IGNORE INTO loop_schema_migrations(version,applied_at_ms) VALUES(?,?);", error);
     if (!migration || !bind_i64(migration.get(), 1, kSchemaVersion) ||
@@ -376,8 +412,9 @@ std::optional<LoopDefinition> LoopStore::create_loop(LoopDefinition value,
     }
     Statement stmt(db_,
         "INSERT INTO loops(id,name,prompt,workspace_hash,workspace_cwd,model_name,"
-        "permission_mode,schedule_json,schedule_expr,next_run_at_ms,enabled,created_at_ms,updated_at_ms) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);", error);
+        "permission_mode,use_worktree,schedule_json,schedule_expr,next_run_at_ms,enabled,"
+        "created_at_ms,updated_at_ms) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);", error);
     if (!stmt || !bind_loop_write(stmt.get(), value, true) ||
         sqlite3_step(stmt.get()) != SQLITE_DONE || !commit_locked(error)) {
         if (sqlite3_get_autocommit(db_) == 0) rollback_locked();
@@ -422,10 +459,10 @@ std::optional<LoopDefinition> LoopStore::update_loop(const std::string& id,
     }
     Statement stmt(db_,
         "UPDATE loops SET name=?,prompt=?,workspace_hash=?,workspace_cwd=?,model_name=?,"
-        "permission_mode=?,schedule_json=?,schedule_expr=?,next_run_at_ms=?,enabled=?,"
-        "created_at_ms=?,updated_at_ms=? WHERE id=?;", error);
+        "permission_mode=?,use_worktree=?,schedule_json=?,schedule_expr=?,next_run_at_ms=?,"
+        "enabled=?,created_at_ms=?,updated_at_ms=? WHERE id=?;", error);
     if (!stmt || !bind_loop_write(stmt.get(), value, false) ||
-        !bind_text(stmt.get(), 13, id) || sqlite3_step(stmt.get()) != SQLITE_DONE ||
+        !bind_text(stmt.get(), 14, id) || sqlite3_step(stmt.get()) != SQLITE_DONE ||
         !commit_locked(error)) {
         if (sqlite3_get_autocommit(db_) == 0) rollback_locked();
         if (error && error->code.empty()) set_error(error, "SQLITE_ERROR", sqlite_message(db_, "update LOOP failed"));

@@ -26,6 +26,18 @@ test('workspace heading actions stay mounted and reveal on pointer or keyboard i
   assert.match(sidebar, /className="ace-sidebar-section-header ace-sidebar-section-text/);
   assert.match(sidebar, /data-sidebar-section-actions=\{sectionId\} className="ace-sidebar-section-actions/);
   assert.match(sidebar, /data-sidebar-collapse-all-workspaces="true"/);
+  assert.match(
+    sidebar,
+    /setExpandedSessionLists\(\(previous\) => \(\s*expandedSessionListsAfterWorkspaceCollapseAll\(previous, workspaces\)\s*\)\);/,
+  );
+  assert.match(
+    sidebar,
+    /updateExpanded\(\(prev\) => \{\s*const next = new Set\(prev\);\s*if \(!workspaceCollapseAllRef\.current\) \{/,
+  );
+  assert.match(
+    sidebar,
+    /!revealTarget\.noWorkspace\s*&& revealTarget\.workspaceHash\s*&& !workspaceCollapseAllRef\.current/,
+  );
   assert.match(sidebar, /data-tour-target="sidebar-add-project"/);
   assert.match(styles, /\.ace-sidebar-section-actions\s*\{\s*opacity: 0;\s*pointer-events: none;/);
   assert.match(

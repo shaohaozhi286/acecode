@@ -1,6 +1,7 @@
 #include "session_manager.hpp"
 #include "session_serializer.hpp"
 #include "session_rewind.hpp"
+#include "session_title_generator.hpp"
 #include "session_user_message_search.hpp"
 #include "tool_result_storage.hpp"
 #include "turn_timing.hpp"
@@ -11,7 +12,6 @@
 
 #include <filesystem>
 #include <algorithm>
-#include <cctype>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -103,21 +103,6 @@ void log_user_message_index_error(const std::string& action,
     if (error.empty()) return;
     LOG_WARN("[session-search] " + action +
              " failed for session " + session_id + ": " + error);
-}
-
-bool is_generated_error_title(const std::string& title) {
-    std::size_t i = 0;
-    while (i < title.size() &&
-           std::isspace(static_cast<unsigned char>(title[i])) != 0) {
-        ++i;
-    }
-    if (title.compare(i, 7, "[Error]") == 0) return true;
-    if (title.size() - i < 5) return false;
-    return std::tolower(static_cast<unsigned char>(title[i])) == 'e' &&
-           std::tolower(static_cast<unsigned char>(title[i + 1])) == 'r' &&
-           std::tolower(static_cast<unsigned char>(title[i + 2])) == 'r' &&
-           std::tolower(static_cast<unsigned char>(title[i + 3])) == 'o' &&
-           std::tolower(static_cast<unsigned char>(title[i + 4])) == 'r';
 }
 
 std::string turn_timing_dedupe_key(const acecode::ChatMessage& msg) {
@@ -219,7 +204,7 @@ void SessionManager::start_session(const std::string& cwd,
     created_at_.clear();
     pending_title_.clear();
     title_source_.clear();
-    auto_title_generation_attempted_ = false;
+    reset_auto_title_state_locked();
     user_title_touched_ = false;
     input_draft_.clear();
     permission_mode_ = "default";
@@ -231,6 +216,8 @@ void SessionManager::start_session(const std::string& cwd,
     writer_lease_active_ = false;
     archived_ = false;
     parent_session_id_.clear();
+    loop_id_.clear();
+    loop_run_id_.clear();
     worktree_ = {};
     checkpoint_store_.reset();
     checkpoint_store_.set_session(project_dir_, session_id_);
@@ -286,6 +273,8 @@ bool SessionManager::ensure_created() {
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
     meta.parent_session_id = parent_session_id_;
+    meta.loop_id = loop_id_;
+    meta.loop_run_id = loop_run_id_;
     meta.worktree = worktree_;
     SessionStorage::write_meta(meta_path_str_, meta);
     return true;
@@ -512,6 +501,8 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         archived_ = meta.archived;
         no_workspace_ = meta.no_workspace;
         parent_session_id_ = meta.parent_session_id;
+        loop_id_ = meta.loop_id;
+        loop_run_id_ = meta.loop_run_id;
         worktree_ = meta.worktree;
         if (model_preset_.empty()) {
             model_preset_ = meta.model_preset;
@@ -604,7 +595,7 @@ void SessionManager::end_current_session() {
     created_at_.clear();
     pending_title_.clear();
     title_source_.clear();
-    auto_title_generation_attempted_ = false;
+    reset_auto_title_state_locked();
     user_title_touched_ = false;
     input_draft_.clear();
     last_token_usage_ = {};
@@ -612,6 +603,8 @@ void SessionManager::end_current_session() {
     todos_.clear();
     last_error_.clear();
     archived_ = false;
+    loop_id_.clear();
+    loop_run_id_.clear();
     checkpoint_store_.reset();
     checkpoint_store_.set_session(project_dir_, "");
     // Keep started_=true, cwd_, provider_name_, model_name_, project_dir_
@@ -650,6 +643,8 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     last_user_summary_.clear();
     input_draft_.clear();
     todos_.clear();
+    loop_id_.clear();
+    loop_run_id_.clear();
 
     if (!acquire_writer_lease_locked()) {
         return {};
@@ -943,6 +938,8 @@ void SessionManager::update_meta() {
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
     meta.parent_session_id = parent_session_id_;
+    meta.loop_id = loop_id_;
+    meta.loop_run_id = loop_run_id_;
     meta.worktree = worktree_;
     SessionStorage::write_meta(meta_path_str_, meta);
     refresh_writer_lease_locked();
@@ -972,16 +969,9 @@ bool SessionManager::try_set_generated_session_title_for_session(
 }
 
 bool SessionManager::try_set_generated_session_title_locked(std::string title) {
-    if (title.empty()) return false;
+    if (title.empty() || is_generated_session_error_title(title)) return false;
     if (user_title_touched_) return false;
     if (!pending_title_.empty() && title_source_ != "generated") return false;
-    const bool incoming_error = is_generated_error_title(title);
-    const bool current_generated_error =
-        title_source_ == "generated" && is_generated_error_title(pending_title_);
-    if (incoming_error && title_source_ == "generated" &&
-        !pending_title_.empty() && !current_generated_error) {
-        return false;
-    }
     pending_title_ = std::move(title);
     title_source_ = "generated";
     if (created_) {
@@ -990,16 +980,101 @@ bool SessionManager::try_set_generated_session_title_locked(std::string title) {
     return true;
 }
 
-bool SessionManager::mark_auto_title_generation_started() {
+void SessionManager::reset_auto_title_state_locked() {
+    auto_title_input_.clear();
+    auto_title_session_id_.clear();
+    auto_title_generation_attempts_ = 0;
+    auto_title_generation_in_flight_ = false;
+    auto_title_retry_pending_ = false;
+    auto_title_first_turn_completed_ = false;
+}
+
+std::optional<std::string>
+SessionManager::begin_auto_title_generation(std::string visible_input) {
     std::lock_guard<std::mutex> lk(mu_);
-    const bool retry_generated_error =
-        title_source_ == "generated" && is_generated_error_title(pending_title_);
-    if (auto_title_generation_attempted_ && !retry_generated_error) return false;
-    if (turn_count_ > 0 && !retry_generated_error) return false;
-    if (user_title_touched_) return false;
-    if (!pending_title_.empty() && title_source_ != "generated") return false;
-    auto_title_generation_attempted_ = true;
-    return true;
+    if (visible_input.empty() || session_id_.empty()) return std::nullopt;
+    if (user_title_touched_ || !pending_title_.empty()) return std::nullopt;
+    if (auto_title_generation_in_flight_) return std::nullopt;
+
+    if (auto_title_generation_attempts_ == 0) {
+        if (turn_count_ > 0) return std::nullopt;
+        auto_title_input_ = std::move(visible_input);
+        auto_title_session_id_ = session_id_;
+        auto_title_generation_attempts_ = 1;
+        auto_title_generation_in_flight_ = true;
+        auto_title_retry_pending_ = false;
+        auto_title_first_turn_completed_ = false;
+        return auto_title_input_;
+    }
+
+    if (!auto_title_retry_pending_ ||
+        auto_title_generation_attempts_ >= 2 ||
+        auto_title_session_id_ != session_id_ ||
+        auto_title_input_.empty()) {
+        return std::nullopt;
+    }
+
+    ++auto_title_generation_attempts_;
+    auto_title_generation_in_flight_ = true;
+    auto_title_retry_pending_ = false;
+    return auto_title_input_;
+}
+
+std::optional<std::string>
+SessionManager::finish_auto_title_generation_for_session(
+    const std::string& session_id,
+    bool succeeded) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (session_id.empty() ||
+        session_id_ != session_id ||
+        auto_title_session_id_ != session_id ||
+        !auto_title_generation_in_flight_) {
+        return std::nullopt;
+    }
+
+    auto_title_generation_in_flight_ = false;
+    if (succeeded ||
+        user_title_touched_ ||
+        !pending_title_.empty() ||
+        auto_title_generation_attempts_ >= 2) {
+        auto_title_retry_pending_ = false;
+        auto_title_input_.clear();
+        return std::nullopt;
+    }
+
+    auto_title_retry_pending_ = true;
+    if (!auto_title_first_turn_completed_) return std::nullopt;
+
+    ++auto_title_generation_attempts_;
+    auto_title_generation_in_flight_ = true;
+    auto_title_retry_pending_ = false;
+    return auto_title_input_;
+}
+
+std::optional<std::string>
+SessionManager::mark_auto_title_turn_finished(const std::string& status) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (status != "completed" ||
+        session_id_.empty() ||
+        auto_title_session_id_ != session_id_ ||
+        auto_title_generation_attempts_ == 0 ||
+        auto_title_input_.empty()) {
+        return std::nullopt;
+    }
+
+    auto_title_first_turn_completed_ = true;
+    if (!auto_title_retry_pending_ ||
+        auto_title_generation_in_flight_ ||
+        auto_title_generation_attempts_ >= 2 ||
+        user_title_touched_ ||
+        !pending_title_.empty()) {
+        return std::nullopt;
+    }
+
+    ++auto_title_generation_attempts_;
+    auto_title_generation_in_flight_ = true;
+    auto_title_retry_pending_ = false;
+    return auto_title_input_;
 }
 
 void SessionManager::set_session_archived(bool archived) {
@@ -1021,6 +1096,15 @@ void SessionManager::set_parent_session_id(std::string parent_id) {
 std::string SessionManager::current_parent_session_id() const {
     std::lock_guard<std::mutex> lk(mu_);
     return parent_session_id_;
+}
+
+void SessionManager::set_loop_origin(std::string loop_id, std::string loop_run_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    loop_id_ = std::move(loop_id);
+    loop_run_id_ = std::move(loop_run_id);
+    if (created_) {
+        update_meta();
+    }
 }
 
 void SessionManager::set_active_worktree(const WorktreeSessionInfo& info) {

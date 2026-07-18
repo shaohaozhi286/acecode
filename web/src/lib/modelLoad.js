@@ -1,5 +1,5 @@
-// PUB 模型池负载的前端纯函数:色阶判定 + 从 /api/model-pool-status 快照里
-// 按模型 id 精确匹配取负载。阈值与后端 model_load_tier 一致(<70 绿 / 70..90 黄 / >90 红)。
+// 模型池负载的前端纯函数:色阶判定 + 从 /api/model-pool-status 快照里按模型 id
+// 精确匹配 modelPoolName 取负载。阈值与后端一致(<70 绿 / 70..90 黄 / >90 红)。
 
 // 负载色阶。返回 'green' | 'yellow' | 'red' | null(未知/无效)。
 export function loadTier(usageRate) {

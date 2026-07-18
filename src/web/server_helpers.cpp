@@ -568,6 +568,16 @@ void append_worktree_session(json& target, const WorktreeSessionInfo& worktree) 
     };
 }
 
+void append_loop_execution(json& target,
+                           const std::string& loop_id,
+                           const std::string& loop_run_id) {
+    if (loop_id.empty()) return;
+    target["loop_execution"] = {
+        {"loop_id", loop_id},
+        {"run_id", loop_run_id},
+    };
+}
+
 } // namespace
 
 json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMeta* m) const {
@@ -610,7 +620,16 @@ json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMe
         token_usage_has_values(s.session_token_usage)
             ? s.session_token_usage
             : (m ? m->session_token_usage : TokenUsage{}));
-    if (m) append_worktree_session(o, m->worktree);
+    if (m) {
+        append_worktree_session(o, m->worktree);
+        append_loop_execution(o, m->loop_id, m->loop_run_id);
+    }
+    if (!o.contains("loop_execution") && deps.session_registry) {
+        if (auto entry = deps.session_registry->acquire(s.id);
+            entry && entry->loop_execution) {
+            append_loop_execution(o, entry->loop_id, entry->loop_run_id);
+        }
+    }
     if (m && !m->todos.empty()) {
         o["todos"] = todo_items_to_json(m->todos);
         o["todo_summary"] = todo_summary_to_json(m->todos);
@@ -652,6 +671,7 @@ json WebServer::Impl::session_meta_to_json(const SessionMeta& m, const std::stri
     // 会话的 worktree 状态(add-webui-git-session-pill):前端 pill 与侧栏
     // 据此恢复只读状态。inactive 时省略字段。
     append_worktree_session(o, m.worktree);
+    append_loop_execution(o, m.loop_id, m.loop_run_id);
     if (!m.todos.empty()) {
         o["todos"] = todo_items_to_json(m.todos);
         o["todo_summary"] = todo_summary_to_json(m.todos);

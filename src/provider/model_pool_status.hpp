@@ -2,9 +2,10 @@
 
 // 模型池负载监控(model-pool load monitor)。
 //
-// 背景:wizard-ai code_pilot 的 PUB 模型池有一个负载查询接口
+// 背景:wizard-ai code_pilot 的模型池负载查询接口
 //   GET https://wizard-ai.paic.com.cn/code_pilot/api/monitor/getModelPoolStatus
-// 返回每个池的实时 usageRate(0..100 负载百分比)和 maxWindowTokens(池窗口)。
+// 返回每个池的 modelPoolName、实时 usageRate(0..100 负载百分比)和
+// maxWindowTokens(池窗口)。配置的 model id 与 modelPoolName 精确相等即视为池成员。
 // 本服务每 30s 轮询一次,缓存结果供 TUI / daemon / web 展示负载,并把
 // 0.8 * maxWindowTokens 作为该模型的有效上下文窗口(驱动占用% 与自动压缩)。
 //
@@ -55,10 +56,6 @@ ModelLoadTier model_load_tier(int usage_rate);
 // 有效上下文窗口 = round(0.8 * max_window_tokens)。max<=0 → 0。
 // 例:150000 → 120000。
 int effective_context_window(long long max_window_tokens);
-
-// 模型名是否为 PUB 池(前缀 "PUB",大小写不敏感)。用于决定是否启动轮询 /
-// 是否展示负载。
-bool is_pub_model(const std::string& model);
 
 // --- 注入式抓取(单测 mock 用)-------------------------------------------
 

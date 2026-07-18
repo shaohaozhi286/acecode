@@ -34,14 +34,6 @@ function PermissionShieldIcon({ className = '' }) {
   );
 }
 
-function ModelGlyph() {
-  return (
-    <span className="ace-composer-model-glyph" aria-hidden="true">
-      A
-    </span>
-  );
-}
-
 function SignalBars() {
   return (
     <svg width="12" height="11" viewBox="0 0 12 11" aria-hidden="true" className="shrink-0">
@@ -253,7 +245,6 @@ export function ComposerSessionControls({
               (modelSwitching || !canOpenModelMenu) && 'cursor-wait opacity-60',
             )}
           >
-            <ModelGlyph />
             <span className="ace-composer-model-label">{compactModelLabel}</span>
             <VsIcon name="glyphDown" size={10} className="shrink-0 opacity-75" />
           </button>

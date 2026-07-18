@@ -1,6 +1,6 @@
 // 全屏设置页:左栏导航 + 右栏内容(Codex 风格)。
 //
-// 设计来源:Claude Design 高保真原型 (panels.jsx)。NAV 顺序与设计稿一致。
+// 左侧导航按 Codex 风格分组,section key 与深链行为保持稳定。
 // 后端真实接入的 section:常规 (权限模式) / 外观 (主题) / 配置 / 个性化 / 技能 / 模型 / 工具。
 // 其余 section (MCP / 使用情况) 当前部分为 UI 占位
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
@@ -72,6 +72,11 @@ import {
   skillsEnabledSummary,
   workspaceAutoExpand,
 } from '../lib/skillsSettings.js';
+import {
+  SETTINGS_NAV_GROUPS,
+  SETTINGS_NAV_ITEMS,
+  settingsNavIndexForKey,
+} from '../lib/settingsNavigation.js';
 import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
@@ -82,34 +87,12 @@ import {
   useFramelessWindowState,
 } from './WindowControls.jsx';
 
-const NAV = [
-  { key: 'general', label: '常规', icon: 'settings' },
-  { key: 'appearance', label: '外观', icon: 'brightness' },
-  { key: 'config', label: '配置', icon: 'terminal' },
-  { key: 'personalization', label: '个性化', icon: 'eye' },
-  { key: 'skills', label: '技能', icon: 'lightbulb' },
-  { key: 'mcp', label: 'MCP 服务器', icon: 'mcp' },
-  { key: 'connectors', label: '连接器', icon: 'extension' },
-  { key: 'models', label: '模型', icon: 'brain' },
-  { key: 'tools', label: '工具', icon: 'tool' },
-  { key: 'hooks', label: '钩子', icon: 'hook' },
-  { key: 'archived', label: '已归档会话', icon: 'archive' },
-  { key: 'usage', label: '使用情况', icon: 'list' },
-  { key: 'feedback', label: '问题反馈', icon: 'help' },
-  { key: 'about', label: '关于', icon: 'info' },
-];
-
 const DEFAULT_UPGRADE_SERVICE_URL = 'http://2017studio.imwork.net:82/aupdate/';
 const FONT_SIZE_OPTIONS = [
   { key: 'small', label: '小' },
   { key: 'medium', label: '中' },
   { key: 'large', label: '大' },
 ];
-
-function navIndexForKey(key) {
-  const idx = NAV.findIndex((item) => item.key === key);
-  return idx >= 0 ? idx : 0;
-}
 
 export function SettingsPage({
   onClose,
@@ -123,14 +106,16 @@ export function SettingsPage({
   onFontSizeChange = () => {},
 }) {
   const { theme, set: setTheme } = useTheme();
-  const [activeNav, setActiveNav] = useState(() => navIndexForKey(initialNavKey));
+  const [activeNav, setActiveNav] = useState(
+    () => settingsNavIndexForKey(initialNavKey),
+  );
   const [show, setShow] = useState(false);
   const { framelessDesktop, isMaximized } = useFramelessWindowState();
-  const activeNavKey = NAV[activeNav]?.key || 'general';
+  const activeNavKey = SETTINGS_NAV_ITEMS[activeNav]?.key || 'general';
 
   useEffect(() => { requestAnimationFrame(() => setShow(true)); }, []);
   useEffect(() => {
-    setActiveNav(navIndexForKey(initialNavKey));
+    setActiveNav(settingsNavIndexForKey(initialNavKey));
   }, [initialNavKey]);
   const close = () => { setShow(false); setTimeout(onClose, 240); };
 
@@ -171,22 +156,47 @@ export function SettingsPage({
       </div>
       <div className="flex-1 flex overflow-hidden">
         <nav className="w-[200px] bg-surface-alt border-r border-border py-2 overflow-y-auto shrink-0">
-          {NAV.map((item, i) => (
-            <button
-              key={item.key}
-              type="button"
-              onClick={() => setActiveNav(i)}
-              className={clsx(
-                'w-full px-4 py-2 text-[13px] transition border-l-[3px] flex items-center gap-2 text-left',
-                activeNav === i
-                  ? 'text-accent font-semibold bg-accent-bg border-accent'
-                  : 'text-fg hover:bg-surface-hi border-transparent',
-              )}
-            >
-              <VsIcon name={item.icon} size={15} className="shrink-0 opacity-80" />
-              <span className="truncate">{item.label}</span>
-            </button>
-          ))}
+          {SETTINGS_NAV_GROUPS.map((group, groupIndex) => {
+            const headingId = `settings-nav-group-${group.key}`;
+            return (
+              <div
+                key={group.key}
+                role="group"
+                aria-labelledby={headingId}
+              >
+                <div
+                  id={headingId}
+                  className={clsx(
+                    'px-4 pb-1 text-[11px] font-medium text-fg-mute',
+                    groupIndex === 0 ? 'pt-1' : 'pt-4',
+                  )}
+                >
+                  {group.label}
+                </div>
+                {group.items.map((item) => {
+                  const itemIndex = settingsNavIndexForKey(item.key);
+                  const active = activeNav === itemIndex;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      aria-current={active ? 'page' : undefined}
+                      onClick={() => setActiveNav(itemIndex)}
+                      className={clsx(
+                        'w-full px-4 py-2 text-[13px] transition border-l-[3px] flex items-center gap-2 text-left',
+                        active
+                          ? 'text-accent font-semibold bg-accent-bg border-accent'
+                          : 'text-fg hover:bg-surface-hi border-transparent',
+                      )}
+                    >
+                      <VsIcon name={item.icon} size={15} className="shrink-0 opacity-80" />
+                      <span className="truncate">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
         </nav>
         <div className="flex-1 overflow-y-auto px-12 py-6">
           {activeNavKey === 'general' && (

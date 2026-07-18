@@ -26,6 +26,7 @@ std::string build_loop_system_context(const LoopDefinition& loop,
                                       const LoopRun& run,
                                       const std::string& execution_root,
                                       const std::string& worktree_branch);
+bool should_create_loop_worktree(const LoopDefinition& loop, bool git_workspace);
 
 struct LoopEventState {
     bool waiting_user = false;

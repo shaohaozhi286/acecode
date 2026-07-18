@@ -105,6 +105,7 @@ private:
         std::condition_variable     cv;
         bool                        responded = false;
         PermissionDecisionChoice    choice = PermissionDecisionChoice::Deny;
+        std::string                 reason = "decision";
         std::string                 tool_name;  // 补发用:重建 permission_request
         nlohmann::json              args;       // 补发用
     };

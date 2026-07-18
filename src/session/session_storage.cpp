@@ -1,5 +1,6 @@
 #include "session_storage.hpp"
 #include "session_serializer.hpp"
+#include "session_title_generator.hpp"
 #include "../config/config.hpp"
 #include "../utils/atomic_file.hpp"
 #include "../utils/cwd_hash.hpp"
@@ -231,6 +232,12 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.parent_session_id.empty()) {
         j["parent_session_id"] = meta.parent_session_id;
     }
+    if (!meta.loop_id.empty()) {
+        j["loop_execution"] = {
+            {"loop_id", meta.loop_id},
+            {"run_id", meta.loop_run_id},
+        };
+    }
     // worktree 会话状态:inactive 时省略,保持老 meta 文件 byte-byte 不变。
     if (meta.worktree.active()) {
         j["worktree_session"] = {
@@ -274,6 +281,11 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         if (!meta.title.empty() && meta.title_source.empty()) {
             meta.title_source = "legacy";
         }
+        if (meta.title_source == "generated" &&
+            is_generated_session_error_title(meta.title)) {
+            meta.title.clear();
+            meta.title_source.clear();
+        }
         meta.input_draft     = j.value("input_draft",     std::string{});
         meta.permission_mode = normalize_permission_mode_name(
             j.value("permission_mode", std::string{"default"}));
@@ -292,6 +304,11 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});
         meta.parent_session_id = j.value("parent_session_id", std::string{});
+        if (j.contains("loop_execution") && j["loop_execution"].is_object()) {
+            const auto& loop = j["loop_execution"];
+            meta.loop_id = loop.value("loop_id", std::string{});
+            meta.loop_run_id = loop.value("run_id", std::string{});
+        }
         if (j.contains("worktree_session") && j["worktree_session"].is_object()) {
             const auto& wt = j["worktree_session"];
             meta.worktree.original_cwd  = wt.value("original_cwd",  std::string{});

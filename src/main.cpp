@@ -595,8 +595,9 @@ static Color token_progress_color(int percent) {
     return s.success;
 }
 
-// 当前活动模型的 PUB 池负载百分比(-1 = 未知/非 PUB,不渲染)。由 model-pool 监控
-// 的后台轮询回调写入(atomic,UI 线程 render 读),配套 PostEvent 触发重绘。
+// 当前活动模型的池负载百分比(-1 = 未知/未命中 modelPoolName,不渲染)。由
+// model-pool 监控的后台轮询回调写入(atomic,UI 线程 render 读),配套 PostEvent
+// 触发重绘。
 static std::atomic<int> g_model_load_percent{-1};
 
 // 模型池负载色阶(与 web / 后端 model_load_tier 一致):<70 绿 / 70..90 黄 / >90 红。
@@ -609,7 +610,7 @@ static Color model_load_color(int percent) {
 }
 
 // 底部状态栏的模型池负载 chip:递增信号格 + 百分比,按负载档染色。负载未知
-// (g_model_load_percent < 0,即非 PUB 模型或监控无数据)时不渲染。
+// (g_model_load_percent < 0,即未命中 modelPoolName 或监控无数据)时不渲染。
 static Element render_model_load_chip() {
     const int percent = g_model_load_percent.load();
     if (percent < 0) return text("");
@@ -5360,18 +5361,15 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
 
     agent_loop.set_callbacks(callbacks);
 
-    // ---- Model-pool load monitor (PUB 模型) ----
-    // 仅当配置里有 PUB 池模型时才起 30s 轮询(避免在没有这些模型的机器上无谓打外网)。
+    // ---- Model-pool load monitor ----
+    // 池成员由接口的 modelPoolName 决定,不能再靠模型名前缀预判。有任意已配置模型时
+    // 启动 30s 发现轮询;空配置不发请求。
     // 负载实时写 g_model_load_percent 供底栏 chip 展示;maxWindowTokens 稳定,故只需在
     // 每次成功轮询时把 0.8x 有效窗口回灌到 config + agent_loop(UI 线程 Post,改的是 int,
     // 安全),token% 下个回合自然重算。service 在 run_tui_loop 返回后 stop(),保证回调
     // 不晚于这些局部变量析构。
     {
-        bool has_pub = false;
-        for (const auto& m : config.saved_models) {
-            if (acecode::is_pub_model(m.model)) { has_pub = true; break; }
-        }
-        if (has_pub) {
+        if (!config.saved_models.empty()) {
             auto on_pool_update = [&provider_slot, &config, &agent_loop]() {
                 std::string model_id;
                 {
@@ -5380,11 +5378,9 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                 }
                 int pct = -1;
                 int eff = 0;
-                if (acecode::is_pub_model(model_id)) {
-                    if (auto st = acecode::model_pool_status_service().get(model_id)) {
-                        pct = st->usage_rate;
-                        eff = acecode::effective_context_window(st->max_window_tokens);
-                    }
+                if (auto st = acecode::model_pool_status_service().get(model_id)) {
+                    pct = st->usage_rate;
+                    eff = acecode::effective_context_window(st->max_window_tokens);
                 }
                 g_model_load_percent.store(pct);
                 auto* scr = g_active_screen.load(std::memory_order_acquire);
@@ -5439,15 +5435,87 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
 
     std::mutex tui_title_threads_mu;
     std::vector<std::thread> tui_title_threads;
+    std::atomic<bool> tui_title_shutting_down{false};
     auto join_tui_title_threads = [&]() {
         std::vector<std::thread> threads;
         {
             std::lock_guard<std::mutex> lk(tui_title_threads_mu);
+            tui_title_shutting_down.store(true);
             threads.swap(tui_title_threads);
         }
         for (auto& thread : threads) {
             if (thread.joinable()) thread.join();
         }
+    };
+    std::function<void(const std::string&, std::string)>
+        start_tui_auto_title_attempt;
+    start_tui_auto_title_attempt =
+        [&](const std::string& session_id, std::string text) {
+        if (tui_title_shutting_down.load() ||
+            session_id.empty() ||
+            session_manager.current_session_id() != session_id) {
+            return;
+        }
+
+        auto profile = resolve_auto_title_profile(
+            config,
+            session_manager.current_model_preset(),
+            agent_loop.cwd());
+        if (!profile.has_value()) {
+            auto retry =
+                session_manager.finish_auto_title_generation_for_session(
+                    session_id, false);
+            if (retry.has_value() && !tui_title_shutting_down.load()) {
+                start_tui_auto_title_attempt(session_id, std::move(*retry));
+            }
+            return;
+        }
+
+        std::lock_guard<std::mutex> threads_lk(tui_title_threads_mu);
+        if (tui_title_shutting_down.load()) return;
+        tui_title_threads.emplace_back(
+            [&, cfg = &config, session_id, text = std::move(text),
+             profile = std::move(*profile)]() mutable {
+            bool applied = false;
+            try {
+                auto provider =
+                    create_auto_title_provider(std::move(profile), *cfg);
+                if (provider) {
+                    auto title =
+                        generate_auto_session_title(*provider, text, *cfg);
+                    if (title.has_value() && !title->empty() &&
+                        session_manager
+                            .try_set_generated_session_title_for_session(
+                                session_id, *title)) {
+                        applied = true;
+                        if (session_manager.current_session_id() == session_id) {
+                            {
+                                std::lock_guard<std::mutex> lk(state.mu);
+                                if (session_manager.current_session_id() ==
+                                    session_id) {
+                                    state.current_session_title = *title;
+                                }
+                            }
+                            set_terminal_title(*title);
+                            screen.PostEvent(Event::Custom);
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                LOG_WARN("[tui] auto session title generation failed: " +
+                         std::string(e.what()));
+            } catch (...) {
+                LOG_WARN("[tui] auto session title generation failed");
+            }
+
+            auto retry =
+                session_manager.finish_auto_title_generation_for_session(
+                    session_id, applied);
+            if (retry.has_value() && !tui_title_shutting_down.load()) {
+                start_tui_auto_title_attempt(
+                    session_id, std::move(*retry));
+            }
+        });
     };
     auto maybe_start_tui_auto_title = [&](const UserInput& input) {
         if (!config.session_title.enabled) return;
@@ -5457,43 +5525,25 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         const std::string session_id = session_manager.ensure_active_session_id();
         if (session_id.empty()) return;
 
-        auto profile = resolve_auto_title_profile(
-            config,
-            session_manager.current_model_preset(),
-            agent_loop.cwd());
-        if (!profile.has_value()) return;
-        if (!session_manager.mark_auto_title_generation_started()) return;
-
-        std::thread worker([&, cfg = &config, session_id,
-                            text = std::move(text),
-                            profile = std::move(*profile)]() mutable {
-            try {
-                auto provider = create_auto_title_provider(std::move(profile), *cfg);
-                if (!provider) return;
-                auto title = generate_auto_session_title(*provider, text, *cfg);
-                if (!title.has_value() || title->empty()) return;
-                if (!session_manager.try_set_generated_session_title_for_session(
-                        session_id, *title)) {
-                    return;
-                }
-                if (session_manager.current_session_id() != session_id) return;
-                {
-                    std::lock_guard<std::mutex> lk(state.mu);
-                    if (session_manager.current_session_id() != session_id) return;
-                    state.current_session_title = *title;
-                }
-                set_terminal_title(*title);
-                screen.PostEvent(Event::Custom);
-            } catch (const std::exception& e) {
-                LOG_WARN("[tui] auto session title generation failed: " +
-                         std::string(e.what()));
-            } catch (...) {
-                LOG_WARN("[tui] auto session title generation failed");
-            }
-        });
-        std::lock_guard<std::mutex> lk(tui_title_threads_mu);
-        tui_title_threads.push_back(std::move(worker));
+        auto attempt_text =
+            session_manager.begin_auto_title_generation(std::move(text));
+        if (!attempt_text.has_value()) return;
+        start_tui_auto_title_attempt(session_id, std::move(*attempt_text));
     };
+    callbacks.on_turn_finished =
+        [&state, &tui_turn_outcome, &session_manager,
+         &start_tui_auto_title_attempt](const std::string& status) {
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            tui_turn_outcome = status;
+        }
+        const std::string session_id = session_manager.current_session_id();
+        auto retry = session_manager.mark_auto_title_turn_finished(status);
+        if (retry.has_value() && !session_id.empty()) {
+            start_tui_auto_title_attempt(session_id, std::move(*retry));
+        }
+    };
+    agent_loop.set_callbacks(callbacks);
     std::function<void(const UserInput&)> submit_tui_input =
         [&](const UserInput& input) {
             maybe_start_tui_auto_title(input);

@@ -173,12 +173,10 @@ SessionModelState state_from_profile(const AppConfig& cfg,
     state.model = profile.model;
     state.context_window = resolve_model_profile_context_window_nonblocking(
         cfg, profile, cfg.context_window);
-    // PUB 池模型:用监控上报的 0.8 * maxWindowTokens 作为有效上下文窗口(驱动占用%
-    // 与自动压缩)。监控尚无数据时 eff==0,保留上面解析出的默认值。
-    if (is_pub_model(state.model)) {
-        int eff = model_pool_status_service().effective_context_window_for(state.model);
-        if (eff > 0) state.context_window = eff;
-    }
+    // model id 与监控快照的 modelPoolName 精确命中时,用 0.8 * maxWindowTokens
+    // 作为有效上下文窗口(驱动占用% 与自动压缩)。未命中时保留默认值。
+    int eff = model_pool_status_service().effective_context_window_for(state.model);
+    if (eff > 0) state.context_window = eff;
     return state;
 }
 
@@ -675,6 +673,7 @@ SessionRegistry::SessionRegistry(SessionRegistryDeps deps)
     : deps_(std::move(deps)) {}
 
 SessionRegistry::~SessionRegistry() {
+    shutting_down_.store(true);
     if (deps_.power_guard) {
         std::lock_guard<std::mutex> lk(mu_);
         for (const auto& [id, _entry] : entries_) {
@@ -780,6 +779,9 @@ SessionRegistry::make_entry_locked(const std::string& id,
         // 子会话身份写进 meta(lazy:首条消息落盘时随初始 meta 一起写)。
         entry->sm->set_parent_session_id(entry->parent_session_id);
     }
+    if (opts.loop_execution) {
+        entry->sm->set_loop_origin(opts.loop_id, opts.loop_run_id);
+    }
 
     // PermissionManager: 复制 mode + dangerous flag,rules 由调用方在初始化
     // template_permissions 时设好。session_allowed_ 不复制,各 session 独立。
@@ -838,6 +840,9 @@ SessionRegistry::make_entry_locked(const std::string& id,
             power_guard->set_busy(id, busy);
         };
     }
+    empty_cb.on_turn_finished = [this, id](const std::string& status) {
+        handle_auto_title_turn_finished(id, status);
+    };
     auto slot = entry->provider_slot;
     AgentLoop::ProviderAccessor provider_accessor = [slot]() -> std::shared_ptr<LlmProvider> {
         if (!slot) return {};
@@ -1174,37 +1179,75 @@ bool SessionRegistry::set_permission_mode(const std::string& id, PermissionMode 
 }
 
 void SessionRegistry::maybe_start_auto_title(const std::string& id, const UserInput& input) {
-    if (!deps_.config || !deps_.config->session_title.enabled) return;
+    if (shutting_down_.load() ||
+        !deps_.config ||
+        !deps_.config->session_title.enabled) {
+        return;
+    }
     std::string text = visible_auto_title_input(input);
     if (text.empty()) return;
 
+    auto entry = acquire(id);
+    if (!entry || !entry->sm) return;
+    auto attempt_text = entry->sm->begin_auto_title_generation(std::move(text));
+    if (!attempt_text.has_value()) return;
+    start_auto_title_attempt(id, std::move(*attempt_text));
+}
+
+void SessionRegistry::start_auto_title_attempt(const std::string& id,
+                                               std::string text) {
+    if (shutting_down_.load() || !deps_.config) return;
+
+    auto title_generator = deps_.auto_title_generator;
     std::optional<ModelProfile> profile;
-    std::string session_id;
     const AppConfig* cfg = deps_.config;
-    {
+    if (!title_generator) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = entries_.find(id);
-        if (it == entries_.end() || !it->second || !it->second->sm) return;
-        auto& entry = *it->second;
-        profile = resolve_auto_title_profile(*deps_.config,
-                                             entry.model_state.name,
-                                             entry.cwd);
-        if (!profile.has_value()) return;
-        if (!entry.sm->mark_auto_title_generation_started()) return;
-        session_id = entry.id;
+        if (it != entries_.end() && it->second && it->second->sm) {
+            profile = resolve_auto_title_profile(
+                *deps_.config,
+                it->second->model_state.name,
+                it->second->cwd);
+        }
     }
 
-    std::thread worker([this, cfg, profile = std::move(*profile),
-                        session_id, text = std::move(text)]() mutable {
+    if (!title_generator && !profile.has_value()) {
+        auto entry = acquire(id);
+        if (!entry || !entry->sm) return;
+        auto retry = entry->sm->finish_auto_title_generation_for_session(
+            id, false);
+        if (retry.has_value() && !shutting_down_.load()) {
+            start_auto_title_attempt(id, std::move(*retry));
+        }
+        return;
+    }
+
+    std::lock_guard<std::mutex> threads_lk(title_threads_mu_);
+    if (shutting_down_.load()) return;
+    title_threads_.emplace_back(
+        [this, cfg, profile = std::move(profile),
+         title_generator = std::move(title_generator),
+         session_id = id, text = std::move(text)]() mutable {
+        bool applied = false;
         try {
-            auto provider = create_auto_title_provider(std::move(profile), *cfg);
-            if (!provider) return;
-            auto title = generate_auto_session_title(*provider, text, *cfg);
-            if (!title.has_value() || title->empty()) return;
-            auto entry = acquire(session_id);
-            if (!entry || !entry->sm) return;
-            if (entry->sm->try_set_generated_session_title(*title)) {
-                emit_session_title_updated(*entry);
+            std::optional<std::string> title;
+            if (title_generator) {
+                title = title_generator(text);
+            } else if (profile.has_value()) {
+                auto provider = create_auto_title_provider(std::move(*profile), *cfg);
+                if (provider) {
+                    title = generate_auto_session_title(*provider, text, *cfg);
+                }
+            }
+            if (title.has_value() && !title->empty()) {
+                auto entry = acquire(session_id);
+                if (entry && entry->sm &&
+                    entry->sm->try_set_generated_session_title_for_session(
+                        session_id, *title)) {
+                    applied = true;
+                    emit_session_title_updated(*entry);
+                }
             }
         } catch (const std::exception& e) {
             LOG_WARN("[registry] auto session title generation failed: " +
@@ -1212,9 +1255,27 @@ void SessionRegistry::maybe_start_auto_title(const std::string& id, const UserIn
         } catch (...) {
             LOG_WARN("[registry] auto session title generation failed");
         }
+
+        auto entry = acquire(session_id);
+        if (!entry || !entry->sm) return;
+        auto retry = entry->sm->finish_auto_title_generation_for_session(
+            session_id, applied);
+        if (retry.has_value() && !shutting_down_.load()) {
+            start_auto_title_attempt(session_id, std::move(*retry));
+        }
     });
-    std::lock_guard<std::mutex> lk(title_threads_mu_);
-    title_threads_.push_back(std::move(worker));
+}
+
+void SessionRegistry::handle_auto_title_turn_finished(
+    const std::string& id,
+    const std::string& status) {
+    if (shutting_down_.load()) return;
+    auto entry = acquire(id);
+    if (!entry || !entry->sm) return;
+    auto retry = entry->sm->mark_auto_title_turn_finished(status);
+    if (retry.has_value()) {
+        start_auto_title_attempt(id, std::move(*retry));
+    }
 }
 
 PermissionMode SessionRegistry::default_permission_mode() const {

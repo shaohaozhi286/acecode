@@ -91,6 +91,21 @@ TEST(LoopScheduler, DefaultContextPreservesInteractiveQuestions) {
     EXPECT_EQ(text.find("answered automatically"), std::string::npos);
 }
 
+TEST(LoopScheduler, WorktreeDecisionRequiresExplicitOptInAndGitWorkspace) {
+    auto loop = sample_loop();
+    loop.workspace_hash = "workspace";
+    loop.workspace_cwd = "C:/repo";
+
+    EXPECT_FALSE(should_create_loop_worktree(loop, true));
+    loop.use_worktree = true;
+    EXPECT_TRUE(should_create_loop_worktree(loop, true));
+    EXPECT_FALSE(should_create_loop_worktree(loop, false));
+
+    loop.workspace_hash.clear();
+    loop.workspace_cwd.clear();
+    EXPECT_FALSE(should_create_loop_worktree(loop, true));
+}
+
 TEST(LoopScheduler, EventProjectionTracksWaitingResumeAndCompletion) {
     LoopEventState state;
     std::string reason;
@@ -152,6 +167,9 @@ TEST(LoopScheduler, DueRunCreatesVisibleSessionAndCapturesTerminalEvent) {
     auto loop = sample_loop();
     loop.model_name = "model-a";
     loop.prompt = "finish quickly";
+    loop.workspace_hash = "workspace";
+    loop.workspace_cwd = root.string();
+    loop.use_worktree = false;
     loop.schedule.kind = ScheduleKind::Once;
     loop.schedule.once_at_ms = now;
     auto created = store.create_loop(loop, now - 1, &error);
@@ -181,6 +199,9 @@ TEST(LoopScheduler, DueRunCreatesVisibleSessionAndCapturesTerminalEvent) {
     EXPECT_EQ(client.sent_text, "finish quickly");
     EXPECT_TRUE(client.created_options.loop_execution);
     EXPECT_EQ(client.created_options.loop_run_id, observed.id);
+    EXPECT_EQ(client.created_options.cwd, root.string());
+    EXPECT_TRUE(observed.worktree_path.empty());
+    EXPECT_TRUE(observed.worktree_branch.empty());
     EXPECT_EQ(registry.size(), 0u);
 }
 

@@ -1198,6 +1198,50 @@ TEST(WebServerHttp, ActiveWorktreeSessionListIncludesWorktreeState) {
     EXPECT_EQ((*found)["worktree"]["branch"], "worktree-ses-active-list");
 }
 
+TEST(WebServerHttp, LoopSessionListIncludesOriginWhileActiveAndAfterDestroy) {
+    WebServerFixture fx;
+    acecode::SessionOptions options;
+    options.preset_session_id = "loop-session-list";
+    options.loop_execution = true;
+    options.loop_id = "loop-1";
+    options.loop_run_id = "run-1";
+    const auto sid = fx.registry->create(options);
+    ASSERT_EQ(sid, "loop-session-list");
+
+    auto find_session = [&](const json& sessions) {
+        return std::find_if(sessions.begin(), sessions.end(), [&](const auto& item) {
+            return item.value("id", std::string{}) == sid;
+        });
+    };
+
+    auto list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(list.status_code, 200) << list.text;
+    auto sessions = json::parse(list.text);
+    auto found = find_session(sessions);
+    ASSERT_NE(found, sessions.end());
+    EXPECT_TRUE((*found)["active"].get<bool>());
+    ASSERT_TRUE(found->contains("loop_execution"));
+    EXPECT_EQ((*found)["loop_execution"]["loop_id"], "loop-1");
+    EXPECT_EQ((*found)["loop_execution"]["run_id"], "run-1");
+
+    auto entry = fx.registry->acquire(sid);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->sm, nullptr);
+    EXPECT_EQ(entry->sm->ensure_active_session_id(), sid);
+    entry.reset();
+    fx.registry->destroy(sid);
+
+    list = cpr::Get(cpr::Url{fx.url("/api/sessions")});
+    ASSERT_EQ(list.status_code, 200) << list.text;
+    sessions = json::parse(list.text);
+    found = find_session(sessions);
+    ASSERT_NE(found, sessions.end());
+    EXPECT_FALSE((*found)["active"].get<bool>());
+    ASSERT_TRUE(found->contains("loop_execution"));
+    EXPECT_EQ((*found)["loop_execution"]["loop_id"], "loop-1");
+    EXPECT_EQ((*found)["loop_execution"]["run_id"], "run-1");
+}
+
 TEST(WebServerHttp, SessionUserMessageSearchFindsTextAndAttachmentNames) {
     WebServerFixture fx;
 

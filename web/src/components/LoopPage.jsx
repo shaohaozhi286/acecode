@@ -95,13 +95,41 @@ function AddLoopDialog({ loop = null, template = null, models, defaultModelName,
             <input className={inputClass()} value={form.name} onChange={(e) => update('name', e.target.value)} autoFocus />
           </Field>
 
-          <Field label="工作空间" hint="（可选；Git 仓库会优先建立独立 worktree）">
-            <select className={inputClass()} value={form.workspaceHash} onChange={(e) => update('workspaceHash', e.target.value)}>
-              <option value="">不选择工作空间</option>
-              {workspaces.map((workspace) => (
-                <option key={workspace.hash} value={workspace.hash}>{workspace.name || workspace.cwd}</option>
-              ))}
-            </select>
+          <Field label="工作空间" hint="（可选）">
+            <div className="flex items-center gap-2">
+              <select
+                className={inputClass('min-w-0 flex-1')}
+                value={form.workspaceHash}
+                onChange={(e) => {
+                  const workspaceHash = e.target.value;
+                  setForm((prev) => ({
+                    ...prev,
+                    workspaceHash,
+                    useWorktree: workspaceHash ? prev.useWorktree : false,
+                  }));
+                }}
+              >
+                <option value="">不选择工作空间</option>
+                {workspaces.map((workspace) => (
+                  <option key={workspace.hash} value={workspace.hash}>{workspace.name || workspace.cwd}</option>
+                ))}
+              </select>
+              <label
+                className={`h-8 px-2.5 rounded-md border border-border bg-bg flex items-center gap-1.5 text-[11px] ${
+                  form.workspaceHash ? 'text-fg cursor-pointer' : 'text-fg-mute cursor-not-allowed'
+                }`}
+                title={form.workspaceHash ? '在独立的 Git worktree 中运行此循环' : '请先选择工作空间'}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!form.workspaceHash && form.useWorktree === true}
+                  disabled={!form.workspaceHash}
+                  onChange={(e) => update('useWorktree', e.target.checked)}
+                  className="h-3.5 w-3.5 accent-accent"
+                />
+                <span>worktree</span>
+              </label>
+            </div>
           </Field>
 
           <Field label="提示词">
@@ -367,7 +395,15 @@ export function LoopPage({ onOpenSession }) {
                       <span className={`w-2 h-2 rounded-full ${active ? 'bg-accent animate-pulse' : loop.enabled ? 'bg-success' : 'bg-fg-mute'}`} />
                       <div className="min-w-0 flex-1">
                         <h3 className="text-[13px] font-semibold truncate">{loop.name}</h3>
-                        <p className="mt-0.5 text-[11px] text-fg-mute truncate">{loopScheduleLabel(loop.schedule)} · {workspace?.name || '无工作空间'} · {loop.permission_mode === 'default' ? '默认权限' : '完全访问权限'} · {loop.model_name}</p>
+                        <p className="mt-0.5 text-[11px] text-fg-mute truncate">
+                          {[
+                            loopScheduleLabel(loop.schedule),
+                            workspace?.name || '无工作空间',
+                            loop.workspace_hash ? (loop.use_worktree ? 'worktree' : '当前工作区') : '',
+                            loop.permission_mode === 'default' ? '默认权限' : '完全访问权限',
+                            loop.model_name,
+                          ].filter(Boolean).join(' · ')}
+                        </p>
                         <p className="mt-0.5 text-[11px] text-fg-mute flex flex-wrap items-center gap-x-1" aria-live="polite">
                           <span>最近运行：</span>
                           {latestPresent ? <span className={runToneClass(latestPresent)}>{latestPresent.label}</span> : <span>—</span>}

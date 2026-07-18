@@ -36,21 +36,22 @@ run('loadTierTextClass mapping', () => {
 
 // 场景:从快照按模型 id 精确匹配取负载。
 // 期望:命中返回归一化对象;模型 id 必须精确等于 modelPoolName。
-// 回归点:非 PUB / 未命中 / 空 id → null(用户要求非 PUB 模型不显示负载)。
+// 回归点:modelPoolName 无需 PUB 前缀;未命中 / 大小写不同 / 空 id → null。
 run('pickModelLoad exact match', () => {
   const models = [
-    { modelPoolName: 'PUB-DeepSeek-V4-Flash', usageRate: 60, maxWindowTokens: 150000, effectiveContextWindow: 120000 },
+    { modelPoolName: 'DeepSeek-V4-Flash', usageRate: 60, maxWindowTokens: 150000, effectiveContextWindow: 120000 },
     { modelPoolName: 'PUB-Qwen3.6-35B-A3B-FP8', usageRate: 93, maxWindowTokens: 150000, effectiveContextWindow: 120000 },
   ];
-  const hit = pickModelLoad(models, 'PUB-DeepSeek-V4-Flash');
+  const hit = pickModelLoad(models, 'DeepSeek-V4-Flash');
   assert.equal(hit.usageRate, 60);
   assert.equal(hit.effectiveContextWindow, 120000);
 
-  assert.equal(pickModelLoad(models, 'gpt-4o'), null);        // 非 PUB,不在池里
-  assert.equal(pickModelLoad(models, 'pub-deepseek-v4-flash'), null); // 大小写不同→不精确匹配
+  assert.equal(pickModelLoad(models, 'gpt-4o'), null); // 未出现在 modelPoolName 中
+  assert.equal(pickModelLoad(models, 'deepseek-v4-flash'), null); // 大小写不同
+  assert.equal(pickModelLoad(models, 'PUB-Unknown'), null); // 只有前缀也不算命中
   assert.equal(pickModelLoad(models, ''), null);
   assert.equal(pickModelLoad(models, null), null);
-  assert.equal(pickModelLoad(null, 'PUB-DeepSeek-V4-Flash'), null);
+  assert.equal(pickModelLoad(null, 'DeepSeek-V4-Flash'), null);
 });
 
 // 场景:命中池但 usageRate 缺失/无效。期望:返回 null(不显示一个未知负载)。

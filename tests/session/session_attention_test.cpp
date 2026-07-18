@@ -68,3 +68,7 @@ TEST(SessionAttention, InteractiveRequestsAreUserVisible) {
 TEST(SessionAttention, QuestionClosedIsLifecycleOnly) {
     EXPECT_FALSE(session_event_has_user_visible_output(SessionEventKind::QuestionClosed, nlohmann::json::object()));
 }
+
+TEST(SessionAttention, PermissionClosedIsLifecycleOnly) {
+    EXPECT_FALSE(session_event_has_user_visible_output(SessionEventKind::PermissionClosed, nlohmann::json::object()));
+}

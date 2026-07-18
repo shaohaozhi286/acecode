@@ -61,7 +61,7 @@ web/
 
 | 组件 | 作用 |
 |---|---|
-| `App.jsx` | 鉴权 gate + 视图切换 + 弹框层 |
+| `App.jsx` | 鉴权 gate + 视图切换 + 跨会话交互状态 |
 | `TopBar` | logo + 快捷工具(新对话/搜索) + 中央 single/grid4/grid9 pill + 主题切换 + 设置 |
 | `Sidebar` | workspace 分组 + session 列表 + 底部 Skills/MCP tab |
 | `ChatView` | 主聊天区(头部 + 消息流 + InputBar + StatusBar)+ 空态欢迎屏;单会话下持有中间预览详情面板状态 |
@@ -73,7 +73,7 @@ web/
 | `StatusBar` | 权限模式下拉 + 模型 tag + 轮次 + 分支 |
 | `ModelPicker` | `/api/models` 下拉 + 切换 |
 | `Modal` / `SlideOver` / `Toggle` | 共享 modal / 抽屉 / 开关 |
-| `PermissionModal` | 工具权限请求 |
+| `PermissionCard` | 消息流内的工具权限请求与临时决策结果 |
 | `QuestionModal` | AskUserQuestion(多选/单选 + custom_text) |
 | `SkillsPanel` | 右侧抽屉:skill 列表 + toggle + 查看正文 |
 | `MCPPanel` | 右侧抽屉:JSON 编辑器 + 校验 + 保存 |

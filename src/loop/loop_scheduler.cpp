@@ -73,6 +73,10 @@ std::string build_loop_system_context(const LoopDefinition& loop,
     return out.str();
 }
 
+bool should_create_loop_worktree(const LoopDefinition& loop, bool git_workspace) {
+    return loop.use_worktree && !loop.workspace_cwd.empty() && git_workspace;
+}
+
 std::optional<RunStatus> apply_loop_session_event(const SessionEvent& event,
                                                   LoopEventState& state,
                                                   std::string& reason) {
@@ -219,14 +223,18 @@ void LoopScheduler::launch(const LoopDefinition& loop, const LoopRun& run) {
     std::string execution_root = loop.workspace_cwd;
     std::string worktree_path;
     std::string worktree_branch;
-    // A .git marker without an installed/working git executable is treated as
-    // a non-Git workspace for LOOP purposes. Only a successful git probe opts
-    // into worktree isolation; once opted in, worktree creation is fail-closed.
-    const auto git_probe = no_workspace
-        ? worktree::GitResult{}
-        : worktree::run_git({"rev-parse", "--is-inside-work-tree"}, loop.workspace_cwd);
-    if (!no_workspace && git_probe.ok() &&
-        !worktree::find_canonical_git_root(loop.workspace_cwd).empty()) {
+    bool git_workspace = false;
+    if (loop.use_worktree && !no_workspace) {
+        // A .git marker without an installed/working git executable is treated
+        // as a non-Git workspace. Once an opted-in Git workspace is detected,
+        // worktree creation remains fail-closed.
+        const auto git_probe =
+            worktree::run_git({"rev-parse", "--is-inside-work-tree"}, loop.workspace_cwd);
+        git_workspace =
+            git_probe.ok() &&
+            !worktree::find_canonical_git_root(loop.workspace_cwd).empty();
+    }
+    if (should_create_loop_worktree(loop, git_workspace)) {
         auto worktree = registry_.enter_worktree_for_web(session_id, {});
         if (!worktree.ok) {
             fail_run(loop, run, "worktree_create_failed: " + worktree.error, false, session_id);

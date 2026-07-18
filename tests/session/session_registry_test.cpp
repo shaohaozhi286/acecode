@@ -144,6 +144,88 @@ public:
     void set_model(const std::string&) override {}
 };
 
+struct EventDrivenAutoTitleState {
+    std::optional<std::string> generate(const std::string& input) {
+        int call = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            inputs.push_back(input);
+            call = ++calls;
+        }
+        cv.notify_all();
+        if (call == 1) return std::nullopt;
+        return std::string{"Recovered title"};
+    }
+
+    bool wait_for_calls(int expected, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lk(mu);
+        return cv.wait_for(lk, timeout, [&] { return calls >= expected; });
+    }
+
+    int call_count() const {
+        std::lock_guard<std::mutex> lk(mu);
+        return calls;
+    }
+
+    std::vector<std::string> captured_inputs() const {
+        std::lock_guard<std::mutex> lk(mu);
+        return inputs;
+    }
+
+    mutable std::mutex mu;
+    std::condition_variable cv;
+    int calls = 0;
+    std::vector<std::string> inputs;
+};
+
+class EventDrivenAutoTitleProvider : public acecode::LlmProvider {
+public:
+    explicit EventDrivenAutoTitleProvider(
+        std::shared_ptr<EventDrivenAutoTitleState> state)
+        : state_(std::move(state)) {}
+
+    acecode::ChatResponse chat(
+        const std::vector<acecode::ChatMessage>&,
+        const std::vector<acecode::ToolDef>&) override {
+        acecode::ChatResponse response;
+        response.content = "unused";
+        response.finish_reason = "stop";
+        return response;
+    }
+
+    void chat_stream(const std::vector<acecode::ChatMessage>&,
+                     const std::vector<acecode::ToolDef>&,
+                     const acecode::StreamCallback& callback,
+                     std::atomic<bool>* = nullptr) override {
+        if (!state_->wait_for_calls(1, 2s)) {
+            timed_out_.store(true);
+        }
+        // Let the first title worker publish its pending-failure state before
+        // the main turn completes and drives the event-triggered retry.
+        std::this_thread::sleep_for(25ms);
+
+        acecode::StreamEvent delta;
+        delta.type = acecode::StreamEventType::Delta;
+        delta.content = "main answer";
+        callback(delta);
+
+        acecode::StreamEvent done;
+        done.type = acecode::StreamEventType::Done;
+        done.finish_reason = "stop";
+        callback(done);
+    }
+
+    bool timed_out() const { return timed_out_.load(); }
+    std::string name() const override { return "event-title-stub"; }
+    bool is_authenticated() override { return true; }
+    std::string model() const override { return "event-title-stub"; }
+    void set_model(const std::string&) override {}
+
+private:
+    std::shared_ptr<EventDrivenAutoTitleState> state_;
+    std::atomic<bool> timed_out_{false};
+};
+
 class AutoCompactStubProvider : public acecode::LlmProvider {
 public:
     int compact_calls = 0;
@@ -1125,6 +1207,10 @@ TEST(SessionRegistry, LoopPermissionAndQuestionPolicyAreSessionScoped) {
     ASSERT_NE(default_entry, nullptr);
     EXPECT_TRUE(default_entry->loop_execution);
     EXPECT_EQ(default_entry->loop_id, "loop-default");
+    EXPECT_EQ(default_entry->sm->ensure_active_session_id(), default_id);
+    const auto default_meta = default_entry->sm->load_session_meta(default_id);
+    EXPECT_EQ(default_meta.loop_id, "loop-default");
+    EXPECT_EQ(default_meta.loop_run_id, "run-default");
     EXPECT_FALSE(default_entry->perm->is_dangerous());
     EXPECT_EQ(default_entry->perm->mode(), PermissionMode::Default);
     EXPECT_TRUE(default_entry->loop->loop_execution_policy().active);
@@ -2078,6 +2164,77 @@ TEST(LocalSessionClient, SubscribeReceivesEventsFromCorrectAgentLoop) {
     EXPECT_EQ(received.load(), 2) << "退订后不应再收到事件";
 
     client.destroy_session(id);
+}
+
+TEST(SessionRegistry, AutoTitleRetriesOnceAfterCompletedTurn) {
+    auto cwd = temp_cwd("auto_title_event_retry");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    AppConfig cfg;
+    cfg.default_model_name = "registry-title-stub";
+    cfg.session_title.enabled = true;
+    ModelProfile profile;
+    profile.name = cfg.default_model_name;
+    profile.provider = "openai";
+    profile.base_url = "http://127.0.0.1:1/v1";
+    profile.api_key = "test";
+    profile.model = "registry-title-stub";
+    profile.context_window = 4096;
+    cfg.saved_models.push_back(profile);
+
+    auto state = std::make_shared<EventDrivenAutoTitleState>();
+    auto provider = std::make_shared<EventDrivenAutoTitleProvider>(state);
+    ToolExecutor tools;
+    PermissionManager permissions;
+
+    {
+        SessionRegistryDeps deps;
+        deps.provider_accessor = [provider] {
+            return std::static_pointer_cast<acecode::LlmProvider>(provider);
+        };
+        deps.tools = &tools;
+        deps.cwd = cwd.string();
+        deps.config = &cfg;
+        deps.template_permissions = &permissions;
+        deps.auto_title_generator = [state](const std::string& input) {
+            return state->generate(input);
+        };
+        SessionRegistry registry(std::move(deps));
+        LocalSessionClient client(registry);
+
+        SessionOptions opts;
+        opts.cwd = cwd.string();
+        auto id = client.create_session(opts);
+        auto entry = registry.acquire(id);
+        ASSERT_NE(entry, nullptr);
+        ASSERT_NE(entry->provider_slot, nullptr);
+        {
+            std::lock_guard<std::mutex> lk(entry->provider_slot->mu);
+            entry->provider_slot->provider = provider;
+        }
+
+        ASSERT_TRUE(client.send_input(id, "fix the recovered connection"));
+        ASSERT_TRUE(state->wait_for_calls(2, 5s));
+
+        for (int i = 0; i < 200 && entry->sm->current_title() != "Recovered title"; ++i) {
+            std::this_thread::sleep_for(10ms);
+        }
+        EXPECT_EQ(entry->sm->current_title(), "Recovered title");
+        EXPECT_EQ(entry->sm->current_title_source(), "generated");
+        EXPECT_FALSE(provider->timed_out());
+
+        std::this_thread::sleep_for(50ms);
+        EXPECT_EQ(state->call_count(), 2);
+        EXPECT_EQ(state->captured_inputs(),
+                  (std::vector<std::string>{
+                      "fix the recovered connection",
+                      "fix the recovered connection",
+                  }));
+    }
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
 }
 
 // 场景: subscribe 不存在的 session 返回 0,不崩溃。

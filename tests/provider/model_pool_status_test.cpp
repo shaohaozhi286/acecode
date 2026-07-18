@@ -5,7 +5,6 @@
 #include <string>
 
 using acecode::effective_context_window;
-using acecode::is_pub_model;
 using acecode::model_load_tier;
 using acecode::ModelLoadTier;
 using acecode::ModelPoolFetchResult;
@@ -24,6 +23,14 @@ const char* kSampleResponse = R"JSON(
   {"modelPoolName":"PUB-Qwen3.6-35B-A3B-FP8","usageRate":48,"modelName":"Qwen3.6-35B-A3B-FP8","maxWindowTokens":150000,
    "generateParam":{"top_p":0.8,"top_k":20,"temperature":0.7,"min_p":0,"maxWindowTokens":14000,"maxChatTokens":14000}}
 ],"errorMessage":null,"succ":true,"status":"ok","errorDetail":null}
+)JSON";
+
+// 池成员以 modelPoolName 为准,名称可以没有 PUB 前缀。
+const char* kMixedNameResponse = R"JSON(
+{"ret":0,"data":[
+  {"modelPoolName":"DeepSeek-V4-Flash","usageRate":55,"maxWindowTokens":100000},
+  {"modelPoolName":"PUB-Qwen3.6-35B-A3B-FP8","usageRate":48,"maxWindowTokens":150000}
+],"succ":true,"status":"ok"}
 )JSON";
 
 } // namespace
@@ -78,39 +85,41 @@ TEST(ModelPoolStatus, EffectiveContextWindowAppliesPointEight) {
     EXPECT_EQ(effective_context_window(-5), 0);
 }
 
-// 场景:判断模型名是否为 PUB 池。
-// 期望:前缀 "PUB" 大小写不敏感;非 PUB / 过短 / 空 → false。
-TEST(ModelPoolStatus, IsPubModel) {
-    EXPECT_TRUE(is_pub_model("PUB-DeepSeek-V4-Flash"));
-    EXPECT_TRUE(is_pub_model("pub-something"));  // 大小写不敏感
-    EXPECT_FALSE(is_pub_model("gpt-4o"));
-    EXPECT_FALSE(is_pub_model("deepseek-v4-flash"));
-    EXPECT_FALSE(is_pub_model("PU"));  // 过短
-    EXPECT_FALSE(is_pub_model(""));
+// 场景:接口同时返回无 PUB 前缀和有 PUB 前缀的 modelPoolName。
+// 期望:解析器原样保留两个精确键,不再用命名前缀过滤池成员。
+TEST(ModelPoolStatus, ParsesModelPoolNamesWithoutPrefix) {
+    auto pools = parse_model_pool_status(kMixedNameResponse);
+    ASSERT_EQ(pools.size(), 2u);
+    ASSERT_TRUE(pools.count("DeepSeek-V4-Flash"));
+    EXPECT_EQ(pools["DeepSeek-V4-Flash"].usage_rate, 55);
+    EXPECT_EQ(pools["DeepSeek-V4-Flash"].max_window_tokens, 100000);
+    ASSERT_TRUE(pools.count("PUB-Qwen3.6-35B-A3B-FP8"));
 }
 
 // 场景:服务用注入的 mock fetch 刷新一次(不打真实网络),再查负载/有效窗口。
-// 期望:refresh 成功;精确匹配 modelPoolName 能查到;有效窗口 = 0.8x;
-//       未知模型 → nullopt;非 PUB / 未命中 → 有效窗口 0(调用方回退默认)。
+// 期望:无前缀模型也能精确命中并取得 0.8x 有效窗口;大小写不同或只有 PUB
+//       前缀但未出现在快照里的 id 都不命中,调用方回退默认。
 TEST(ModelPoolStatus, ServiceRefreshAndLookupWithMockFetch) {
     ModelPoolStatusService svc(
         [](const std::string&) {
             ModelPoolFetchResult r;
             r.status_code = 200;
-            r.body = kSampleResponse;
+            r.body = kMixedNameResponse;
             return r;
         });
 
     EXPECT_TRUE(svc.refresh_once());
 
-    auto pool = svc.get("PUB-DeepSeek-V4-Flash");
+    auto pool = svc.get("DeepSeek-V4-Flash");
     ASSERT_TRUE(pool.has_value());
-    EXPECT_EQ(pool->usage_rate, 60);
+    EXPECT_EQ(pool->usage_rate, 55);
 
-    EXPECT_EQ(svc.effective_context_window_for("PUB-DeepSeek-V4-Flash"), 120000);
+    EXPECT_EQ(svc.effective_context_window_for("DeepSeek-V4-Flash"), 80000);
 
-    EXPECT_FALSE(svc.get("does-not-exist").has_value());
-    EXPECT_EQ(svc.effective_context_window_for("gpt-4o"), 0);
+    EXPECT_FALSE(svc.get("deepseek-v4-flash").has_value());
+    EXPECT_EQ(svc.effective_context_window_for("deepseek-v4-flash"), 0);
+    EXPECT_FALSE(svc.get("PUB-Unknown").has_value());
+    EXPECT_EQ(svc.effective_context_window_for("PUB-Unknown"), 0);
 }
 
 // 场景:接口返回 HTTP 错误码或传输层错误。
@@ -135,4 +144,31 @@ TEST(ModelPoolStatus, ServiceRefreshFailsOnHttpError) {
         });
     EXPECT_FALSE(transport_err.refresh_once());
     EXPECT_TRUE(transport_err.snapshot().empty());
+}
+
+// 场景:成功快照之后的轮询失败。
+// 期望:失败不会清空最后一次有效的 modelPoolName 缓存。
+TEST(ModelPoolStatus, FailedRefreshPreservesLastValidSnapshot) {
+    int call_count = 0;
+    ModelPoolStatusService svc(
+        [&call_count](const std::string&) {
+            ModelPoolFetchResult r;
+            if (++call_count == 1) {
+                r.status_code = 200;
+                r.body = kMixedNameResponse;
+            } else {
+                r.status_code = 500;
+                r.body = "internal error";
+            }
+            return r;
+        });
+
+    ASSERT_TRUE(svc.refresh_once());
+    ASSERT_TRUE(svc.get("DeepSeek-V4-Flash").has_value());
+    EXPECT_FALSE(svc.refresh_once());
+
+    auto retained = svc.get("DeepSeek-V4-Flash");
+    ASSERT_TRUE(retained.has_value());
+    EXPECT_EQ(retained->usage_rate, 55);
+    EXPECT_EQ(svc.effective_context_window_for("DeepSeek-V4-Flash"), 80000);
 }

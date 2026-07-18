@@ -41,6 +41,7 @@ enum class SessionEventKind {
     ToolUpdate,        // payload: {"tool":"...", "tail":[...], "partial":"...", "total_lines":N, "total_bytes":N}
     ToolEnd,           // payload: {"tool":"...", "result_summary": {...}, "ok": bool}
     PermissionRequest, // payload: {"request_id":"...", "tool":"...", "args": {...}}
+    PermissionClosed,  // payload: {"request_id":"...","choice":"...","reason":"..."}
     QuestionRequest,   // payload: {"request_id":"...", "questions":[...]} (AskUserQuestion 工具)
     QuestionClosed,    // payload: {"request_id":"...", "reason":"..."} (AskUserQuestion lifecycle)
     Usage,             // payload: {"input": N, "output": N, ...}
@@ -279,6 +280,7 @@ inline const char* to_string(SessionEventKind k) {
         case SessionEventKind::ToolUpdate:        return "tool_update";
         case SessionEventKind::ToolEnd:           return "tool_end";
         case SessionEventKind::PermissionRequest: return "permission_request";
+        case SessionEventKind::PermissionClosed:  return "permission_closed";
         case SessionEventKind::QuestionRequest:   return "question_request";
         case SessionEventKind::QuestionClosed:    return "question_closed";
         case SessionEventKind::Usage:             return "usage";

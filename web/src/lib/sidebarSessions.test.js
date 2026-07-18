@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import {
   SIDEBAR_SESSION_COLLAPSE_LIMIT,
+  expandedSessionListsAfterWorkspaceCollapseAll,
   reconcileSidebarSessions,
   sessionListNeedsRevealExpansion,
   sessionMatchesRevealTarget,
   sidebarSessionHasWorktree,
+  sidebarSessionMarker,
   sidebarRevealTarget,
   sidebarSessionProjection,
   sortSidebarSessionsNewestFirst,
@@ -27,6 +29,24 @@ test('sidebarSessionHasWorktree requires a worktree name or branch', () => {
   assert.equal(sidebarSessionHasWorktree({ worktree: { name: '   ', branch: '' } }), false);
   assert.equal(sidebarSessionHasWorktree({ worktree: { name: 'ses-abc' } }), true);
   assert.equal(sidebarSessionHasWorktree({ worktree: { branch: 'worktree-ses-abc' } }), true);
+});
+
+test('sidebarSessionMarker gives LOOP alarm priority over worktree', () => {
+  assert.equal(sidebarSessionMarker({}), '');
+  assert.equal(sidebarSessionMarker({
+    worktree: { name: 'ses-abc' },
+  }), 'worktree');
+  assert.equal(sidebarSessionMarker({
+    loop_execution: { loop_id: 'loop-1', run_id: 'run-1' },
+  }), 'loop');
+  assert.equal(sidebarSessionMarker({
+    loop_execution: { loop_id: 'loop-1', run_id: 'run-1' },
+    worktree: { name: 'ses-abc', branch: 'worktree-ses-abc' },
+  }), 'loop');
+  assert.equal(sidebarSessionMarker({
+    loop_execution: {},
+    worktree: { name: 'ses-abc' },
+  }), 'worktree');
 });
 
 test('five or fewer sidebar sessions are not collapsible', () => {
@@ -53,6 +73,25 @@ test('expanded sidebar sessions show all rows and collapse action', () => {
   assert.equal(result.action, 'collapse');
   assert.equal(result.hiddenCount, 0);
   assert.deepEqual(result.visibleSessions.map((s) => s.id), ['0', '1', '2', '3', '4', '5', '6']);
+});
+
+test('collapse all workspaces makes every workspace session list show collapse action', () => {
+  const expanded = expandedSessionListsAfterWorkspaceCollapseAll(
+    new Set(['__no_workspace__']),
+    [
+      { hash: 'w1' },
+      { workspace_hash: 'w2' },
+      { workspaceHash: 'w3' },
+      { hash: '' },
+    ],
+  );
+  assert.deepEqual(
+    Array.from(expanded),
+    ['__no_workspace__', 'w1', 'w2', 'w3'],
+  );
+  const sessions = Array.from({ length: 7 }, (_, index) => ({ id: String(index) }));
+  assert.equal(sidebarSessionProjection(sessions, expanded.has('w1')).action, 'collapse');
+  assert.equal(expanded.has('__no_workspace__'), true);
 });
 
 test('sidebarRevealTarget keeps workspace session identity', () => {

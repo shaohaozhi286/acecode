@@ -29,6 +29,7 @@ TEST(LoopTypes, ParsesAndNormalizesDefinition) {
         {"permission_mode", "yolo"},
         {"workspace_hash", ""},
         {"workspace_cwd", ""},
+        {"use_worktree", true},
         {"schedule", {
             {"kind", "period"},
             {"period", "weekly"},
@@ -43,12 +44,26 @@ TEST(LoopTypes, ParsesAndNormalizesDefinition) {
     ASSERT_TRUE(loop_from_json(body, parsed, &error)) << error.message;
     EXPECT_EQ(parsed.name, "每日代码健康巡检");
     EXPECT_EQ(parsed.prompt, "检查仓库状态。");
+    EXPECT_TRUE(parsed.use_worktree);
     EXPECT_EQ(parsed.schedule.weekdays, (std::vector<int>{1, 5}));
     EXPECT_EQ(parsed.schedule.timezone_offset_minutes, 480);
 
     auto json = loop_to_json(parsed);
+    EXPECT_TRUE(json["use_worktree"].get<bool>());
     EXPECT_EQ(json["schedule"]["kind"], "period");
     EXPECT_FALSE(json.contains("schedule_expr"));
+}
+
+TEST(LoopTypes, WorktreeDefaultsOffAndRequiresBoolean) {
+    auto body = loop_to_json(valid_loop());
+    EXPECT_FALSE(body["use_worktree"].get<bool>());
+
+    body["use_worktree"] = "yes";
+    LoopDefinition parsed;
+    ValidationError error;
+    EXPECT_FALSE(loop_from_json(body, parsed, &error));
+    EXPECT_EQ(error.code, "INVALID_USE_WORKTREE");
+    EXPECT_EQ(error.field, "use_worktree");
 }
 
 TEST(LoopTypes, RejectsMissingPromptAndInvalidPermission) {
