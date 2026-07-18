@@ -44,6 +44,7 @@ import './taskCompleteSummary.test.js';
 import './sessionTitle.test.js';
 import './archivedSessions.test.js';
 import './sessionModel.test.js';
+import './composerSessionControlsArchitecture.test.js';
 import './compactMessagePreview.test.js';
 import './permissionMode.test.js';
 import './permissionRequestPresentation.test.js';

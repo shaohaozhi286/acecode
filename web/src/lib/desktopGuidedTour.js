@@ -4,7 +4,7 @@ export const DESKTOP_GUIDED_TOUR_TARGETS = Object.freeze({
   newSession: '[data-tour-target="sidebar-new-task"]',
   workspace: '[data-tour-target="home-workspace"]',
   composer: '[data-tour-target="home-composer"]',
-  status: '[data-tour-target="statusbar"]',
+  status: '[data-composer-session-controls="true"]',
   settings: '[data-tour-target="topbar-settings"]',
 });
 
@@ -104,8 +104,8 @@ export function buildDesktopGuidedTourSteps({ hasModel = true } = {}) {
       placement: 'top-start',
       title: hasModel ? '模型与权限' : '先配置一个模型',
       content: hasModel
-        ? '底部状态栏可以切换模型和权限模式，开始任务前随时确认当前配置。'
-        : '底部状态栏会显示模型和权限。你还没有配置模型，完成指引后会带你去模型设置。',
+        ? '输入框底部可以切换模型和权限模式，开始任务前随时确认当前配置。'
+        : '输入框底部会显示模型和权限。你还没有配置模型，完成指引后会带你去模型设置。',
     },
     {
       id: 'settings',

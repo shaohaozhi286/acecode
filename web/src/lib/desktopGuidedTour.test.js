@@ -83,6 +83,9 @@ run('Desktop tour builds seven ordered stable steps, distinguishes workspace ent
   assert.match(configured[2].content, /左侧/);
   assert.match(configured[2].content, /不会创建工作区目录/);
   assert.match(configured[2].content, /添加工作区/);
+  assert.equal(configured[5].target, '[data-composer-session-controls="true"]');
+  assert.match(configured[5].content, /输入框底部/);
+  assert.doesNotMatch(configured[5].content, /状态栏/);
   assert.match(missing[5].title, /配置.*模型/);
   assert.match(missing[6].content, /添加模型/);
 });

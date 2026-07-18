@@ -1,7 +1,7 @@
 // 顶层 App:鉴权 gate(401 → TokenPrompt)+ 主壳。
 //
 // 视觉对齐设计稿方向 C:顶部 44px TopBar + 270px Sidebar + 主区(单会话/4宫格/9宫格)
-// + 22px StatusBar。所有面板/弹框作为 overlay 渲染在主区之上。
+// 会话控制内嵌在聊天输入框。所有面板/弹框作为 overlay 渲染在主区之上。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, createApi } from './lib/api.js';
