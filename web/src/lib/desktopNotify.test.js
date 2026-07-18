@@ -4,7 +4,7 @@
 // shouldSuppress)。notify / maybeNotify 依赖 window.aceDesktop_notify 桥,
 // 通过最小 stub 注入测。
 //
-// 设计参见 openspec/changes/add-windows-wintoast-completion-notifications/design.md。
+// Windows 与 macOS native 后端共享同一套前端行为。
 
 import assert from 'node:assert/strict';
 import {

@@ -1,4 +1,6 @@
-#include "notifications_win.hpp"
+#include "notifications_backend.hpp"
+
+#ifdef _WIN32
 
 #include "../config/config.hpp"
 #include "../utils/atomic_file.hpp"
@@ -6,73 +8,27 @@
 #include "../utils/logger.hpp"
 #include "../utils/utf8_path.hpp"
 
-#include <nlohmann/json.hpp>
-
-#ifdef _WIN32
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <windows.h>
-#  include <wintoastlib.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+#include <windows.h>
+#include <wintoastlib.h>
 
-#include <algorithm>
-#include <atomic>
-#include <cctype>
-#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <mutex>
+#include <string>
 #include <utility>
 
-namespace acecode::desktop {
+namespace acecode::desktop::notification_backend {
 namespace {
 
-std::mutex g_notification_mu;
-ClickHandler g_click_handler;
-void* g_activation_window = nullptr;
+std::mutex g_backend_mu;
 bool g_initialized = false;
-std::atomic<std::uint64_t> g_notification_sequence{0};
-#ifdef _WIN32
 std::wstring g_notification_logo_path;
-#endif
-
-void set_parse_error(std::string* error, std::string message) {
-    if (error) *error = std::move(message);
-}
-
-std::string trim_ascii(std::string value) {
-    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(),
-                                            [&](char ch) {
-                                                return !is_space(
-                                                    static_cast<unsigned char>(ch));
-                                            }));
-    value.erase(std::find_if(value.rbegin(), value.rend(),
-                             [&](char ch) {
-                                 return !is_space(static_cast<unsigned char>(ch));
-                             }).base(),
-                value.end());
-    return value;
-}
-
-std::size_t utf8_codepoint_bytes(const std::string& text, std::size_t offset) {
-    const auto lead = static_cast<unsigned char>(text[offset]);
-    std::size_t length = 1;
-    if ((lead & 0xE0u) == 0xC0u) length = 2;
-    else if ((lead & 0xF0u) == 0xE0u) length = 3;
-    else if ((lead & 0xF8u) == 0xF0u) length = 4;
-    if (offset + length > text.size()) return 1;
-    for (std::size_t i = 1; i < length; ++i) {
-        const auto next = static_cast<unsigned char>(text[offset + i]);
-        if ((next & 0xC0u) != 0x80u) return 1;
-    }
-    return length;
-}
-
-#ifdef _WIN32
 
 constexpr int kNotificationLogoResourceId = 101;
 constexpr int kRawDataResourceType = 10; // RT_RCDATA, wide-resource form
@@ -150,110 +106,12 @@ private:
     NotifyPayload payload_;
 };
 
-#endif
-
 } // namespace
 
-std::string truncate_notification_text(const std::string& text,
-                                       std::size_t max_codepoints) {
-    if (text.empty() || max_codepoints == 0) return {};
-    std::size_t offset = 0;
-    std::size_t count = 0;
-    while (offset < text.size() && count < max_codepoints) {
-        offset += utf8_codepoint_bytes(text, offset);
-        ++count;
-    }
-    if (offset >= text.size()) return text;
-    return text.substr(0, offset) + u8"…";
-}
-
-NotifyPayload build_completion_notification(
-    const std::string& session_id,
-    const std::string& workspace_hash,
-    const std::string& session_title,
-    const std::string& final_assistant_text) {
-    NotifyPayload payload;
-    payload.id = "completion-" +
-        (session_id.empty() ? std::string("unknown") : session_id) + "-" +
-        std::to_string(g_notification_sequence.fetch_add(1) + 1);
-    payload.workspace_hash = workspace_hash;
-    payload.session_id = session_id;
-    const std::string title = trim_ascii(session_title);
-    payload.title = u8"已完成 · " + (title.empty() ? std::string(u8"会话") : title);
-    const std::string body = trim_ascii(final_assistant_text);
-    payload.body = body.empty()
-        ? std::string(u8"(空白回合)")
-        : truncate_notification_text(body);
-    return payload;
-}
-
-std::optional<NotifyPayload> parse_notification_bridge_args(
-    const std::string& args_json,
-    std::string* error) {
-    if (error) error->clear();
-    try {
-        nlohmann::json value = nlohmann::json::parse(args_json);
-        if (value.is_array()) {
-            if (value.empty()) {
-                set_parse_error(error, "notification arguments are empty");
-                return std::nullopt;
-            }
-            value = value.front();
-        }
-        if (value.is_string()) {
-            value = nlohmann::json::parse(value.get<std::string>());
-        }
-        if (!value.is_object()) {
-            set_parse_error(error, "notification payload must be an object");
-            return std::nullopt;
-        }
-
-        NotifyPayload payload;
-        auto copy_string = [&](const char* key, std::string& out) {
-            if (value.contains(key) && value[key].is_string()) {
-                out = value[key].get<std::string>();
-            }
-        };
-        copy_string("id", payload.id);
-        copy_string("workspace_hash", payload.workspace_hash);
-        copy_string("session_id", payload.session_id);
-        copy_string("title", payload.title);
-        copy_string("body", payload.body);
-        if (payload.title.empty() && payload.body.empty()) {
-            set_parse_error(error, "notification title and body are empty");
-            return std::nullopt;
-        }
-        return payload;
-    } catch (const std::exception& e) {
-        set_parse_error(error, e.what());
-        return std::nullopt;
-    }
-}
-
-void set_click_handler(ClickHandler handler) {
-    std::lock_guard<std::mutex> lock(g_notification_mu);
-    g_click_handler = std::move(handler);
-}
-
-void dispatch_notification_activation(const NotifyPayload& payload) {
-    ClickHandler handler;
-    void* activation_window = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_notification_mu);
-        handler = g_click_handler;
-        activation_window = g_activation_window;
-    }
-    if (!handler) return;
-    activate_notification_window(activation_window);
-    handler(payload);
-}
-
-#ifdef _WIN32
-
-bool init_notifications(const NotificationInitOptions& options) {
-    std::lock_guard<std::mutex> lock(g_notification_mu);
+bool initialize(const NotificationInitOptions& options) {
+    std::lock_guard<std::mutex> lock(g_backend_mu);
     if (g_initialized) return true;
-    if (options.app_user_model_id.empty()) {
+    if (options.application_id.empty()) {
         LOG_WARN("[notifications] WinToast initialization skipped: empty AUMI");
         return false;
     }
@@ -262,26 +120,34 @@ bool init_notifications(const NotificationInitOptions& options) {
         return false;
     }
 
-    // WinToast writes diagnostics to std::wcout in debug builds. That corrupts
-    // the FTXUI frame, so all diagnostics go through ACECode's logger instead.
-    WinToastLib::setDebugOutputEnabled(false);
-    auto* toast = WinToastLib::WinToast::instance();
-    toast->setAppName(options.app_name.empty() ? L"ACECode" : options.app_name);
-    toast->setAppUserModelId(options.app_user_model_id);
-    toast->setShortcutPolicy(
-        WinToastLib::WinToast::ShortcutPolicy::SHORTCUT_POLICY_REQUIRE_CREATE);
+    try {
+        WinToastLib::setDebugOutputEnabled(false);
+        auto* toast = WinToastLib::WinToast::instance();
+        toast->setAppName(acecode::utf8_to_wide(
+            options.app_name.empty() ? std::string("ACECode") :
+                                       options.app_name));
+        toast->setAppUserModelId(
+            acecode::utf8_to_wide(options.application_id));
+        toast->setShortcutPolicy(
+            WinToastLib::WinToast::ShortcutPolicy::SHORTCUT_POLICY_REQUIRE_CREATE);
 
-    WinToastLib::WinToast::WinToastError error =
-        WinToastLib::WinToast::WinToastError::NoError;
-    if (!toast->initialize(&error)) {
-        LOG_WARN("[notifications] WinToast initialization failed: " +
-                 wintoast_error_text(error));
+        WinToastLib::WinToast::WinToastError error =
+            WinToastLib::WinToast::WinToastError::NoError;
+        if (!toast->initialize(&error)) {
+            LOG_WARN("[notifications] WinToast initialization failed: " +
+                     wintoast_error_text(error));
+            return false;
+        }
+    } catch (const std::exception& e) {
+        LOG_WARN("[notifications] WinToast initialization threw: " +
+                 std::string(e.what()));
         return false;
     }
 
-    g_activation_window = options.activation_window;
     g_notification_logo_path = materialize_notification_logo();
     g_initialized = true;
+    notification_detail::publish_authorization_state({
+        NotificationAuthorizationStatus::Authorized, false, false});
     LOG_INFO("[notifications] WinToast initialized" +
              std::string(g_notification_logo_path.empty()
                  ? " without app logo override"
@@ -289,10 +155,9 @@ bool init_notifications(const NotificationInitOptions& options) {
     return true;
 }
 
-bool show_notification(const NotifyPayload& payload) {
-    std::lock_guard<std::mutex> lock(g_notification_mu);
+bool show(const NotifyPayload& payload) {
+    std::lock_guard<std::mutex> lock(g_backend_mu);
     if (!g_initialized) return false;
-    if (payload.title.empty() && payload.body.empty()) return false;
 
     try {
         WinToastLib::WinToastTemplate toast(
@@ -327,14 +192,12 @@ bool show_notification(const NotifyPayload& payload) {
     }
 }
 
-void shutdown_notifications() {
+void shutdown() {
     bool was_initialized = false;
     {
-        std::lock_guard<std::mutex> lock(g_notification_mu);
+        std::lock_guard<std::mutex> lock(g_backend_mu);
         was_initialized = g_initialized;
         g_initialized = false;
-        g_click_handler = nullptr;
-        g_activation_window = nullptr;
         g_notification_logo_path.clear();
     }
     if (was_initialized) {
@@ -346,7 +209,21 @@ void shutdown_notifications() {
     }
 }
 
-void* capture_tui_notification_window() {
+bool refresh_authorization() {
+    std::lock_guard<std::mutex> lock(g_backend_mu);
+    return g_initialized;
+}
+
+bool request_authorization() {
+    std::lock_guard<std::mutex> lock(g_backend_mu);
+    return g_initialized;
+}
+
+bool open_settings() {
+    return false;
+}
+
+void* capture_tui_window() {
     HWND console = ::GetConsoleWindow();
     if (console && ::IsWindow(console) && ::IsWindowVisible(console)) {
         return console;
@@ -356,12 +233,12 @@ void* capture_tui_notification_window() {
     return console && ::IsWindow(console) ? console : nullptr;
 }
 
-bool notification_window_is_foreground(void* native_window) {
+bool window_is_foreground(void* native_window) {
     auto* hwnd = static_cast<HWND>(native_window);
     return hwnd && ::IsWindow(hwnd) && ::GetForegroundWindow() == hwnd;
 }
 
-bool activate_notification_window(void* native_window) {
+bool activate_window(void* native_window) {
     auto* hwnd = static_cast<HWND>(native_window);
     if (!hwnd || !::IsWindow(hwnd)) return false;
     if (::IsIconic(hwnd)) {
@@ -372,8 +249,6 @@ bool activate_notification_window(void* native_window) {
     ::BringWindowToTop(hwnd);
     if (::SetForegroundWindow(hwnd)) return true;
 
-    // Foreground lock can still reject background callers. A short topmost
-    // pulse makes the user-initiated target visible without leaving it pinned.
     constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
     ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
     ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
@@ -381,27 +256,6 @@ bool activate_notification_window(void* native_window) {
            ::GetForegroundWindow() == hwnd;
 }
 
-#else
+} // namespace acecode::desktop::notification_backend
 
-bool init_notifications(const NotificationInitOptions& /*options*/) {
-    return false;
-}
-
-bool show_notification(const NotifyPayload& /*payload*/) {
-    return false;
-}
-
-void shutdown_notifications() {
-    std::lock_guard<std::mutex> lock(g_notification_mu);
-    g_initialized = false;
-    g_click_handler = nullptr;
-    g_activation_window = nullptr;
-}
-
-void* capture_tui_notification_window() { return nullptr; }
-bool notification_window_is_foreground(void* /*native_window*/) { return false; }
-bool activate_notification_window(void* /*native_window*/) { return false; }
-
-#endif
-
-} // namespace acecode::desktop
+#endif // _WIN32

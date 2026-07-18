@@ -21,7 +21,7 @@
 #include "edge_app_launcher.hpp"
 #include "external_url.hpp"
 #include "folder_picker.hpp"
-#include "notifications_win.hpp"
+#include "notifications.hpp"
 #include "open_in_explorer.hpp"
 #include "pick_active.hpp"
 #include "single_instance.hpp"
@@ -859,7 +859,7 @@ int main(int argc, char** argv) {
     host.set_title("ACECode");
     host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
 
-    // 系统托盘与 WinToast 通知各自初始化。通知不再依赖 tray message HWND,
+    // 系统托盘与 native 通知各自初始化。通知不再依赖 tray message HWND,
     // 因此托盘被策略禁用或创建失败时,会话完成提醒仍然可用。
     auto bring_window_foreground = [&host]() {
 #ifdef _WIN32
@@ -898,8 +898,8 @@ int main(int argc, char** argv) {
         });
     }
 
-    // 共享的 "focus session" lambda — toast 点击 / tray 菜单 session 项 / 直接
-     // bridge 调用都走同一份 JS 派发逻辑。
+    // 共享的 "focus session" lambda — native 通知 / tray 菜单 session 项 / 直接
+    // bridge 调用都走同一份 JS 派发逻辑。
     auto focus_session = [&host, &active_mu, &active_hash_dynamic, &bring_window_foreground](
                               const std::string& workspace_hash,
                               const std::string& session_id) {
@@ -928,12 +928,53 @@ int main(int argc, char** argv) {
         host.eval(js);
     };
 
-    // WinToast 的 click handler 复用 focus_session。每个 toast handler 自带
-    // 完整 payload,不会被后来显示的通知覆盖。
-#ifdef _WIN32
+    auto notification_authorization_json =
+        [](const NotificationAuthorizationState& state) {
+            return nlohmann::json{
+                {"ok", state.status !=
+                    NotificationAuthorizationStatus::Unavailable},
+                {"status",
+                    notification_authorization_status_name(state.status)},
+                {"can_request", state.can_request},
+                {"can_open_settings", state.can_open_settings},
+            };
+        };
+
+    // Keep native callbacks from outliving the WebHost or focus-session state
+    // if any later Desktop setup/run step throws. Normal shutdown dismisses
+    // this guard after performing the same cleanup explicitly.
+    class NotificationShutdownGuard {
+    public:
+        ~NotificationShutdownGuard() {
+            if (armed_) shutdown_notifications();
+        }
+        void dismiss() { armed_ = false; }
+
+    private:
+        bool armed_ = true;
+    } notification_shutdown_guard;
+
+    // Authorization callbacks may arrive on a UserNotifications worker queue.
+    // WebHost::eval marshals the DOM event back onto the WebView loop.
+    set_notification_authorization_handler(
+        [&host, notification_authorization_json](
+            const NotificationAuthorizationState& state) {
+            const std::string detail =
+                notification_authorization_json(state).dump();
+            host.eval(
+                "(function(){try{window.dispatchEvent(new CustomEvent("
+                "'acecode:notification-authorization-changed',{detail:" +
+                detail + "}));}catch(e){}})();");
+        });
+
+    // Native click handler 复用 focus_session。每条通知自带完整 payload,
+    // 不会被后来显示的通知覆盖。
+#if defined(_WIN32) || defined(__APPLE__)
     NotificationInitOptions notification_options;
-    notification_options.app_name = L"ACECode Desktop";
-    notification_options.app_user_model_id = L"ACECode.ACECode.Desktop.1";
+    notification_options.app_name = "ACECode Desktop";
+#ifdef _WIN32
+    notification_options.application_id = "ACECode.ACECode.Desktop.1";
+#endif
     notification_options.activation_window = host.native_window();
     const bool notifications_ok = init_notifications(notification_options);
     if (notifications_ok) {
@@ -941,7 +982,7 @@ int main(int argc, char** argv) {
             focus_session(payload.workspace_hash, payload.session_id);
         });
     } else {
-        LOG_WARN("[desktop] WinToast notifications unavailable");
+        LOG_WARN("[desktop] native notifications unavailable");
     }
 #endif
 
@@ -1223,8 +1264,38 @@ int main(int argc, char** argv) {
         const bool shown = show_notification(*payload);
         return nlohmann::json{
             {"ok", shown},
-            {"error", shown ? std::string{} : std::string{"WinToast unavailable"}},
+            {"error", shown ? std::string{} :
+                std::string{"native notifications unavailable"}},
         }.dump();
+    });
+
+    host.bind("aceDesktop_getNotificationAuthorization",
+              [notification_authorization_json](
+                  const std::string& /*req*/) -> std::string {
+        // Return the current snapshot immediately and ask the backend to
+        // publish a fresh asynchronous state. This picks up changes made in
+        // macOS System Settings while ACECode remained open.
+        refresh_notification_authorization();
+        return notification_authorization_json(
+            notification_authorization_state()).dump();
+    });
+    host.bind("aceDesktop_requestNotificationAuthorization",
+              [notification_authorization_json](
+                  const std::string& /*req*/) -> std::string {
+        const bool requested = request_notification_authorization();
+        auto response = notification_authorization_json(
+            notification_authorization_state());
+        if (!requested) response["ok"] = false;
+        return response.dump();
+    });
+    host.bind("aceDesktop_openNotificationSettings",
+              [notification_authorization_json](
+                  const std::string& /*req*/) -> std::string {
+        const bool opened = open_notification_settings();
+        auto response = notification_authorization_json(
+            notification_authorization_state());
+        response["ok"] = opened;
+        return response.dump();
     });
 
     // 直接触发"切到某 session"。前端可在 SearchPalette 等场景调用,与 toast 点击
@@ -1692,6 +1763,7 @@ int main(int argc, char** argv) {
     }
     // 退出前撤销系统通知 + 移除托盘图标。顺序与 init 相反。
     shutdown_notifications();
+    notification_shutdown_guard.dismiss();
     shutdown_tray_icon();
 
     auto failures = pool.stop_all();

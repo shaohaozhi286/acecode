@@ -178,7 +178,7 @@ set(ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/daemon/platform_windows.cpp
     ${CMAKE_SOURCE_DIR}/src/daemon/runtime_files.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_win.cpp
-    ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/notifications.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/open_in_explorer.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/workspace_registry.cpp
     ${CMAKE_SOURCE_DIR}/src/utils/clipboard.cpp
@@ -215,10 +215,17 @@ set(ACECODE_DESKTOP_BINARY_ONLY_SOURCES
     ${CMAKE_SOURCE_DIR}/src/desktop/splash_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/web_host.cpp
 )
+set(ACECODE_NOTIFICATION_BACKEND_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/notifications_stub.cpp
+)
 foreach(_f IN LISTS ACECODE_DESKTOP_BINARY_ONLY_SOURCES)
     list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES ${_f})
 endforeach()
-foreach(_f IN LISTS ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES ACECODE_DESKTOP_SUPPORT_SOURCES)
+foreach(_f IN LISTS
+        ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES
+        ACECODE_DESKTOP_SUPPORT_SOURCES
+        ACECODE_NOTIFICATION_BACKEND_SOURCES)
     list(REMOVE_ITEM ACECODE_TESTABLE_SOURCES ${_f})
 endforeach()
 
@@ -261,16 +268,26 @@ if(APPLE)
     enable_language(OBJCXX)
     target_sources(acecode_native_bridge_support PRIVATE
         ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_mac.mm
+        ${CMAKE_SOURCE_DIR}/src/desktop/notifications_mac.mm
     )
-    target_link_libraries(acecode_native_bridge_support PUBLIC "-framework AppKit")
-endif()
-if(WIN32)
+    target_link_libraries(acecode_native_bridge_support PUBLIC
+        "-framework AppKit"
+        "-framework UserNotifications"
+    )
+elseif(WIN32)
+    target_sources(acecode_native_bridge_support PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
+    )
     # advapi32: restrictive ACL writes in utils/atomic_file.hpp.
     # ws2_32: daemon/runtime_files.cpp port probes.
     # ole32/shell32/user32: native folder picker and clipboard integration.
     target_link_libraries(acecode_native_bridge_support PUBLIC
         advapi32 ws2_32 ole32 shell32 user32
         unofficial::wintoast::wintoast
+    )
+else()
+    target_sources(acecode_native_bridge_support PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/desktop/notifications_stub.cpp
     )
 endif()
 

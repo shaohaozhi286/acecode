@@ -91,6 +91,7 @@ import './builtinCommandRouting.test.js';
 import './slashCommandWorkspace.test.js';
 import './desktopNotify.test.js';
 import './desktopNotificationMonitor.test.js';
+import './desktopNotificationAuthorization.test.js';
 import './desktopShellMode.test.js';
 import './desktopAppActions.test.js';
 import './desktopGuidedTour.test.js';

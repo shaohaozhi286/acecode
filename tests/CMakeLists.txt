@@ -22,6 +22,29 @@ target_include_directories(acecode_unit_tests PRIVATE
     ${CMAKE_BINARY_DIR}/generated
 )
 
+if(APPLE)
+    # Manual, opt-in runtime check. Run the bundle executable directly so its
+    # authorization state and click callback remain visible in the terminal.
+    add_executable(acecode_macos_notification_smoke
+        MACOSX_BUNDLE EXCLUDE_FROM_ALL
+        ${CMAKE_CURRENT_SOURCE_DIR}/desktop/helpers/macos_notification_smoke.mm
+    )
+    target_link_libraries(acecode_macos_notification_smoke PRIVATE
+        acecode_native_bridge_support
+    )
+    target_include_directories(acecode_macos_notification_smoke PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    set_target_properties(acecode_macos_notification_smoke PROPERTIES
+        MACOSX_BUNDLE_BUNDLE_NAME "ACECode Notification Smoke"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "dev.acecode.notification-smoke"
+        MACOSX_BUNDLE_INFO_PLIST
+            "${CMAKE_SOURCE_DIR}/cmake/macos/ACECodeDesktopInfo.plist.in"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${ACECODE_BUILD_VERSION}"
+    )
+endif()
+
 # 测试辅助 binary: 用于 SessionConcurrencyE2E 测试 std::system 起两个子进程
 # 验证同 cwd 下多 session 写 canonical 文件。独立 main(),不参与
 # gtest_discover_tests。链 acecode_testable 拿 SessionManager。

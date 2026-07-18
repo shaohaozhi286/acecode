@@ -353,10 +353,9 @@ struct UpgradeConfig {
     int timeout_ms = 30000;
 };
 
-// Windows session notification settings shared by acecode.exe (TUI) and
-// acecode-desktop.exe.
-// 见 openspec/changes/add-windows-wintoast-completion-notifications。
-// 非 Windows 平台保留解析,运行时由通知后端安全降级为 no-op。
+// Native session notification settings shared by supported application
+// surfaces. Windows supports TUI + Desktop; macOS supports ACECode.app.
+// Other surfaces retain parsing and safely degrade to no-op.
 struct DesktopNotificationsConfig {
     bool enabled = true;                 // 总开关
     bool on_permission = true;           // 权限确认触发通知

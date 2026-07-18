@@ -10,6 +10,14 @@ import { useTheme } from '../theme.jsx';
 import { api } from '../lib/api.js';
 import { openExternalUrl } from '../lib/externalUrl.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
+import {
+  getMacNotificationAuthorization,
+  macNotificationAuthorizationAvailable,
+  notificationAuthorizationPresentation,
+  openMacNotificationSettings,
+  requestMacNotificationAuthorization,
+  subscribeMacNotificationAuthorization,
+} from '../lib/desktopNotificationAuthorization.js';
 import { Modal, Toggle } from './Modal.jsx';
 import { clsx, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
@@ -94,6 +102,24 @@ const FONT_SIZE_OPTIONS = [
   { key: 'medium', label: '中' },
   { key: 'large', label: '大' },
 ];
+const NOTIFICATION_AUTHORIZATION_TONE = {
+  ok: {
+    text: 'text-ok',
+    dot: 'bg-ok shadow-[0_0_4px_var(--ace-ok)]',
+  },
+  danger: {
+    text: 'text-danger',
+    dot: 'bg-danger shadow-[0_0_4px_var(--ace-danger)]',
+  },
+  warn: {
+    text: 'text-warn',
+    dot: 'bg-warn shadow-[0_0_4px_var(--ace-warn)]',
+  },
+  muted: {
+    text: 'text-fg-mute',
+    dot: 'bg-fg-mute',
+  },
+};
 
 export function SettingsPage({
   onClose,
@@ -253,6 +279,12 @@ function SectionGeneral({
     () => health?.notifications?.enabled !== false,
   );
   const [notificationsBusy, setNotificationsBusy] = useState(false);
+  const [notificationAuthorization, setNotificationAuthorization] = useState(
+    () => notificationAuthorizationPresentation(null),
+  );
+  const [notificationAuthorizationBusy, setNotificationAuthorizationBusy] =
+    useState(false);
+  const macAuthorizationAvailable = macNotificationAuthorizationAvailable();
   const [maxTurns, setMaxTurns] = useState(50);
   const [workMode, setWorkMode] = useState('coding');
   const [openTarget, setOpenTarget] = useState('vscode');
@@ -284,6 +316,55 @@ function SectionGeneral({
     return () => { cancelled = true; };
   }, [health?.notifications?.enabled]);
 
+  useEffect(() => {
+    if (!macAuthorizationAvailable) return undefined;
+    let cancelled = false;
+    const refreshAuthorization = () => getMacNotificationAuthorization().then((state) => {
+      if (!cancelled) {
+        setNotificationAuthorization(
+          notificationAuthorizationPresentation(state),
+        );
+      }
+    });
+    refreshAuthorization();
+    const unsubscribe = subscribeMacNotificationAuthorization((state) => {
+      if (cancelled) return;
+      setNotificationAuthorization(
+        notificationAuthorizationPresentation(state),
+      );
+      setNotificationAuthorizationBusy(false);
+    });
+    // Returning from System Settings does not emit a UserNotifications
+    // callback, so refresh when ACECode becomes active again.
+    window.addEventListener('focus', refreshAuthorization);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      window.removeEventListener('focus', refreshAuthorization);
+    };
+  }, [macAuthorizationAvailable]);
+
+  const requestSystemNotificationAuthorization = async () => {
+    if (!macAuthorizationAvailable || notificationAuthorizationBusy) return;
+    setNotificationAuthorizationBusy(true);
+    const state = await requestMacNotificationAuthorization();
+    const presented = notificationAuthorizationPresentation(state);
+    setNotificationAuthorization(presented);
+    if (presented.status !== 'requesting') {
+      setNotificationAuthorizationBusy(false);
+    }
+  };
+
+  const openSystemNotificationSettings = async () => {
+    if (notificationAuthorizationBusy) return;
+    setNotificationAuthorizationBusy(true);
+    const opened = await openMacNotificationSettings();
+    setNotificationAuthorizationBusy(false);
+    if (!opened) {
+      toast({ kind: 'err', text: '无法打开 macOS 通知设置' });
+    }
+  };
+
   const switchDesktopNotifications = async (enabled) => {
     const next = !!enabled;
     const previous = notificationsEnabled;
@@ -295,9 +376,27 @@ function SectionGeneral({
       const confirmed = state?.enabled !== false;
       setNotificationsEnabled(confirmed);
       onDesktopNotificationsChanged?.(state || { enabled: confirmed });
+      let authorizationAfterEnable = notificationAuthorization;
+      if (confirmed && macAuthorizationAvailable
+          && !['authorized', 'provisional', 'requesting'].includes(
+            notificationAuthorization.status,
+          )) {
+        const nativeState = await requestMacNotificationAuthorization();
+        authorizationAfterEnable =
+          notificationAuthorizationPresentation(nativeState);
+        setNotificationAuthorization(authorizationAfterEnable);
+      }
       toast({
-        kind: 'ok',
-        text: confirmed ? '消息通知已打开' : '消息通知已关闭',
+        kind: confirmed && authorizationAfterEnable.status === 'denied'
+          ? 'err'
+          : 'ok',
+        text: !confirmed
+          ? '消息通知已关闭'
+          : (authorizationAfterEnable.status === 'denied'
+            ? '消息通知已打开，但 macOS 系统权限已拒绝'
+            : (authorizationAfterEnable.status === 'requesting'
+              ? '消息通知已打开，请确认 macOS 系统授权'
+              : '消息通知已打开')),
       });
     } catch (e) {
       setNotificationsEnabled(previous);
@@ -381,7 +480,8 @@ function SectionGeneral({
         className={clsx(
           'flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2 transition',
           'cursor-pointer hover:bg-surface-hi',
-          notificationsBusy && 'opacity-75 cursor-wait',
+          (notificationsBusy || notificationAuthorizationBusy)
+            && 'opacity-75 cursor-wait',
         )}
       >
         <div>
@@ -391,11 +491,65 @@ function SectionGeneral({
         <div onClick={(e) => e.stopPropagation()}>
           <Toggle
             on={notificationsEnabled}
-            disabled={notificationsBusy}
+            disabled={notificationsBusy || notificationAuthorizationBusy}
             onChange={switchDesktopNotifications}
           />
         </div>
       </div>
+
+      {macAuthorizationAvailable && (
+        <div className="flex items-center justify-between gap-4 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
+          <div>
+            <div className="text-[13px] font-medium">macOS 系统通知权限</div>
+            <div className="text-[11px] text-fg-mute mt-0.5">
+              {notificationAuthorization.description}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              aria-live="polite"
+              className={clsx(
+                'flex items-center gap-1.5 text-[12px]',
+                (NOTIFICATION_AUTHORIZATION_TONE[
+                  notificationAuthorization.tone
+                ] || NOTIFICATION_AUTHORIZATION_TONE.muted).text,
+              )}
+            >
+              <span
+                className={clsx(
+                  'w-2 h-2 rounded-full',
+                  (NOTIFICATION_AUTHORIZATION_TONE[
+                    notificationAuthorization.tone
+                  ] || NOTIFICATION_AUTHORIZATION_TONE.muted).dot,
+                )}
+              />
+              {notificationAuthorization.label}
+            </span>
+            {notificationAuthorization.canRequest
+              && notificationAuthorization.status !== 'requesting' && (
+                <button
+                  type="button"
+                  disabled={notificationAuthorizationBusy}
+                  onClick={requestSystemNotificationAuthorization}
+                  className="px-2.5 py-1 text-[11px] rounded-md border border-border bg-surface-alt hover:bg-surface-hi transition disabled:opacity-60"
+                >
+                  授权
+                </button>
+              )}
+            {notificationAuthorization.status === 'denied'
+              && notificationAuthorization.canOpenSettings && (
+                <button
+                  type="button"
+                  disabled={notificationAuthorizationBusy}
+                  onClick={openSystemNotificationSettings}
+                  className="px-2.5 py-1 text-[11px] rounded-md border border-border bg-surface-alt hover:bg-surface-hi transition disabled:opacity-60"
+                >
+                  打开系统设置
+                </button>
+              )}
+          </div>
+        </div>
+      )}
 
       <div className="h-px bg-border my-5" />
 

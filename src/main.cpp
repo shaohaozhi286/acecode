@@ -109,7 +109,7 @@
 #include "commands/builtin_commands.hpp"
 #include "commands/compact.hpp"
 #include "commands/resume_state_sync.hpp"
-#include "desktop/notifications_win.hpp"
+#include "desktop/notifications.hpp"
 #include "utils/token_tracker.hpp"
 #include "markdown/markdown_formatter.hpp"
 #include "session/session_manager.hpp"
@@ -5778,8 +5778,8 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         tui_notification_window =
             acecode::desktop::capture_tui_notification_window();
         acecode::desktop::NotificationInitOptions notification_options;
-        notification_options.app_name = L"ACECode TUI";
-        notification_options.app_user_model_id = L"ACECode.ACECode.TUI.1";
+        notification_options.app_name = "ACECode TUI";
+        notification_options.application_id = "ACECode.ACECode.TUI.1";
         notification_options.activation_window = tui_notification_window;
         tui_notifications_ready =
             acecode::desktop::init_notifications(notification_options);
@@ -5823,7 +5823,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     });
                 });
         } else {
-            LOG_WARN("[tui] WinToast notifications unavailable");
+            LOG_WARN("[tui] native notifications unavailable");
         }
     }
 #endif

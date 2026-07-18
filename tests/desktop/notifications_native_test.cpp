@@ -1,4 +1,4 @@
-#include "desktop/notifications_win.hpp"
+#include "desktop/notifications.hpp"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -23,7 +23,7 @@ NotifyPayload sample_payload(std::string id, std::string session_id) {
     return payload;
 }
 
-TEST(WindowsNotifications, TruncatesOnUnicodeCodepointBoundary) {
+TEST(NativeNotifications, TruncatesOnUnicodeCodepointBoundary) {
     using acecode::desktop::truncate_notification_text;
     EXPECT_EQ(truncate_notification_text("short", 10), "short");
     EXPECT_EQ(truncate_notification_text(u8"中文🙂abc", 3), u8"中文🙂…");
@@ -31,7 +31,7 @@ TEST(WindowsNotifications, TruncatesOnUnicodeCodepointBoundary) {
     EXPECT_TRUE(truncate_notification_text("anything", 0).empty());
 }
 
-TEST(WindowsNotifications, BuildsCompletionPayloadWithStableSessionIdentity) {
+TEST(NativeNotifications, BuildsCompletionPayloadWithStableSessionIdentity) {
     const auto payload = acecode::desktop::build_completion_notification(
         "session-42", "workspace-7", u8" 修复通知 ", u8" 已经完成 ");
     EXPECT_EQ(payload.workspace_hash, "workspace-7");
@@ -41,7 +41,7 @@ TEST(WindowsNotifications, BuildsCompletionPayloadWithStableSessionIdentity) {
     EXPECT_NE(payload.id.find("completion-session-42-"), std::string::npos);
 }
 
-TEST(WindowsNotifications, ParsesDirectObjectBridgeArgument) {
+TEST(NativeNotifications, ParsesDirectObjectBridgeArgument) {
     const auto payload = sample_payload("completion-1", "session-1");
     nlohmann::json object = {
         {"id", payload.id},
@@ -61,7 +61,7 @@ TEST(WindowsNotifications, ParsesDirectObjectBridgeArgument) {
     EXPECT_EQ(parsed->body, payload.body);
 }
 
-TEST(WindowsNotifications, ParsesLegacyJsonStringBridgeArgument) {
+TEST(NativeNotifications, ParsesLegacyJsonStringBridgeArgument) {
     nlohmann::json object = {
         {"id", "question-1"},
         {"workspace_hash", "workspace-2"},
@@ -78,7 +78,7 @@ TEST(WindowsNotifications, ParsesLegacyJsonStringBridgeArgument) {
     EXPECT_EQ(parsed->body, u8"请选择");
 }
 
-TEST(WindowsNotifications, RejectsInvalidOrEmptyBridgePayload) {
+TEST(NativeNotifications, RejectsInvalidOrEmptyBridgePayload) {
     std::string error;
     EXPECT_FALSE(acecode::desktop::parse_notification_bridge_args("[]", &error));
     EXPECT_FALSE(error.empty());
@@ -87,7 +87,7 @@ TEST(WindowsNotifications, RejectsInvalidOrEmptyBridgePayload) {
     EXPECT_FALSE(error.empty());
 }
 
-TEST(WindowsNotifications, ActivationKeepsEachToastPayloadIndependent) {
+TEST(NativeNotifications, ActivationKeepsEachPayloadIndependent) {
     std::vector<std::string> activated;
     acecode::desktop::set_click_handler(
         [&](const NotifyPayload& payload) { activated.push_back(payload.session_id); });
@@ -103,14 +103,51 @@ TEST(WindowsNotifications, ActivationKeepsEachToastPayloadIndependent) {
     acecode::desktop::shutdown_notifications();
 }
 
-TEST(WindowsNotifications, DeliveryBeforeInitializationIsSafeNoOp) {
+TEST(NativeNotifications, DeliveryBeforeInitializationIsSafeNoOp) {
     acecode::desktop::shutdown_notifications();
     EXPECT_FALSE(acecode::desktop::show_notification(
         sample_payload("completion-no-init", "session-no-init")));
+    EXPECT_FALSE(
+        acecode::desktop::refresh_notification_authorization());
     EXPECT_FALSE(acecode::desktop::activate_notification_window(nullptr));
 }
 
-TEST(WindowsNotifications, OptInDeliversToastAndActivatesWindow) {
+TEST(NativeNotifications, AuthorizationStatusNamesAreStable) {
+    using Status = acecode::desktop::NotificationAuthorizationStatus;
+    EXPECT_STREQ(acecode::desktop::notification_authorization_status_name(
+                     Status::Unknown),
+                 "unknown");
+    EXPECT_STREQ(acecode::desktop::notification_authorization_status_name(
+                     Status::NotDetermined),
+                 "not_determined");
+    EXPECT_STREQ(acecode::desktop::notification_authorization_status_name(
+                     Status::Requesting),
+                 "requesting");
+    EXPECT_STREQ(acecode::desktop::notification_authorization_status_name(
+                     Status::Denied),
+                 "denied");
+    EXPECT_STREQ(acecode::desktop::notification_authorization_status_name(
+                     Status::Authorized),
+                 "authorized");
+    EXPECT_STREQ(acecode::desktop::notification_authorization_status_name(
+                     Status::Provisional),
+                 "provisional");
+    EXPECT_STREQ(acecode::desktop::notification_authorization_status_name(
+                     Status::Unavailable),
+                 "unavailable");
+}
+
+TEST(NativeNotifications, AuthorizationStateResetsToUnavailableOnShutdown) {
+    using acecode::desktop::NotificationAuthorizationStatus;
+    acecode::desktop::shutdown_notifications();
+    const auto state =
+        acecode::desktop::notification_authorization_state();
+    EXPECT_EQ(state.status, NotificationAuthorizationStatus::Unavailable);
+    EXPECT_FALSE(state.can_request);
+    EXPECT_FALSE(state.can_open_settings);
+}
+
+TEST(NativeNotifications, OptInDeliversWindowsToastAndActivatesWindow) {
 #ifdef _WIN32
     const char* enabled = std::getenv("ACECODE_RUN_NOTIFICATION_SMOKE");
     if (!enabled || std::string(enabled) != "1") {
@@ -120,8 +157,8 @@ TEST(WindowsNotifications, OptInDeliversToastAndActivatesWindow) {
     acecode::desktop::shutdown_notifications();
     void* window = acecode::desktop::capture_tui_notification_window();
     acecode::desktop::NotificationInitOptions options;
-    options.app_name = L"ACECode Desktop";
-    options.app_user_model_id = L"ACECode.ACECode.Desktop.1";
+    options.app_name = "ACECode Desktop";
+    options.application_id = "ACECode.ACECode.Desktop.1";
     options.activation_window = window;
     ASSERT_TRUE(acecode::desktop::init_notifications(options));
 
