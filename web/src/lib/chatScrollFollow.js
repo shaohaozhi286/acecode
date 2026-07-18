@@ -73,3 +73,33 @@ export function nextChatTailFollowState(currentState = CHAT_TAIL_FOLLOW_STATE.FO
 export function shouldAutoFollowChatTail(state = CHAT_TAIL_FOLLOW_STATE.FOLLOWING) {
   return state !== CHAT_TAIL_FOLLOW_STATE.REVIEWING;
 }
+
+// Observe the rendered transcript content box rather than the scroll viewport:
+// descendant growth changes scrollHeight without resizing the viewport itself.
+// ResizeObserver is injected for deterministic tests and degrades to a no-op
+// in older browser/WebView environments.
+export function observeChatTailContent(
+  target,
+  onResize,
+  ResizeObserverImpl = globalThis.ResizeObserver,
+) {
+  if (
+    !target
+    || typeof onResize !== 'function'
+    || typeof ResizeObserverImpl !== 'function'
+  ) {
+    return () => {};
+  }
+
+  let active = true;
+  const observer = new ResizeObserverImpl(() => {
+    if (active) onResize();
+  });
+  observer.observe(target);
+
+  return () => {
+    if (!active) return;
+    active = false;
+    observer.disconnect();
+  };
+}

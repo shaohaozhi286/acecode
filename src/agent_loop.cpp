@@ -2956,13 +2956,24 @@ bool AgentLoop::execute_tool_calls(
             if (!args.contains(key) || !args[key].is_number_integer()) return 0;
             return args[key].get<int>();
         };
+        auto uint64_arg = [&args](const char* key) -> uint64_t {
+            if (!args.contains(key)) return 0;
+            if (args[key].is_number_unsigned()) return args[key].get<uint64_t>();
+            if (!args[key].is_number_integer()) return 0;
+            const auto value = args[key].get<int64_t>();
+            return value >= 0 ? static_cast<uint64_t>(value) : 0;
+        };
+        const bool byte_mode = args.contains("byte_offset");
 
         MtimeTracker::instance().record_read_observation_result(
             args["file_path"].get<std::string>(),
             int_arg("start_line"),
             int_arg("end_line"),
             tc.id,
-            persisted_output_filepath(result.output));
+            persisted_output_filepath(result.output),
+            byte_mode,
+            uint64_arg("byte_offset"),
+            static_cast<size_t>(uint64_arg("max_bytes")));
     };
 
     for (size_t i = 0; i < accumulated.tool_calls.size() && i < results.size(); ++i) {

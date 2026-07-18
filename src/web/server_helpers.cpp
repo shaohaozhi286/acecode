@@ -4,6 +4,7 @@
 // multiple route TUs.
 
 #include "server_impl.hpp"
+#include "session_status_routing.hpp"
 #include "../session/session_user_message_search.hpp"
 
 namespace acecode::web {
@@ -1477,6 +1478,12 @@ json WebServer::Impl::attention_payload_for_record(
     payload["update_cursor"] = record.update_cursor;
     payload["read_cursor"] = record.read_cursor;
     payload["timestamp_ms"] = record.updated_at_ms > 0 ? record.updated_at_ms : now_unix_ms();
+    if (deps.session_registry) {
+        if (auto entry = deps.session_registry->acquire(session_id);
+            entry && !entry->parent_session_id.empty()) {
+            payload["parent_session_id"] = entry->parent_session_id;
+        }
+    }
     return payload;
 }
 
@@ -1524,6 +1531,9 @@ void WebServer::Impl::broadcast_session_status(const json& payload) {
     msg["timestamp_ms"] = now_unix_ms();
     msg["session_id"] = payload.value("session_id", std::string{});
     msg["workspace_hash"] = payload.value("workspace_hash", std::string{});
+    if (payload.contains("parent_session_id")) {
+        msg["parent_session_id"] = payload["parent_session_id"];
+    }
     msg["payload"] = payload;
     const auto text = msg.dump();
 
@@ -1532,8 +1542,11 @@ void WebServer::Impl::broadcast_session_status(const json& payload) {
         if (!state) continue;
         const auto workspace_hash = payload.value("workspace_hash", std::string{});
         const auto session_id = payload.value("session_id", std::string{});
+        const auto parent_session_id =
+            payload.value("parent_session_id", std::string{});
         const bool wants_workspace = !workspace_hash.empty() && state->status_workspaces.count(workspace_hash);
-        const bool wants_session = !session_id.empty() && state->status_sessions.count(session_id);
+        const bool wants_session = session_status_matches_subscriptions(
+            state->status_sessions, session_id, parent_session_id);
         if (!wants_workspace && !wants_session) continue;
         try { conn->send_text(text); } catch (...) {}
     }

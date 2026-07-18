@@ -245,7 +245,7 @@ TEST(AgentLoopToolResultStorage, PersistsDefaultToolResultBySingleResultThreshol
     EXPECT_EQ(fs::file_size(artifact), 60000u);
 }
 
-TEST(AgentLoopToolResultStorage, RepeatedPersistedFileReadReturnsSavedOutputReference) {
+TEST(AgentLoopToolResultStorage, RepeatedBoundedFileReadReturnsToolCallReference) {
     Harness h;
     const fs::path source = h.cwd() / "large-file.txt";
     {
@@ -265,10 +265,8 @@ TEST(AgentLoopToolResultStorage, RepeatedPersistedFileReadReturnsSavedOutputRefe
         return msg.role == "tool" && msg.tool_call_id == "call-file-read";
     });
     ASSERT_NE(first, messages.end());
-    ASSERT_TRUE(acecode::is_persisted_output_message(first->content));
-    const std::string saved_path = acecode::persisted_output_filepath(first->content);
-    ASSERT_FALSE(saved_path.empty());
-    ASSERT_TRUE(fs::exists(saved_path));
+    EXPECT_FALSE(acecode::is_persisted_output_message(first->content));
+    EXPECT_NE(first->content.find("truncated=\"true\""), std::string::npos);
 
     auto repeat = std::find_if(messages.begin(), messages.end(), [](const acecode::ChatMessage& msg) {
         return msg.role == "tool" && msg.tool_call_id == "call-file-read-repeat";
@@ -277,9 +275,7 @@ TEST(AgentLoopToolResultStorage, RepeatedPersistedFileReadReturnsSavedOutputRefe
     EXPECT_NE(repeat->content.find("File unchanged since last read"), std::string::npos);
     EXPECT_NE(repeat->content.find("Previous file_read tool_call_id: call-file-read"),
               std::string::npos);
-    EXPECT_NE(repeat->content.find(saved_path), std::string::npos);
-    EXPECT_NE(repeat->content.find("call file_read on that saved output path"),
-              std::string::npos);
+    EXPECT_EQ(repeat->content.find("Full previous output path:"), std::string::npos);
     EXPECT_EQ(repeat->content.find(std::string(60000, 'f')), std::string::npos);
 }
 

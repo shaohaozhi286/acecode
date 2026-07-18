@@ -75,6 +75,25 @@ export function mergeSubagentTaskList(prevTasks, sessions) {
   return next;
 }
 
+// Parent subscriptions receive additive child session_status events. Only an
+// explicit parent match may trigger discovery: treating every unknown busy
+// workspace session as a child causes unrelated conversations to refetch and
+// can attach permission/question attention to the wrong parent.
+export function shouldRefreshSubagentTasksFromStatus(
+  parentSessionId,
+  knownTaskIds,
+  msg,
+) {
+  if (!parentSessionId || msg?.type !== 'session_status') return false;
+  const payload = msg?.payload || {};
+  const sessionId = String(payload.session_id || msg?.session_id || '').trim();
+  const statusParentId = String(
+    payload.parent_session_id || msg?.parent_session_id || '',
+  ).trim();
+  if (!sessionId || statusParentId !== parentSessionId) return false;
+  return !(knownTaskIds instanceof Set && knownTaskIds.has(sessionId));
+}
+
 // 子会话自己的 WS 事件 → 任务增量。返回新数组;无关事件返回原引用
 // (调用方可用引用相等跳过 setState)。
 export function applySubagentSessionEvent(tasks, msg) {
@@ -87,7 +106,7 @@ export function applySubagentSessionEvent(tasks, msg) {
   const p = msg?.payload || {};
   let patch = null;
 
-  if (type === 'busy_changed') {
+  if (type === 'busy_changed' || type === 'session_status') {
     const busy = p.busy === true;
     if (busy && task.status !== SUBAGENT_TASK_STATUS.RUNNING) {
       patch = { status: SUBAGENT_TASK_STATUS.RUNNING };

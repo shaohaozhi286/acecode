@@ -287,6 +287,63 @@ TEST(SessionResumeRestore, DoesNotRestorePartialReadAsFullBaseline) {
     fs::remove(p);
 }
 
+TEST(SessionResumeRestore, DoesNotRestoreAutomaticallyTruncatedReadAsFullBaseline) {
+    ResumeRestoreHarness h;
+    auto p = make_temp_file(std::string(60000, 'x'));
+
+    auto assistant = assistant_call(
+        "read-truncated",
+        "file_read",
+        nlohmann::json{{"file_path", p.string()}});
+    auto tool = tool_result(
+        "read-truncated",
+        "partial content\n<acecode-read-metadata encoding=\"utf-8\" "
+        "line_endings=\"none\" partial=\"true\" truncated=\"true\" "
+        "next_byte_offset=\"49152\" />\n");
+
+    acecode::append_resumed_session_messages(
+        {assistant, tool},
+        h.state,
+        h.loop_,
+        h.tools_);
+
+    auto check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), std::string(60000, 'x'));
+    EXPECT_EQ(check.status, acecode::MtimeTracker::ReadBaselineStatus::NotRead);
+
+    fs::remove(p);
+}
+
+TEST(SessionResumeRestore, DoesNotRestoreByteWindowAsFullBaseline) {
+    ResumeRestoreHarness h;
+    auto p = make_temp_file("alpha\nbeta\n");
+
+    auto assistant = assistant_call(
+        "read-bytes",
+        "file_read",
+        nlohmann::json{
+            {"file_path", p.string()},
+            {"byte_offset", 0},
+            {"max_bytes", 5}});
+    auto tool = tool_result(
+        "read-bytes",
+        "alpha\n<acecode-read-metadata encoding=\"utf-8\" "
+        "line_endings=\"lf\" partial=\"true\" byte_range=\"0-5\" "
+        "next_byte_offset=\"5\" />\n");
+
+    acecode::append_resumed_session_messages(
+        {assistant, tool},
+        h.state,
+        h.loop_,
+        h.tools_);
+
+    auto check = acecode::MtimeTracker::instance().validate_read_baseline_for_edit(
+        p.string(), "alpha\nbeta\n");
+    EXPECT_EQ(check.status, acecode::MtimeTracker::ReadBaselineStatus::NotRead);
+
+    fs::remove(p);
+}
+
 TEST(SessionResumeRestore, RestoresFileWriteBaselineFromTranscript) {
     ResumeRestoreHarness h;
     auto p = make_temp_file("new\n");

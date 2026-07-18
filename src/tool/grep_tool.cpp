@@ -12,7 +12,9 @@
 namespace acecode {
 
 static constexpr size_t MAX_RESULTS = 200;
-static constexpr uintmax_t MAX_FILE_SIZE = 1024 * 1024;
+static constexpr size_t MAX_MATCH_LINE_BYTES = 4 * 1024;
+static constexpr size_t MAX_OUTPUT_BYTES = 48 * 1024;
+static constexpr size_t TRUNCATION_NOTICE_RESERVE = 256;
 
 // 用户点「停止」后工具必须尽快返回:大仓库 + 慢盘上的全量递归 grep 实测可阻塞
 // 30 秒以上,期间 abort 只能干等(2026-07-11 日志复盘,同 McpManager::invoke
@@ -22,6 +24,25 @@ static constexpr const char* ABORTED_MSG =
 
 static bool abort_requested(const ToolContext& ctx) {
     return ctx.abort_flag && ctx.abort_flag->load();
+}
+
+enum class GrepTruncation {
+    None,
+    MatchCount,
+    OutputBytes
+};
+
+static std::string bounded_match_line(const std::string& raw_line) {
+    const std::string line = ensure_utf8(raw_line);
+    if (line.size() <= MAX_MATCH_LINE_BYTES) return line;
+
+    const std::string marker = "... [line shortened] ...";
+    const size_t payload_budget = MAX_MATCH_LINE_BYTES - marker.size();
+    const size_t head_budget = payload_budget / 2;
+    const size_t tail_budget = payload_budget - head_budget;
+    return truncate_utf8_prefix(line, head_budget, "") +
+           marker +
+           truncate_utf8_suffix(line, tail_budget, "");
 }
 
 // Simple glob match for include_pattern (e.g. "*.cpp", "*.{hpp,cpp}")
@@ -42,9 +63,9 @@ static bool filename_matches(const std::string& filename, const std::string& pat
 static bool grep_file(const std::filesystem::path& file_path,
                       const std::filesystem::path& display_root,
                       const std::regex& re,
-                      std::ostringstream& results,
+                      std::string& results,
                       size_t& match_count,
-                      bool& truncated,
+                      GrepTruncation& truncation,
                       const ToolContext& ctx,
                       bool& aborted) {
     std::ifstream ifs(file_path, std::ios::binary);
@@ -68,11 +89,19 @@ static bool grep_file(const std::filesystem::path& file_path,
         }
         line_num++;
         if (std::regex_search(line, re)) {
-            results << display_path << ":" << line_num << ":" << ensure_utf8(line) << "\n";
+            const std::string candidate =
+                display_path + ":" + std::to_string(line_num) + ":" +
+                bounded_match_line(line) + "\n";
+            if (results.size() + candidate.size() >
+                MAX_OUTPUT_BYTES - TRUNCATION_NOTICE_RESERVE) {
+                truncation = GrepTruncation::OutputBytes;
+                break;
+            }
+            results += candidate;
             match_count++;
 
             if (match_count >= MAX_RESULTS) {
-                truncated = true;
+                truncation = GrepTruncation::MatchCount;
                 break;
             }
         }
@@ -120,19 +149,13 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
         return ToolResult{"[Error] Invalid regex pattern: " + std::string(e.what()), false};
     }
 
-    std::ostringstream results;
+    std::string results;
     size_t match_count = 0;
-    bool truncated = false;
+    GrepTruncation truncation = GrepTruncation::None;
     bool aborted = false;
 
     if (path_is_file) {
-        std::error_code size_ec;
-        const auto size = std::filesystem::file_size(search_root, size_ec);
-        if (!size_ec && size > MAX_FILE_SIZE) {
-            return ToolResult{"[Error] File is too large to grep (>1MB): " + search_path, false};
-        }
-
-        if (!grep_file(search_root, search_root.parent_path(), re, results, match_count, truncated,
+        if (!grep_file(search_root, search_root.parent_path(), re, results, match_count, truncation,
                        ctx, aborted)) {
             return ToolResult{"[Error] Failed to read file: " + search_path, false};
         }
@@ -164,12 +187,9 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
                 continue;
             }
 
-            // Skip large files
-            if (it->file_size() > MAX_FILE_SIZE) continue; // >1MB skip
-
-            grep_file(it->path(), search_root, re, results, match_count, truncated, ctx, aborted);
+            grep_file(it->path(), search_root, re, results, match_count, truncation, ctx, aborted);
             if (aborted) return ToolResult{ABORTED_MSG, false};
-            if (truncated) break;
+            if (truncation != GrepTruncation::None) break;
         }
     }
 
@@ -177,10 +197,15 @@ static ToolResult execute_grep(const std::string& arguments_json, const ToolCont
         return ToolResult{"No matches found for pattern: " + pattern, true};
     }
 
-    std::string output = results.str();
-    if (truncated) {
+    std::string output = std::move(results);
+    if (truncation == GrepTruncation::MatchCount) {
         output += "\n[Results truncated at " + std::to_string(MAX_RESULTS) +
-            " matches. Narrow your search pattern.]";
+                  " matches. Narrow your search pattern.]";
+    } else if (truncation == GrepTruncation::OutputBytes) {
+        output += "\n[Results truncated at the " +
+                  std::to_string(MAX_OUTPUT_BYTES / 1024) +
+                  "KiB output limit after " + std::to_string(match_count) +
+                  " matches. Narrow your search pattern.]";
     }
 
     return ToolResult{output, true};
@@ -192,7 +217,8 @@ ToolImpl create_grep_tool() {
     def.description = "Search for a regex pattern in file contents. "
                       "If path is a directory, searches recursively. "
                       "If path is a file, searches only that file. "
-                      "Returns matching lines with file path and line number. "
+                      "Scans large files and returns bounded matching lines "
+                      "with file path and line number. "
                       "Skips .git, node_modules, build directories.";
     def.parameters = nlohmann::json({
         {"type", "object"},

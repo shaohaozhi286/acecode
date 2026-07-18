@@ -19,6 +19,7 @@ import {
   mergeSubagentTaskList,
   removeSubagentTask,
   runningSubagentCount,
+  shouldRefreshSubagentTasksFromStatus,
 } from './subagentTasks.js';
 
 export function useSubagentTasks(parentSessionId) {
@@ -62,16 +63,21 @@ export function useSubagentTasks(parentSessionId) {
         }
         return;
       }
-      // spawn_subagent(wait=true) 期间父 turn 还没产生 tool_end,新子会话的
-      // 出现只能靠 workspace session_status 广播感知:未知 busy 会话 → refetch
-      // (?parent= 过滤保证不会把无关会话混进来)。
+      // spawn_subagent(wait=true) 期间父 turn 还没产生 tool_end。父订阅会收到
+      // 带 parent_session_id 的子会话 session_status;只有明确归属当前 parent
+      // 的未知 child 才触发 refetch,避免工作区内无关 busy 会话造成盲刷新。
       if (msg.type === 'session_status') {
         const p = msg.payload || {};
-        const statusSid = p.session_id || '';
-        if (statusSid && p.busy === true && !taskIdsRef.current.has(statusSid)) {
+        const statusParentId = p.parent_session_id || msg.parent_session_id || '';
+        if (shouldRefreshSubagentTasksFromStatus(
+          parentSessionId,
+          taskIdsRef.current,
+          msg,
+        )) {
           refresh();
           return;
         }
+        if (statusParentId && statusParentId !== parentSessionId) return;
       }
       setTasks((prev) => applySubagentSessionEvent(prev, msg));
     };

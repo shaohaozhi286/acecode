@@ -14,7 +14,9 @@ namespace acecode {
 // Common file operation utilities for tools
 class FileOperations {
 public:
-    static constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    // file_edit materializes the complete file so it can validate and write the
+    // replacement atomically. Reads use their own bounded streaming policy.
+    static constexpr size_t MAX_EDIT_FILE_SIZE = 10 * 1024 * 1024; // 10 MiB
 
     // Check if file exists, return error ToolResult if not
     static ToolResult check_file_exists(const std::string& path) {
@@ -27,12 +29,18 @@ public:
         return ToolResult{"", true};
     }
 
-    // Check file size, return error ToolResult if too large
-    static ToolResult check_file_size(const std::string& path, const std::string& suggestion = "") {
+    // Check whether a file can be safely materialized by file_edit.
+    static ToolResult check_edit_file_size(
+        const std::string& path,
+        const std::string& suggestion = ""
+    ) {
         auto file_size = std::filesystem::file_size(path_from_utf8(path));
-        if (file_size > MAX_FILE_SIZE) {
+        if (file_size > MAX_EDIT_FILE_SIZE) {
             return ToolResult{
-                ToolErrors::file_too_large(file_size / (1024 * 1024), suggestion),
+                ToolErrors::file_too_large_for_edit(
+                    file_size / (1024 * 1024),
+                    MAX_EDIT_FILE_SIZE / (1024 * 1024),
+                    suggestion),
                 false
             };
         }

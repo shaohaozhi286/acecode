@@ -1802,11 +1802,15 @@ export function Sidebar({
       });
     }
 
-    if (listKey && sessionListNeedsRevealExpansion(
-      sourceSessions,
-      revealTarget,
-      expandedSessionLists.has(listKey),
-    )) {
+    if (
+      listKey
+      && (revealTarget.noWorkspace || !workspaceCollapseAllRef.current)
+      && sessionListNeedsRevealExpansion(
+        sourceSessions,
+        revealTarget,
+        expandedSessionLists.has(listKey),
+      )
+    ) {
       setExpandedSessionLists((prev) => {
         if (prev.has(listKey)) return prev;
         return new Set(prev).add(listKey);
@@ -1899,7 +1903,6 @@ export function Sidebar({
     const willExpand = !next.has(hash);
     if (willExpand) next.add(hash);
     else next.delete(hash);
-    if (willExpand) workspaceCollapseAllRef.current = false;
     expandedRef.current = next;
     setExpanded(next);
     if (willExpand) {

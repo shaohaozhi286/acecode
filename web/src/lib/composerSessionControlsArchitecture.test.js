@@ -74,6 +74,24 @@ run('selected contexts remain horizontally accessible while fixed controls do no
   assert.match(styles, /@container \(max-width: 560px\)/);
 });
 
+run('composer permission and model selectors share a 13px label size', () => {
+  const styles = source('styles/globals.css');
+
+  assert.match(
+    styles,
+    /\.ace-composer-control-button\s*\{[^}]*font-size: 13px;/s,
+  );
+});
+
+run('model selector leaves enough line height for lowercase descenders', () => {
+  const styles = source('styles/globals.css');
+
+  assert.match(
+    styles,
+    /\.ace-composer-model-label\s*\{[^}]*line-height: 1\.35;/s,
+  );
+});
+
 run('model refresh lives in the integrated model menu', () => {
   const component = source('components/ComposerSessionControls.jsx');
 

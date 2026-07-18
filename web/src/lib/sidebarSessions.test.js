@@ -75,9 +75,9 @@ test('expanded sidebar sessions show all rows and collapse action', () => {
   assert.deepEqual(result.visibleSessions.map((s) => s.id), ['0', '1', '2', '3', '4', '5', '6']);
 });
 
-test('collapse all workspaces makes every workspace session list show collapse action', () => {
+test('collapse all workspaces resets registered session lists to the default compact state', () => {
   const expanded = expandedSessionListsAfterWorkspaceCollapseAll(
-    new Set(['__no_workspace__']),
+    new Set(['__no_workspace__', 'w1', 'w2', 'w3', 'stale-workspace']),
     [
       { hash: 'w1' },
       { workspace_hash: 'w2' },
@@ -87,10 +87,12 @@ test('collapse all workspaces makes every workspace session list show collapse a
   );
   assert.deepEqual(
     Array.from(expanded),
-    ['__no_workspace__', 'w1', 'w2', 'w3'],
+    ['__no_workspace__', 'stale-workspace'],
   );
   const sessions = Array.from({ length: 7 }, (_, index) => ({ id: String(index) }));
-  assert.equal(sidebarSessionProjection(sessions, expanded.has('w1')).action, 'collapse');
+  const projection = sidebarSessionProjection(sessions, expanded.has('w1'));
+  assert.equal(projection.action, 'expand');
+  assert.deepEqual(projection.visibleSessions.map((session) => session.id), ['0', '1', '2', '3', '4']);
   assert.equal(expanded.has('__no_workspace__'), true);
 });
 

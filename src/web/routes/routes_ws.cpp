@@ -128,33 +128,125 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
             conn.send_text(R"({"type":"error","payload":{"reason":"missing session_id"}})");
             return;
         }
-        if (state->subscriptions.find(sid) != state->subscriptions.end()) {
-            std::string workspace_hash;
-            std::string session_cwd;
-            if (deps.session_registry) {
-                if (auto entry = deps.session_registry->acquire(sid)) {
-                    workspace_hash = entry->workspace_hash;
-                    session_cwd = entry->cwd;
-                }
-            }
-            json ack;
-            ack["type"]       = type == "hello" ? "hello_ack" : "subscribe_ack";
-            ack["session_id"] = sid;
-            if (!workspace_hash.empty()) ack["workspace_hash"] = workspace_hash;
-            ack["payload"]    = json{{"session_id", sid}, {"workspace_hash", workspace_hash}, {"cwd", session_cwd}};
-            conn.send_text(ack.dump());
-            return;
-        }
-        crow::websocket::connection* conn_ptr = &conn;
-        std::string sid_copy = sid;
+
         std::string workspace_hash;
         std::string session_cwd;
+        std::string parent_session_id;
         if (deps.session_registry) {
             if (auto entry = deps.session_registry->acquire(sid)) {
                 workspace_hash = entry->workspace_hash;
                 session_cwd = entry->cwd;
+                parent_session_id = entry->parent_session_id;
             }
         }
+
+        const auto send_subscription_ack = [&] {
+            json ack;
+            ack["type"]       = type == "hello" ? "hello_ack" : "subscribe_ack";
+            ack["session_id"] = sid;
+            if (!workspace_hash.empty()) ack["workspace_hash"] = workspace_hash;
+            if (!parent_session_id.empty()) {
+                ack["parent_session_id"] = parent_session_id;
+            }
+            ack["payload"] = json{
+                {"session_id", sid},
+                {"workspace_hash", workspace_hash},
+                {"cwd", session_cwd},
+            };
+            if (!parent_session_id.empty()) {
+                ack["payload"]["parent_session_id"] = parent_session_id;
+            }
+            conn.send_text(ack.dump());
+        };
+
+        // Parent subscription is also the discovery channel for already-running
+        // children. This avoids relying on a workspace-wide unknown-session
+        // heuristic and covers no-workspace parents.
+        const auto send_child_status_snapshots = [&] {
+            for (const auto& child : deps.session_client->list_sessions()) {
+                if (child.parent_session_id != sid) continue;
+                json status_payload{
+                    {"session_id", child.id},
+                    {"parent_session_id", sid},
+                    {"workspace_hash", child.workspace_hash},
+                    {"cwd", child.cwd},
+                    {"busy", child.busy},
+                    {"state", child.busy ? "running" : "read"},
+                    {"attention_state", child.busy ? "running" : "read"},
+                    {"read_state", child.busy ? "running" : "read"},
+                };
+                json status;
+                status["type"] = "session_status";
+                status["timestamp_ms"] = now_unix_ms();
+                status["session_id"] = child.id;
+                status["parent_session_id"] = sid;
+                if (!child.workspace_hash.empty()) {
+                    status["workspace_hash"] = child.workspace_hash;
+                }
+                status["payload"] = std::move(status_payload);
+                try { conn.send_text(status.dump()); } catch (...) {}
+            }
+        };
+
+        // since=0 does not replay EventDispatcher's ring. After the ack (which
+        // establishes parent ownership), send seq-less snapshots for unresolved
+        // permission and AskUserQuestion interactions. Frontend queues dedupe by
+        // request_id and retain close-before-request tombstones.
+        const auto send_pending_interaction_snapshots = [&] {
+            if (!deps.session_registry) return;
+            auto pending_entry = deps.session_registry->acquire(sid);
+            if (!pending_entry) return;
+
+            const auto send_snapshot =
+                [&](SessionEventKind kind, nlohmann::json req) {
+                    req["session_id"] = sid;
+                    if (!parent_session_id.empty()) {
+                        req["parent_session_id"] = parent_session_id;
+                    }
+                    if (!workspace_hash.empty()) {
+                        req["workspace_hash"] = workspace_hash;
+                    }
+                    json snapshot;
+                    snapshot["type"] = to_string(kind);
+                    snapshot["session_id"] = sid;
+                    if (!parent_session_id.empty()) {
+                        snapshot["parent_session_id"] = parent_session_id;
+                    }
+                    if (!workspace_hash.empty()) {
+                        snapshot["workspace_hash"] = workspace_hash;
+                    }
+                    snapshot["payload"] = std::move(req);
+                    try { conn.send_text(snapshot.dump()); } catch (...) {}
+                };
+
+            if (pending_entry->prompter) {
+                for (auto& req :
+                     pending_entry->prompter->snapshot_pending_requests()) {
+                    send_snapshot(SessionEventKind::PermissionRequest,
+                                  std::move(req));
+                }
+            }
+            if (pending_entry->ask_prompter) {
+                for (auto& req :
+                     pending_entry->ask_prompter->snapshot_pending_requests()) {
+                    send_snapshot(SessionEventKind::QuestionRequest,
+                                  std::move(req));
+                }
+            }
+        };
+
+        if (state->subscriptions.find(sid) != state->subscriptions.end()) {
+            {
+                std::lock_guard<std::mutex> lk(ws_mu);
+                state->status_sessions.insert(sid);
+            }
+            send_subscription_ack();
+            send_child_status_snapshots();
+            send_pending_interaction_snapshots();
+            return;
+        }
+        crow::websocket::connection* conn_ptr = &conn;
+        std::string sid_copy = sid;
         auto sub = deps.session_client->subscribe(sid,
             [this, conn_ptr, sid_copy, workspace_hash, session_cwd](const SessionEvent& evt) {
                 const auto text = session_event_to_json(evt, sid_copy, workspace_hash, session_cwd).dump();
@@ -174,32 +266,13 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
         }
         if (state->session_id.empty()) state->session_id = sid;
         state->subscriptions[sid] = sub;
-        json ack;
-        ack["type"]       = type == "hello" ? "hello_ack" : "subscribe_ack";
-        ack["session_id"] = sid;
-        if (!workspace_hash.empty()) ack["workspace_hash"] = workspace_hash;
-        ack["payload"]    = json{{"session_id", sid}, {"workspace_hash", workspace_hash}, {"cwd", session_cwd}};
-        conn.send_text(ack.dump());
-
-        // 补发子会话当前仍挂起的权限请求。EventDispatcher 的 since=0 订阅不重放
-        // ring(event_dispatcher.cpp),若某条 permission_request 在本次 subscribe
-        // 之前就已 emit(如子代理刚起步就要权限、前端刚发现它才来订阅),不补发
-        // 前端就永远看不到 → 子代理干等到 5 分钟超时被 Deny(本次修复的核心症状)。
-        // 前端按 request_id 去重(App.jsx pushUnique),与实时帧不冲突;刻意不带
-        // seq 字段,避免触发 connection.js 的乱序告警 / 干扰 lastSeq 游标。
-        if (deps.session_registry) {
-            if (auto pending_entry = deps.session_registry->acquire(sid);
-                pending_entry && pending_entry->prompter) {
-                for (auto& req : pending_entry->prompter->snapshot_pending_requests()) {
-                    json pm;
-                    pm["type"]              = to_string(SessionEventKind::PermissionRequest);
-                    pm["session_id"]        = sid;
-                    req["session_id"]       = sid;  // 决策按 session_id 路由回子会话
-                    pm["payload"]           = std::move(req);
-                    try { conn.send_text(pm.dump()); } catch (...) {}
-                }
-            }
+        {
+            std::lock_guard<std::mutex> lk(ws_mu);
+            state->status_sessions.insert(sid);
         }
+        send_subscription_ack();
+        send_child_status_snapshots();
+        send_pending_interaction_snapshots();
         return;
     }
 
@@ -213,6 +286,10 @@ void WebServer::Impl::handle_ws_message(crow::websocket::connection& conn, const
         if (it != state->subscriptions.end()) {
             if (deps.session_client) deps.session_client->unsubscribe(sid, it->second);
             state->subscriptions.erase(it);
+            {
+                std::lock_guard<std::mutex> lk(ws_mu);
+                state->status_sessions.erase(sid);
+            }
             if (state->session_id == sid) {
                 state->session_id = state->subscriptions.empty()
                     ? std::string{}

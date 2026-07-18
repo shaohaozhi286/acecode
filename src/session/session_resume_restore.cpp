@@ -73,7 +73,7 @@ struct FileToolUse {
     std::string name;
     std::string path;
     std::string content;
-    bool has_range = false;
+    bool partial_read_request = false;
 };
 
 bool starts_with(const std::string& value, const char* prefix) {
@@ -116,8 +116,12 @@ std::optional<FileToolUse> parse_file_tool_use(const nlohmann::json& tool_call) 
     use.name = *name;
     use.path = *path;
     if (*name == "file_read") {
-        use.has_range = args.is_object() &&
-                        (args.contains("start_line") || args.contains("end_line"));
+        use.partial_read_request =
+            args.is_object() &&
+            (args.contains("start_line") ||
+             args.contains("end_line") ||
+             args.contains("byte_offset") ||
+             args.contains("max_bytes"));
     } else if (*name == "file_write") {
         auto content = json_string_field(args, "content");
         if (!content) return std::nullopt;
@@ -129,6 +133,13 @@ std::optional<FileToolUse> parse_file_tool_use(const nlohmann::json& tool_call) 
 bool read_footer_is_lossy(const std::string& content) {
     return content.find("lossy=\"true\"") != std::string::npos ||
            content.find("editable=\"false\"") != std::string::npos;
+}
+
+bool read_footer_is_partial(const std::string& content) {
+    const size_t footer = content.rfind("<acecode-read-metadata");
+    if (footer == std::string::npos) return false;
+    return content.find("partial=\"true\"", footer) != std::string::npos ||
+           content.find("truncated=\"true\"", footer) != std::string::npos;
 }
 
 std::string strip_read_metadata_footer(std::string content) {
@@ -155,9 +166,10 @@ void restore_file_tool_state(const FileToolUse& use, const ChatMessage& result) 
     if (looks_like_failed_tool_result(result)) return;
 
     if (use.name == "file_read") {
-        if (use.has_range) return;
+        if (use.partial_read_request) return;
         if (starts_with(result.content, kFileUnchangedStubPrefix)) return;
         if (read_footer_is_lossy(result.content)) return;
+        if (read_footer_is_partial(result.content)) return;
 
         FileReadEditMetadata metadata;
         MtimeTracker::instance().seed_transcript_read_baseline(

@@ -40,20 +40,25 @@ run('permission cards are chat rows inside the transcript before activity', () =
   assert.match(transcript, /<PermissionCard/);
   assert.ok(
     transcript.indexOf('permissionRequests.map') < transcript.indexOf('<ActivityIndicator'),
-    'permission card must appear before the generic activity row',
+    'permission card must appear before the shared activity bubble',
   );
   assert.match(
     transcript,
-    /activity\?\.phase === 'permission_waiting' && permissionRequests\.length > 0/,
+    /conversationActivity\.kind !== CONVERSATION_ACTIVITY_KIND\.IDLE/,
   );
+  assert.match(chat, /permissionRequests,\s*questionRequest: questionForView/);
 });
 
 run('permission geometry participates in tail measurement without changing follow policy', () => {
   const chat = source('components/ChatView.jsx');
-  assert.match(
+  const tailFollowEffect = between(
     chat,
-    /\[renderedItems, permissionRequests, busy, changeDockBottomPadding, sid, cancelTailFollowScroll\]/,
+    '// 只在用户仍跟随底部时自动滚到底',
+    'useEffect(() => observeChatTailContent',
   );
+  assert.match(tailFollowEffect, /permissionRequests/);
+  assert.match(tailFollowEffect, /scheduleTailFollowScroll/);
+  assert.match(tailFollowEffect, /cancelTailFollowScroll/);
   assert.match(
     chat,
     /\[permissionRequests, scheduleTranscriptMeasures\]/,
@@ -96,7 +101,7 @@ run('permission is conversation-scoped and is not a global focus/search/tour blo
 run('known subagent permission notifications and cards route through the parent', () => {
   const app = source('App.jsx');
   assert.match(app, /subagentDirectory/);
-  assert.match(app, /permissionOwnerForSession\(sessionId\)/);
+  assert.match(app, /conversationOwnerForSession\(sessionId, payload\)/);
   assert.match(app, /session_id: ownerSessionId \|\| sessionId/);
   assert.match(app, /origin_label: permissionOriginLabel\(entry, permissionOwnership\)/);
 });

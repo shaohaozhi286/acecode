@@ -6,6 +6,7 @@ import {
   isChatNearTail,
   isUserScrollAway,
   nextChatTailFollowState,
+  observeChatTailContent,
   shouldAutoFollowChatTail,
 } from './chatScrollFollow.js';
 
@@ -147,4 +148,55 @@ run('scroll metrics normalize invalid values', () => {
     clientHeight: 0,
     scrollHeight: 120,
   });
+});
+
+run('content resize observation delivers changes and disconnects deterministically', () => {
+  const target = {};
+  let observedTarget = null;
+  let observerCallback = null;
+  let resizeCount = 0;
+  let disconnectCount = 0;
+
+  class FakeResizeObserver {
+    constructor(callback) {
+      observerCallback = callback;
+    }
+
+    observe(value) {
+      observedTarget = value;
+    }
+
+    disconnect() {
+      disconnectCount += 1;
+    }
+  }
+
+  const disconnect = observeChatTailContent(
+    target,
+    () => { resizeCount += 1; },
+    FakeResizeObserver,
+  );
+  assert.equal(observedTarget, target);
+
+  observerCallback();
+  assert.equal(resizeCount, 1);
+
+  disconnect();
+  disconnect();
+  assert.equal(disconnectCount, 1);
+
+  observerCallback();
+  assert.equal(resizeCount, 1);
+});
+
+run('content resize observation is a no-op without runtime support', () => {
+  let resizeCount = 0;
+  const disconnect = observeChatTailContent(
+    {},
+    () => { resizeCount += 1; },
+    null,
+  );
+  assert.equal(typeof disconnect, 'function');
+  disconnect();
+  assert.equal(resizeCount, 0);
 });

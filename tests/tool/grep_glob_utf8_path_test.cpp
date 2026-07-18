@@ -92,3 +92,73 @@ TEST(GrepGlobUtf8PathTest, GrepAcceptsFilePath) {
     EXPECT_NE(result.output.find("CMakeLists.txt:1:add_executable"), std::string::npos);
     EXPECT_EQ(result.output.find("other.txt"), std::string::npos);
 }
+
+TEST(GrepGlobUtf8PathTest, GrepSearchesExplicitFileLargerThanOneMiB) {
+    TempTree tmp;
+    fs::path file = tmp.path / "large.log";
+    {
+        std::ofstream ofs(file, std::ios::binary);
+        const std::string padding(100, 'x');
+        for (int line = 1; line <= 11000; ++line) {
+            ofs << (line == 10999 ? "large-file-needle " : "ordinary ")
+                << padding << "\n";
+        }
+    }
+    ASSERT_GT(fs::file_size(file), 1024u * 1024u);
+
+    auto tool = acecode::create_grep_tool();
+    auto result = tool.execute(nlohmann::json({
+        {"pattern", "large-file-needle"},
+        {"path", acecode::path_to_utf8(file)}
+    }).dump(), acecode::ToolContext{});
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_NE(result.output.find("large.log:10999:large-file-needle"),
+              std::string::npos);
+}
+
+TEST(GrepGlobUtf8PathTest, RecursiveGrepDoesNotSkipLargeFiles) {
+    TempTree tmp;
+    fs::path root = tmp.path / "project";
+    fs::path file = root / "logs" / "large.log";
+    fs::create_directories(file.parent_path());
+    {
+        std::ofstream ofs(file, std::ios::binary);
+        ofs << std::string(1024 * 1024 + 128, 'a') << "\n";
+        ofs << "recursive-large-file-needle\n";
+    }
+
+    acecode::ToolContext ctx;
+    ctx.cwd = acecode::path_to_utf8(root);
+    auto tool = acecode::create_grep_tool();
+    auto result = tool.execute(
+        R"({"pattern":"recursive-large-file-needle","include_pattern":"*.log"})",
+        ctx);
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_NE(result.output.find("logs/large.log:2:recursive-large-file-needle"),
+              std::string::npos);
+}
+
+TEST(GrepGlobUtf8PathTest, GrepBoundsLongLinesAndAggregateOutput) {
+    TempTree tmp;
+    fs::path file = tmp.path / "many-matches.log";
+    {
+        std::ofstream ofs(file, std::ios::binary);
+        for (int line = 0; line < 100; ++line) {
+            ofs << "needle-" << line << "-" << std::string(5000, 'z') << "\n";
+        }
+    }
+
+    auto tool = acecode::create_grep_tool();
+    auto result = tool.execute(nlohmann::json({
+        {"pattern", "needle"},
+        {"path", acecode::path_to_utf8(file)}
+    }).dump(), acecode::ToolContext{});
+
+    ASSERT_TRUE(result.success) << result.output;
+    EXPECT_NE(result.output.find("[line shortened]"), std::string::npos);
+    EXPECT_NE(result.output.find("48KiB output limit"), std::string::npos);
+    EXPECT_LE(result.output.size(), 48u * 1024u);
+    EXPECT_TRUE(acecode::is_valid_utf8(result.output));
+}

@@ -71,6 +71,10 @@ public:
     // 测试用 / 调试用: 当前 pending 数。
     std::size_t pending_count() const;
 
+    // 快照当前仍未应答的问题请求。用于 Web 客户端晚于 QuestionRequest
+    // emit 才订阅会话时补发;调用方按 request_id 去重。
+    std::vector<nlohmann::json> snapshot_pending_requests() const;
+
 private:
     static std::string make_request_id();
 
@@ -82,6 +86,7 @@ private:
         std::condition_variable     cv;
         bool                        responded = false;
         AskUserQuestionResponse    response;
+        nlohmann::json              request_payload;
     };
 
     mutable std::mutex                                         pending_mu_;

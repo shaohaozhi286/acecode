@@ -428,8 +428,9 @@ static ToolResult execute_file_edit(const std::string& arguments_json, const Too
     }
 
     if (file_exists) {
-        auto size_check = FileOperations::check_file_size(file_path,
-            "Use file_read with start_line/end_line to inspect the file before deciding how to edit it.");
+        auto size_check = FileOperations::check_edit_file_size(
+            file_path,
+            "Use bounded file_read or grep calls to inspect it. Large-file mutation is not supported.");
         if (!size_check.success) {
             return size_check;
         }

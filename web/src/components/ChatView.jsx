@@ -96,6 +96,10 @@ import {
 import { bindDesktopComposerAutoFocus } from '../lib/composerCaretRestore.js';
 import { useSubagentTasks } from '../lib/useSubagentTasks.js';
 import { taskDisplayTitle } from '../lib/subagentTasks.js';
+import {
+  CONVERSATION_ACTIVITY_KIND,
+  selectConversationActivity,
+} from '../lib/conversationActivity.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
 import { pickModelLoad } from '../lib/modelLoad.js';
 import {
@@ -152,6 +156,7 @@ import {
   CHAT_TAIL_FOLLOW_STATE,
   chatScrollMetrics,
   nextChatTailFollowState,
+  observeChatTailContent,
   shouldAutoFollowChatTail,
 } from '../lib/chatScrollFollow.js';
 import {
@@ -325,17 +330,29 @@ function ActivityIndicator({ activity, showAceCodeAvatar = false }) {
     return () => window.clearInterval(id);
   }, [activity?.startedAtMs, activity?.phase, activity?.toolCallId, activity?.toolIndex]);
 
-  const isPermWaiting = activity?.phase === 'permission_waiting';
+  const kind = activity?.kind || CONVERSATION_ACTIVITY_KIND.FOREGROUND;
+  const isWaiting = activity?.needsAction === true
+    || kind === CONVERSATION_ACTIVITY_KIND.RECOVERY;
   const label = activity?.label || '正在处理请求';
-  const detail = activity?.detail || '';
+  const detail = [
+    activity?.detail || '',
+    kind !== CONVERSATION_ACTIVITY_KIND.BACKGROUND
+      && activity?.backgroundCount > 0
+      ? activity.backgroundLabel
+      : '',
+  ].filter(Boolean).join(' · ');
   const elapsed = formatElapsedSeconds(activity?.startedAtMs, nowMs);
   const chrome = activityChromeState(showAceCodeAvatar);
   return (
-    <div className={`flex ${chrome.gapClass} max-w-[85%]`}>
+    <div
+      className={`flex ${chrome.gapClass} max-w-[85%]`}
+      data-conversation-activity-bubble="true"
+      data-activity-kind={kind}
+    >
       {chrome.showAvatar ? (
         <div className={clsx(
           'w-6 h-6 rounded-full text-white text-[11px] font-bold flex items-center justify-center mt-[2px]',
-          isPermWaiting ? 'bg-warn' : 'bg-ok',
+          isWaiting ? 'bg-warn' : 'bg-ok',
         )}>A</div>
       ) : chrome.showAvatarPlaceholder ? (
         <div className="w-6 shrink-0" aria-hidden="true" />
@@ -344,7 +361,7 @@ function ActivityIndicator({ activity, showAceCodeAvatar = false }) {
       )}
       <div className={clsx(
         'rounded-2xl border px-3 py-2 text-[12px] text-fg shadow-sm min-w-[180px]',
-        isPermWaiting ? 'border-warn/50 bg-warn/10' : 'border-border bg-surface-hi',
+        isWaiting ? 'border-warn/50 bg-warn/10' : 'border-border bg-surface-hi',
       )}>
         <div className="flex items-center gap-2">
           <span className="font-medium">{label}</span>
@@ -355,7 +372,7 @@ function ActivityIndicator({ activity, showAceCodeAvatar = false }) {
           {[0, 1, 2].map((i) => (
             <span
               key={i}
-              className={clsx('w-1.5 h-1.5 rounded-full', isPermWaiting ? 'bg-warn' : 'bg-fg-mute')}
+              className={clsx('w-1.5 h-1.5 rounded-full', isWaiting ? 'bg-warn' : 'bg-fg-mute')}
               style={{ animation: `ace-pulse 1.2s ease-in-out ${i * 0.2}s infinite` }}
             />
           ))}
@@ -685,6 +702,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const [changeDockBottomPadding, setChangeDockBottomPadding] = useState(0);
   const [expandedActivityKeys, setExpandedActivityKeys] = useState(() => new Set());
   const scrollRef = useRef(null);
+  const transcriptContentRef = useRef(null);
   const tailFollowStateRef = useRef(CHAT_TAIL_FOLLOW_STATE.FOLLOWING);
   const tailFollowScrollRafRef = useRef({ first: 0, second: 0 });
   // 区分"用户滚动"与"流式渲染引起的 scrollTop 位移"用的上下文:上一次
@@ -760,17 +778,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     () => buildAssistantRunDirectives(renderedItems),
     [renderedItems],
   );
-  const hasActiveTool = useMemo(() => renderedItems.some((item) => item.kind === 'tool' && !item.tool?.isDone), [renderedItems]);
-  const hasVisibleStreamingAssistant = useMemo(() => (
-    streamingId != null
-    && renderedItems.some((item) => (
-      item.kind === 'msg'
-      && item.role === 'assistant'
-      && item.id === streamingId
-      && typeof item.content === 'string'
-      && item.content.trim()
-    ))
-  ), [renderedItems, streamingId]);
   const itemsRef = useRef(renderedItems);
   const stickyRafRef = useRef(0);
   const conversationTurnRafRef = useRef(0);
@@ -1503,6 +1510,28 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     tailFollowScrollRafRef.current = { first: 0, second: 0 };
   }, []);
 
+  const scheduleTailFollowScroll = useCallback(() => {
+    const scrollToBottom = () => {
+      if (!shouldAutoFollowChatTail(tailFollowStateRef.current)) return false;
+      const el = scrollRef.current;
+      if (!el) return false;
+      el.scrollTop = el.scrollHeight;
+      return true;
+    };
+
+    cancelTailFollowScroll();
+    if (!scrollToBottom()) return;
+
+    tailFollowScrollRafRef.current.first = requestAnimationFrame(() => {
+      tailFollowScrollRafRef.current.first = 0;
+      if (!scrollToBottom()) return;
+      tailFollowScrollRafRef.current.second = requestAnimationFrame(() => {
+        tailFollowScrollRafRef.current.second = 0;
+        scrollToBottom();
+      });
+    });
+  }, [cancelTailFollowScroll]);
+
   const pauseTailFollowForReview = useCallback(() => {
     cancelTailFollowScroll();
     if (!busy && transcriptStatus !== 'running') return;
@@ -1643,29 +1672,27 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   // 只在用户仍跟随底部时自动滚到底。审查栏会异步测量高度并给消息区补
   // bottom padding,因此跟随模式下仍需在 padding 生效后补几帧滚动。
   useLayoutEffect(() => {
-    if (!shouldAutoFollowChatTail(tailFollowStateRef.current)) {
-      cancelTailFollowScroll();
-      return undefined;
-    }
-
-    const scrollToBottom = () => {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    };
-
-    cancelTailFollowScroll();
-    scrollToBottom();
-    tailFollowScrollRafRef.current.first = requestAnimationFrame(() => {
-      tailFollowScrollRafRef.current.first = 0;
-      scrollToBottom();
-      tailFollowScrollRafRef.current.second = requestAnimationFrame(() => {
-        tailFollowScrollRafRef.current.second = 0;
-        scrollToBottom();
-      });
-    });
-
+    scheduleTailFollowScroll();
     return cancelTailFollowScroll;
-  }, [renderedItems, permissionRequests, busy, changeDockBottomPadding, sid, cancelTailFollowScroll]);
+  }, [
+    activity?.detail,
+    activity?.label,
+    activity?.phase,
+    activity?.toolCallId,
+    activity?.toolIndex,
+    busy,
+    cancelTailFollowScroll,
+    changeDockBottomPadding,
+    permissionRequests,
+    renderedItems,
+    scheduleTailFollowScroll,
+    sid,
+  ]);
+
+  useEffect(() => observeChatTailContent(
+    transcriptContentRef.current,
+    scheduleTailFollowScroll,
+  ), [scheduleTailFollowScroll, sid]);
 
   useLayoutEffect(() => {
     const previous = searchJumpRetryRef.current || {};
@@ -2847,6 +2874,8 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   const questionForView = useMemo(() => {
     if (!questionRequest) return null;
     const reqSid = questionRequest.session_id || '';
+    const ownerSid = questionRequest.owner_session_id || '';
+    if (sid && ownerSid === sid) return questionRequest;
     if (!reqSid || (sid && reqSid === sid)) return questionRequest;
     // 后台任务(spawn_subagent 子会话)的 AskUserQuestion 冒泡到主会话回答,
     // transcript 窄条不承载交互(答案 payload 自带 session_id,路由回子会话)。
@@ -2855,11 +2884,26 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
   }, [questionRequest, sid, subagentTasks.tasks]);
 
   const questionOriginLabel = useMemo(() => {
+    if (questionForView?.origin_label) return questionForView.origin_label;
     const reqSid = questionForView?.session_id || '';
     if (!reqSid || reqSid === sid) return '';
     const task = subagentTasks.tasks.find((t) => t.id === reqSid);
     return task ? `来自后台任务:${taskDisplayTitle(task)}` : '';
   }, [questionForView, sid, subagentTasks.tasks]);
+
+  const conversationActivity = useMemo(() => selectConversationActivity({
+    foregroundBusy: busy,
+    foregroundActivity: activity,
+    permissionRequests,
+    questionRequest: questionForView,
+    subagentTasks: subagentTasks.tasks,
+  }), [
+    activity,
+    busy,
+    permissionRequests,
+    questionForView,
+    subagentTasks.tasks,
+  ]);
 
   const resolveQuestion = useCallback(() => {
     onQuestionResolve?.();
@@ -3098,9 +3142,6 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
     ];
     return (
       <div className="flex-1 flex flex-col bg-bg">
-        <div className="h-9 px-3 flex items-center bg-surface border-b border-border shrink-0">
-          <span className="text-fg-mute text-[12px]">未选择会话</span>
-        </div>
         <div className="ace-home-panel flex-1">
           <div className="ace-home-content">
             <img src="/acecode-logo.png" alt="ACECode" width="64" height="64" className="ace-home-logo select-none" draggable="false" />
@@ -3486,9 +3527,10 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
           onScroll={handleMessagesScroll}
           onWheel={handleMessagesWheel}
           onPointerDown={handleMessagesPointerDown}
-          className="ace-chat-transcript-scroll h-full overflow-y-auto pl-[35px] pr-3.5 py-3 flex flex-col gap-3"
+          className="ace-chat-transcript-scroll h-full overflow-y-auto pl-[35px] pr-3.5 py-3"
           style={changeDockBottomPadding > 0 ? { paddingBottom: changeDockBottomPadding } : undefined}
         >
+          <div ref={transcriptContentRef} className="flex flex-col gap-3">
           {renderedItems.map((it) => {
             if (it.kind === 'termination_notice') {
               return (
@@ -3663,12 +3705,13 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
               />
             </div>
           ))}
-          {busy
-              && !hasVisibleStreamingAssistant
-              && (!hasActiveTool || activity?.phase === 'permission_waiting')
-              && !(activity?.phase === 'permission_waiting' && permissionRequests.length > 0) && (
-            <ActivityIndicator activity={activity} showAceCodeAvatar={showAceCodeAvatar} />
+          {conversationActivity.kind !== CONVERSATION_ACTIVITY_KIND.IDLE && (
+            <ActivityIndicator
+              activity={conversationActivity}
+              showAceCodeAvatar={showAceCodeAvatar}
+            />
           )}
+          </div>
         </div>
         {showConversationTurnScrubber && (
           <ConversationTurnScrubberBoundary key={sid}>

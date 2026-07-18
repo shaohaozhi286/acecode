@@ -82,7 +82,7 @@ export function expandedSessionListsAfterWorkspaceCollapseAll(
         || workspace?.workspaceHash
         || '',
       ).trim();
-    if (hash) next.add(hash);
+    if (hash) next.delete(hash);
   });
   return next;
 }

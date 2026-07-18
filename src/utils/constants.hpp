@@ -6,9 +6,6 @@ namespace constants {
 // Token estimation
 constexpr int CHARS_PER_TOKEN = 4;
 
-// File size limits
-constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-
 // Output limits
 constexpr size_t MAX_BASH_OUTPUT_SIZE = 100 * 1024; // 100KB
 constexpr size_t MAX_GLOB_RESULTS = 500;

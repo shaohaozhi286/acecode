@@ -15,6 +15,20 @@ public:
         return "[Error] Required parameter missing: " + param_name;
     }
 
+    static std::string invalid_parameter(
+        const std::string& param_name,
+        const std::string& expectation
+    ) {
+        return "[Error] Invalid parameter " + param_name + ": " + expectation;
+    }
+
+    static std::string incompatible_parameters(
+        const std::string& first,
+        const std::string& second
+    ) {
+        return "[Error] " + first + " cannot be combined with " + second + ".";
+    }
+
     static std::string file_not_found(const std::string& path, const std::string& cwd = "") {
         std::string msg = "[Error] File not found: " + path;
         if (!cwd.empty()) {
@@ -31,8 +45,46 @@ public:
         return "[Error] Cannot write to file: " + path;
     }
 
-    static std::string file_too_large(size_t size_mb, const std::string& suggestion = "") {
-        std::string msg = "[Error] File too large (" + std::to_string(size_mb) + "MB).";
+    static std::string path_not_regular_file(const std::string& path) {
+        return "[Error] Path is not a regular file: " + path;
+    }
+
+    static std::string byte_offset_outside_file(
+        size_t offset,
+        size_t file_size
+    ) {
+        return "[Error] byte_offset " + std::to_string(offset) +
+               " is outside the file (size " + std::to_string(file_size) +
+               " bytes).";
+    }
+
+    static std::string too_many_lines_for_line_read() {
+        return "[Error] File has too many lines to address with 32-bit line "
+               "numbers. Use byte_offset/max_bytes.";
+    }
+
+    static std::string large_text_requires_streaming_encoding(
+        const std::string& encoding,
+        size_t size_mb,
+        size_t limit_mb
+    ) {
+        return "[Error] Large " + encoding +
+               " text file requires whole-file decoding (" +
+               std::to_string(size_mb) + "MiB; read materialization limit " +
+               std::to_string(limit_mb) +
+               "MiB). Convert it to UTF-8 for streaming inspection, or use "
+               "byte_offset/max_bytes windows.";
+    }
+
+    static std::string file_too_large_for_edit(
+        size_t size_mb,
+        size_t limit_mb,
+        const std::string& suggestion = ""
+    ) {
+        std::string msg =
+            "[Error] File is too large to edit safely as one in-memory operation (" +
+            std::to_string(size_mb) + "MiB; edit limit " +
+            std::to_string(limit_mb) + "MiB).";
         if (!suggestion.empty()) {
             msg += " " + suggestion;
         }

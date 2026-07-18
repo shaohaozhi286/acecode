@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <chrono>
 #include <map>
@@ -57,15 +58,23 @@ public:
         std::string path;
         int start_line = 0;
         int end_line = 0;
+        bool byte_mode = false;
+        uint64_t byte_offset = 0;
+        size_t max_bytes = 0;
 
         bool operator<(const ReadObservationKey& other) const {
-            return std::tie(path, start_line, end_line) <
-                   std::tie(other.path, other.start_line, other.end_line);
+            return std::tie(path, start_line, end_line, byte_mode,
+                            byte_offset, max_bytes) <
+                   std::tie(other.path, other.start_line, other.end_line,
+                            other.byte_mode, other.byte_offset, other.max_bytes);
         }
         bool operator==(const ReadObservationKey& other) const {
             return path == other.path &&
                    start_line == other.start_line &&
-                   end_line == other.end_line;
+                   end_line == other.end_line &&
+                   byte_mode == other.byte_mode &&
+                   byte_offset == other.byte_offset &&
+                   max_bytes == other.max_bytes;
         }
     };
 
@@ -99,19 +108,33 @@ public:
     bool has_unchanged_read_observation(
         const std::string& path,
         int start_line,
-        int end_line
+        int end_line,
+        bool byte_mode = false,
+        uint64_t byte_offset = 0,
+        size_t max_bytes = 0
     ) const;
     std::optional<ReadObservation> unchanged_read_observation(
         const std::string& path,
         int start_line,
-        int end_line
+        int end_line,
+        bool byte_mode = false,
+        uint64_t byte_offset = 0,
+        size_t max_bytes = 0
     ) const;
-    void record_read_observation(const std::string& path, int start_line, int end_line);
+    void record_read_observation(const std::string& path,
+                                 int start_line,
+                                 int end_line,
+                                 bool byte_mode = false,
+                                 uint64_t byte_offset = 0,
+                                 size_t max_bytes = 0);
     void record_read_observation_result(const std::string& path,
                                         int start_line,
                                         int end_line,
                                         const std::string& tool_call_id,
-                                        const std::string& persisted_output_path);
+                                        const std::string& persisted_output_path,
+                                        bool byte_mode = false,
+                                        uint64_t byte_offset = 0,
+                                        size_t max_bytes = 0);
     void invalidate_read_observations(const std::string& path);
     void clear_read_observations();
 

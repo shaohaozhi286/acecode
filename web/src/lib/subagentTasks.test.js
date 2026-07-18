@@ -23,6 +23,7 @@ import {
   normalizeSubagentTask,
   removeSubagentTask,
   runningSubagentCount,
+  shouldRefreshSubagentTasksFromStatus,
   subagentTaskGroups,
   taskDisplayTitle,
   taskElapsedSeconds,
@@ -113,6 +114,53 @@ run('applySubagentSessionEvent busy_changed 完成迁移 + usage 单调更新', 
   assert.equal(same[0].tokens, 40000);
   tasks = applySubagentSessionEvent(tasks, {
     type: 'busy_changed', session_id: 'child-1', payload: { busy: false },
+  });
+  assert.equal(tasks[0].status, SUBAGENT_TASK_STATUS.COMPLETED);
+});
+
+run('session_status 只为明确匹配当前 parent 的未知 child 触发刷新', () => {
+  const known = new Set(['child-known']);
+  assert.equal(shouldRefreshSubagentTasksFromStatus('parent-1', known, {
+    type: 'session_status',
+    session_id: 'child-new',
+    parent_session_id: 'parent-1',
+    payload: {
+      session_id: 'child-new',
+      parent_session_id: 'parent-1',
+      busy: true,
+    },
+  }), true);
+  assert.equal(shouldRefreshSubagentTasksFromStatus('parent-1', known, {
+    type: 'session_status',
+    payload: {
+      session_id: 'child-new',
+      parent_session_id: 'parent-2',
+      busy: true,
+    },
+  }), false);
+  assert.equal(shouldRefreshSubagentTasksFromStatus('parent-1', known, {
+    type: 'session_status',
+    payload: { session_id: 'unrelated', busy: true },
+  }), false);
+  assert.equal(shouldRefreshSubagentTasksFromStatus('parent-1', known, {
+    type: 'session_status',
+    payload: {
+      session_id: 'child-known',
+      parent_session_id: 'parent-1',
+      busy: true,
+    },
+  }), false);
+});
+
+run('已知 child 的 session_status 可直接完成任务状态', () => {
+  let tasks = mergeSubagentTaskList([], [makeSession({ busy: true })]);
+  tasks = applySubagentSessionEvent(tasks, {
+    type: 'session_status',
+    payload: {
+      session_id: 'child-1',
+      parent_session_id: 'parent-1',
+      busy: false,
+    },
   });
   assert.equal(tasks[0].status, SUBAGENT_TASK_STATUS.COMPLETED);
 });

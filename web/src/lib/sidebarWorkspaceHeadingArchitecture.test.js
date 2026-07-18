@@ -45,3 +45,17 @@ test('workspace heading actions stay mounted and reveal on pointer or keyboard i
     /\.ace-sidebar-section-header:hover \.ace-sidebar-section-actions,\s*\.ace-sidebar-section-header:focus-within \.ace-sidebar-section-actions\s*\{\s*opacity: 1;\s*pointer-events: auto;/,
   );
 });
+
+test('workspace collapse-all keeps disclosure-only reopen session lists compact', () => {
+  const sidebar = source('components/Sidebar.jsx');
+  assert.match(
+    sidebar,
+    /listKey\s*&& \(revealTarget\.noWorkspace \|\| !workspaceCollapseAllRef\.current\)\s*&& sessionListNeedsRevealExpansion/,
+  );
+
+  const toggleStart = sidebar.indexOf('const onToggle = (hash) => {');
+  const toggleEnd = sidebar.indexOf('\n  const onActivate', toggleStart);
+  assert.ok(toggleStart >= 0 && toggleEnd > toggleStart);
+  const toggleSource = sidebar.slice(toggleStart, toggleEnd);
+  assert.doesNotMatch(toggleSource, /workspaceCollapseAllRef\.current\s*=\s*false/);
+});

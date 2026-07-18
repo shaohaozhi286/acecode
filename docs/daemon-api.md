@@ -1831,11 +1831,12 @@ Session events are JSON objects:
 ```
 
 Most session event frames include a per-session `seq` and `timestamp_ms`.
-One exception is the `permission_request` snapshot frame that can be sent
-immediately after `subscribe_ack` when a permission request is already pending;
-that replay frame intentionally has no `seq` so clients do not advance or warn
-on the reconnect cursor. Clients should de-duplicate permission prompts by
-`payload.request_id`.
+The exceptions are pending `permission_request` and `question_request`
+snapshot frames sent immediately after `subscribe_ack`. These replay frames
+intentionally have no `seq` so clients do not advance or warn on the reconnect
+cursor. Clients should de-duplicate both interaction types by
+`payload.request_id` and retain resolved tombstones until the owning turn is
+terminal so a delayed snapshot cannot reopen a closed request.
 
 Session event `type` values from `SessionEventKind`:
 
@@ -1883,7 +1884,7 @@ All client frames are JSON:
 | Type | Payload | Behavior |
 |---|---|---|
 | `hello` | `{session_id,since}` | legacy bind; ack is `hello_ack` |
-| `subscribe` | `{session_id,since}` | subscribes one session; ack is `subscribe_ack`; may then send seq-less pending `permission_request` snapshots |
+| `subscribe` | `{session_id,since}` | subscribes one session; ack is `subscribe_ack`; may then send child status discovery and seq-less pending permission/question snapshots |
 | `unsubscribe` | `{session_id}` | unsubscribes; ack is `unsubscribe_ack` |
 | `status_subscribe` | `{workspace_hash}` or `{session_id}` | subscribes workspace attention status and sends snapshot |
 | `status_unsubscribe` | `{workspace_hash}` | unsubscribes; ack is `status_unsubscribe_ack` |
@@ -1955,6 +1956,30 @@ Subscribe ack:
 }
 ```
 
+For a subagent session, both the ack envelope and payload include the additive
+`parent_session_id` field:
+
+```json
+{
+  "type": "subscribe_ack",
+  "session_id": "child-sid",
+  "parent_session_id": "parent-sid",
+  "payload": {
+    "session_id": "child-sid",
+    "parent_session_id": "parent-sid",
+    "workspace_hash": "abc123",
+    "cwd": "C:/repo"
+  }
+}
+```
+
+Subscribing to a parent session also registers it for status delivery. The
+server sends current `session_status` frames for that parent's child sessions
+after the ack, and future child status broadcasts are delivered through the
+parent subscription even when there is no workspace subscription. Child status
+envelopes and payloads include `parent_session_id`; unrelated parent
+subscriptions do not receive them.
+
 Workspace status snapshot:
 
 ```json
@@ -1993,8 +2018,8 @@ for one session.
 4. If the replay gap is too old, fall back to
    `GET /api/sessions/:id/messages?since=0`.
 
-Seq-less pending `permission_request` snapshots do not affect the reconnect
-cursor; handle them by `request_id`.
+Seq-less pending `permission_request` and `question_request` snapshots do not
+affect the reconnect cursor; handle them by `request_id`.
 
 ---
 

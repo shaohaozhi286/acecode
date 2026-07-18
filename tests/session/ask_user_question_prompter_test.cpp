@@ -342,3 +342,59 @@ TEST(AskUserQuestionPrompter, EmitsRequestPayloadShape) {
     EXPECT_EQ(captured_payload["questions"].size(), qs.size());
     d.unsubscribe(sub);
 }
+
+// 场景:子会话在前端订阅前已经发出 QuestionRequest。pending snapshot 必须
+// 返回完整请求,回答后立即清空,否则后台任务会无限等待一个客户端永远没看到的
+// 问题。
+TEST(AskUserQuestionPrompter, SnapshotReturnsPendingRequestUntilResolved) {
+    EventDispatcher d;
+    AskUserQuestionPrompter prompter(d);
+    std::atomic<bool> abort_flag{false};
+    ResponderState state;
+
+    auto sub = d.subscribe([&](const SessionEvent& e) {
+        if (e.kind != SessionEventKind::QuestionRequest) return;
+        {
+            std::lock_guard<std::mutex> lk(state.mu);
+            state.request_id = e.payload.value("request_id", std::string{});
+            state.got = true;
+        }
+        state.cv.notify_all();
+    });
+
+    auto future = std::async(std::launch::async, [&] {
+        return prompter.prompt(sample_questions(), &abort_flag);
+    });
+
+    bool got_request = false;
+    {
+        std::unique_lock<std::mutex> lk(state.mu);
+        got_request = state.cv.wait_for(lk, 500ms, [&] { return state.got; });
+    }
+    EXPECT_TRUE(got_request);
+
+    if (got_request) {
+        const auto pending = prompter.snapshot_pending_requests();
+        EXPECT_EQ(pending.size(), 1u);
+        if (!pending.empty()) {
+            EXPECT_EQ(
+                pending[0].value("request_id", std::string{}),
+                state.request_id);
+            EXPECT_TRUE(pending[0].contains("questions"));
+            if (pending[0].contains("questions")) {
+                EXPECT_EQ(pending[0]["questions"], sample_questions());
+            }
+        }
+
+        AskUserQuestionResponse answer;
+        answer.cancelled = true;
+        prompter.notify_response(state.request_id, answer);
+    } else {
+        abort_flag.store(true);
+    }
+
+    ASSERT_EQ(future.wait_for(500ms), std::future_status::ready);
+    (void)future.get();
+    EXPECT_TRUE(prompter.snapshot_pending_requests().empty());
+    d.unsubscribe(sub);
+}

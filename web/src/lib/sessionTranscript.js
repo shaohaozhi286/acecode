@@ -677,6 +677,34 @@ export function preserveLiveAssistantTailOnLoad(loadedState, liveState) {
   };
 }
 
+// Initial history is fetched concurrently with the live WebSocket subscription.
+// If a newer busy/progress frame arrives first, accepting an older REST runtime
+// snapshot verbatim makes the composer and activity UI briefly fall back to
+// idle. Preserve only the active foreground runtime fields here; transcript
+// items still come from REST and the existing tail guard below.
+export function preserveLiveRuntimeOnLoad(loadedState, liveState) {
+  if (!loadedState) return loadedState;
+  const liveSeq = Number(liveState?.lastSeq) || 0;
+  const loadedSeq = Number(loadedState?.lastSeq) || 0;
+  if (liveSeq <= loadedSeq) return loadedState;
+
+  const liveIsRunning = liveState?.busy === true
+    || liveState?.status === 'running'
+    || !!liveState?.activeTurnId
+    || !!liveState?.activity;
+  if (!liveIsRunning) return loadedState;
+
+  return {
+    ...loadedState,
+    busy: !!liveState.busy,
+    activeTurnId: String(liveState.activeTurnId || ''),
+    status: 'running',
+    activity: liveState.activity && typeof liveState.activity === 'object'
+      ? { ...liveState.activity }
+      : null,
+  };
+}
+
 export function applyTranscriptReplayEvents(state, events = []) {
   let next = cloneState(state || createTranscriptState());
   const effects = [];
@@ -1354,7 +1382,8 @@ export function useSessionTranscript(sessionRef, options = {}) {
       // 防回退:实时 WS 可能在 getMessages(0) 解析期间已累积了更完整的当前
       // 回合内容,而这份 REST 快照更旧(messages 尚未含进行中的 assistant)。
       // 直接覆盖会把界面截断,这里保留更完整的实时尾巴。
-      const guarded = preserveLiveAssistantTailOnLoad(loaded.state, stateRef.current);
+      const runtimeGuarded = preserveLiveRuntimeOnLoad(loaded.state, stateRef.current);
+      const guarded = preserveLiveAssistantTailOnLoad(runtimeGuarded, stateRef.current);
       const nextState = {
         ...guarded,
         isLive,

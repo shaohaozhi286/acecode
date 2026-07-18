@@ -19,8 +19,11 @@ import { createNewSessionForActiveWorkspace } from './lib/newSession.js';
 import { goBack, goForward, pushNavigation } from './lib/navigationHistory.js';
 import {
   addPendingQuestionRequest,
+  clearResolvedQuestionRequests,
+  closePendingQuestionRequest,
   pendingQuestionSessionIds,
-  removePendingQuestionRequest,
+  questionOriginLabel,
+  visibleQuestionRequest,
 } from './lib/pendingQuestions.js';
 import { sessionDisplayTitle } from './lib/sessionTitle.js';
 import { notifySessionListChanged } from './lib/sessionListEvents.js';
@@ -568,8 +571,33 @@ export function App() {
       if (title) context.titles.set(sessionId, title);
     };
 
-    const permissionOwnerForSession = (sessionId) => {
+    const rememberSubagentOwner = (sessionId, parentSessionId, title = '') => {
+      if (!sessionId || !parentSessionId || sessionId === parentSessionId) return;
+      const previous = subagentDirectoryRef.current || { owners: {}, titles: {} };
+      if (previous.owners?.[sessionId] === parentSessionId
+          && (!title || previous.titles?.[sessionId] === title)) {
+        return;
+      }
+      const next = {
+        owners: {
+          ...(previous.owners || {}),
+          [sessionId]: parentSessionId,
+        },
+        titles: {
+          ...(previous.titles || {}),
+          ...(title ? { [sessionId]: title } : {}),
+        },
+      };
+      // Update the ref synchronously so an immediately following permission or
+      // question event cannot race React's state commit.
+      subagentDirectoryRef.current = next;
+      setSubagentDirectory(next);
+    };
+
+    const conversationOwnerForSession = (sessionId, eventPayload = {}) => {
       if (!sessionId) return '';
+      const explicitParentId = String(eventPayload.parent_session_id || '').trim();
+      if (explicitParentId) return explicitParentId;
       const directory = subagentDirectoryRef.current || {};
       if (directory.owners?.[sessionId]) return directory.owners[sessionId];
       const currentIndex = subagentIndexRef.current || {};
@@ -629,6 +657,7 @@ export function App() {
       const payload = { ...(msg.payload || {}) };
       if (msg.session_id && !payload.session_id) payload.session_id = msg.session_id;
       if ((msg.type === 'question_request'
+          || msg.type === 'question_closed'
           || msg.type === 'permission_request'
           || msg.type === 'permission_closed')
           && !payload.session_id) {
@@ -636,6 +665,10 @@ export function App() {
         payload.session_id = current.sessionId || current.id || '';
       }
       const sessionId = payload.session_id || msg.session_id || '';
+      const parentSessionId = payload.parent_session_id || msg.parent_session_id || '';
+      if (sessionId && parentSessionId) {
+        rememberSubagentOwner(sessionId, parentSessionId, payload.title || '');
+      }
       const workspaceHash = payload.workspace_hash || msg.workspace_hash || '';
       if (sessionId && workspaceHash) {
         context.workspaces.set(sessionId, workspaceHash);
@@ -666,6 +699,7 @@ export function App() {
         } else {
           if (payload.outcome) {
             setPermReqs((prev) => clearResolvedPermissionRequests(prev, sessionId));
+            setQuestionReqs((prev) => clearResolvedQuestionRequests(prev, sessionId));
           }
           finishMonitoredSession(sessionId, msg, payload);
         }
@@ -674,11 +708,18 @@ export function App() {
         const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
         for (const status of sessions) {
           const statusSessionId = status?.session_id || '';
-          if (!statusSessionId || status?.busy !== true) continue;
+          if (!statusSessionId) continue;
+          if (status.parent_session_id) {
+            rememberSubagentOwner(
+              statusSessionId,
+              status.parent_session_id,
+              status.title || '',
+            );
+          }
           if (status.workspace_hash) {
             context.workspaces.set(statusSessionId, status.workspace_hash);
           }
-          monitor.retain(statusSessionId);
+          if (status?.busy === true) monitor.retain(statusSessionId);
         }
       }
       if (msg.type === 'session_status' && sessionId) {
@@ -686,7 +727,7 @@ export function App() {
       }
       if (msg.type === 'permission_request') {
         if (sessionId) monitor.retain(sessionId);
-        const ownerSessionId = permissionOwnerForSession(sessionId);
+        const ownerSessionId = conversationOwnerForSession(sessionId, payload);
         setPermReqs((prev) => pushPermissionRequest(prev, payload, {
           ownerSessionId: ownerSessionId !== sessionId ? ownerSessionId : '',
         }));
@@ -696,21 +737,31 @@ export function App() {
         });
       }
       if (msg.type === 'permission_closed') {
-        const ownerSessionId = permissionOwnerForSession(sessionId);
+        const ownerSessionId = conversationOwnerForSession(sessionId, payload);
         setPermReqs((prev) => closePermissionRequest(prev, payload, {
           ownerSessionId: ownerSessionId !== sessionId ? ownerSessionId : '',
         }));
       }
       if (msg.type === 'question_request') {
         if (sessionId) monitor.retain(sessionId);
-        setQuestionReqs((prev) => addPendingQuestionRequest(prev, payload));
-        sendDesktopNotification('question', msg, payload);
+        const ownerSessionId = conversationOwnerForSession(sessionId, payload);
+        setQuestionReqs((prev) => addPendingQuestionRequest(prev, payload, {
+          ownerSessionId: ownerSessionId !== sessionId ? ownerSessionId : '',
+        }));
+        sendDesktopNotification('question', msg, {
+          ...payload,
+          session_id: ownerSessionId || sessionId,
+        });
       }
       if (msg.type === 'question_closed') {
-        setQuestionReqs((prev) => removePendingQuestionRequest(prev, payload.request_id));
+        const ownerSessionId = conversationOwnerForSession(sessionId, payload);
+        setQuestionReqs((prev) => closePendingQuestionRequest(prev, payload, {
+          ownerSessionId: ownerSessionId !== sessionId ? ownerSessionId : '',
+        }));
       }
       if (msg.type === 'done' && sessionId) {
         setPermReqs((prev) => clearResolvedPermissionRequests(prev, sessionId));
+        setQuestionReqs((prev) => clearResolvedQuestionRequests(prev, sessionId));
         finishMonitoredSession(sessionId, msg, payload);
       }
       const permissionTimeoutDiagnostic = msg.type === 'error'
@@ -720,6 +771,7 @@ export function App() {
           && sessionId
           && !permissionTimeoutDiagnostic) {
         setPermReqs((prev) => clearResolvedPermissionRequests(prev, sessionId));
+        setQuestionReqs((prev) => clearResolvedQuestionRequests(prev, sessionId));
         context.assistantText.delete(sessionId);
         monitor.release(sessionId);
       }
@@ -1014,7 +1066,9 @@ export function App() {
   const handleSubagentTasksChange = useCallback((info) => {
     const parentId = info?.parentId || '';
     const titles = info?.titles && typeof info.titles === 'object' ? info.titles : {};
-    setSubagentIndex({ parentId, titles });
+    const nextIndex = { parentId, titles };
+    subagentIndexRef.current = nextIndex;
+    setSubagentIndex(nextIndex);
     if (!parentId || Object.keys(titles).length === 0) return;
     setSubagentDirectory((previous) => {
       const owners = { ...previous.owners };
@@ -1197,8 +1251,8 @@ export function App() {
     [activeId, permReqs, permissionOwnership],
   );
   const pendingQuestionSessionIdsForSidebar = useMemo(
-    () => pendingQuestionSessionIds(questionReqs, activeId),
-    [questionReqs, activeId],
+    () => pendingQuestionSessionIds(questionReqs, activeId, permissionOwnership),
+    [questionReqs, activeId, permissionOwnership],
   );
 
   if (authState === 'checking') {
@@ -1227,18 +1281,21 @@ export function App() {
   const sidebarCollapsed = view !== 'single'
     || (projectSidebarCollapsed && !guidedTourPreparing && !guidedTourRun);
   const visibleQuestionReq = !visiblePermissionUnresolved
-    ? questionReqs.find((req) => {
-        const reqSid = req?.session_id || '';
-        if (!reqSid || (activeId && reqSid === activeId)) return true;
-        // 后台任务子会话的提问在其父会话(当前主会话)里显示与回答。
-        return !!(activeId &&
-                  subagentIndex.parentId === activeId &&
-                  subagentIndex.titles[reqSid]);
-      }) || null
+    ? (() => {
+        const request = visibleQuestionRequest(questionReqs, activeId, permissionOwnership);
+        return request
+          ? {
+              ...request,
+              origin_label: questionOriginLabel(request, permissionOwnership),
+            }
+          : null;
+      })()
     : null;
   const resolveVisibleQuestion = () => {
     if (!visibleQuestionReq?.request_id) return;
-    setQuestionReqs((prev) => removePendingQuestionRequest(prev, visibleQuestionReq.request_id));
+    setQuestionReqs((prev) => closePendingQuestionRequest(prev, visibleQuestionReq, {
+      ownerSessionId: visibleQuestionReq.owner_session_id || '',
+    }));
   };
   const autoFocusChatOnDesktopWindowFocus = shouldAutoFocusDesktopComposer({
     desktopMode: desktopModeRef.current,

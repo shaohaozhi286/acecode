@@ -83,6 +83,7 @@ TEST(FileReadToolSummary, SmallFileNoHint) {
     EXPECT_FALSE(get_metric(*r.summary, "size").empty());
     EXPECT_FALSE(has_metric(*r.summary, "hint"));
     EXPECT_EQ(r.output.find("[hint:"), std::string::npos);
+    EXPECT_NE(r.output.find("partial=\"false\""), std::string::npos);
 
     fs::remove(p);
 }
@@ -133,6 +134,154 @@ TEST(FileReadToolSummary, LargeFileWithRangeNoHint) {
     ASSERT_TRUE(r.summary.has_value());
     EXPECT_FALSE(has_metric(*r.summary, "hint"));
     EXPECT_EQ(r.output.find("[hint:"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, ReadsRangeBeyondTenMiBWithoutWholeFileRejection) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("");
+    {
+        std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
+        const std::string padding(90, 'x');
+        for (int line = 1; line <= 120000; ++line) {
+            if (line == 115000) {
+                ofs << "target-large-file";
+            } else {
+                ofs << "ordinary";
+            }
+            ofs << padding << "\n";
+        }
+    }
+    ASSERT_GT(fs::file_size(p), 10u * 1024u * 1024u);
+
+    ToolResult r = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"start_line", 115000},
+        {"end_line", 115000}
+    }).dump(), ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_NE(r.output.find("115000: target-large-file"), std::string::npos);
+    EXPECT_NE(r.output.find("partial=\"true\""), std::string::npos);
+    EXPECT_EQ(r.output.find("File too large"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, UnboundedReadStopsAtContentLimitWithByteContinuation) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file(std::string(60000, 'z'));
+    ToolResult r = tool.execute(
+        nlohmann::json({{"file_path", p.string()}}).dump(),
+        ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_LT(r.output.size(), 50u * 1024u);
+    EXPECT_NE(r.output.find("truncated=\"true\""), std::string::npos);
+    EXPECT_NE(r.output.find("partial=\"true\""), std::string::npos);
+    EXPECT_NE(r.output.find("next_byte_offset=\"49152\""), std::string::npos);
+    EXPECT_NE(r.output.find("Continue with byte_offset=49152"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, LargeSingleLineUsesBoundedByteContinuation) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("");
+    {
+        std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
+        const std::string block(1024 * 1024, 'q');
+        for (int i = 0; i < 11; ++i) ofs << block;
+    }
+    ASSERT_GT(fs::file_size(p), 10u * 1024u * 1024u);
+
+    ToolResult r = tool.execute(
+        nlohmann::json({{"file_path", p.string()}}).dump(),
+        ToolContext{});
+
+    ASSERT_TRUE(r.success) << r.output;
+    EXPECT_LT(r.output.size(), 50u * 1024u);
+    EXPECT_NE(r.output.find("truncated=\"true\""), std::string::npos);
+    EXPECT_NE(r.output.find("next_byte_offset=\"49152\""), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, ByteWindowsExposeExactIntervalsAndDoNotDeduplicateOffsets) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file("0123456789abcdef");
+    ToolResult first = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"byte_offset", 4},
+        {"max_bytes", 6}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+    EXPECT_NE(first.output.find("456789"), std::string::npos);
+    EXPECT_NE(first.output.find("byte_range=\"4-10\""), std::string::npos);
+    EXPECT_NE(first.output.find("next_byte_offset=\"10\""), std::string::npos);
+    EXPECT_NE(first.output.find("partial=\"true\""), std::string::npos);
+
+    ToolResult second = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"byte_offset", 10},
+        {"max_bytes", 6}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_NE(second.output.find("abcdef"), std::string::npos);
+    EXPECT_NE(second.output.find("byte_range=\"10-16\""), std::string::npos);
+    EXPECT_EQ(second.output.find("File unchanged since last read"), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, ByteWindowContinuationDoesNotSkipSplitUtf8Character) {
+    ToolImpl tool = create_file_read_tool();
+
+    auto p = make_temp_file(std::string(32767, 'a') + u8"中tail");
+    ToolResult first = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"byte_offset", 0}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(first.success) << first.output;
+    EXPECT_NE(first.output.find("byte_range=\"0-32767\""), std::string::npos);
+    EXPECT_NE(first.output.find("next_byte_offset=\"32767\""), std::string::npos);
+
+    ToolResult second = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"byte_offset", 32767},
+        {"max_bytes", 7}
+    }).dump(), ToolContext{});
+    ASSERT_TRUE(second.success) << second.output;
+    EXPECT_NE(second.output.find(u8"中tail"), std::string::npos);
+    EXPECT_NE(second.output.find("byte_range=\"32767-32774\""), std::string::npos);
+
+    fs::remove(p);
+}
+
+TEST(FileReadToolSummary, RejectsConflictingOrOversizedByteWindowArguments) {
+    ToolImpl tool = create_file_read_tool();
+    auto p = make_temp_file("alpha\n");
+
+    ToolResult conflict = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"start_line", 1},
+        {"byte_offset", 0}
+    }).dump(), ToolContext{});
+    EXPECT_FALSE(conflict.success);
+    EXPECT_NE(conflict.output.find("cannot be combined"), std::string::npos);
+
+    ToolResult oversized = tool.execute(nlohmann::json({
+        {"file_path", p.string()},
+        {"byte_offset", 0},
+        {"max_bytes", 32769}
+    }).dump(), ToolContext{});
+    EXPECT_FALSE(oversized.success);
+    EXPECT_NE(oversized.output.find("between 1 and 32768"), std::string::npos);
 
     fs::remove(p);
 }

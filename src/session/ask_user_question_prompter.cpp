@@ -13,7 +13,13 @@ AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
                                   const std::atomic<bool>* abort_flag,
                                   std::optional<std::chrono::milliseconds> timeout_override) {
     std::string req_id = make_request_id();
+
+    nlohmann::json payload;
+    payload["request_id"] = req_id;
+    payload["questions"]  = questions_payload;
+
     auto pending = std::make_shared<Pending>();
+    pending->request_payload = payload;
     {
         std::lock_guard<std::mutex> lk(pending_mu_);
         pending_[req_id] = pending;
@@ -21,9 +27,6 @@ AskUserQuestionPrompter::prompt(const nlohmann::json& questions_payload,
 
     // 推 QuestionRequest 事件;前端拿到后弹 modal,提交后通过
     // SessionClient::respond_question 回应。
-    nlohmann::json payload;
-    payload["request_id"] = req_id;
-    payload["questions"]  = questions_payload;
     events_.emit(SessionEventKind::QuestionRequest, payload);
 
     const auto effective_timeout = timeout_override.value_or(timeout_);
@@ -89,6 +92,20 @@ void AskUserQuestionPrompter::notify_response(const std::string& request_id,
 std::size_t AskUserQuestionPrompter::pending_count() const {
     std::lock_guard<std::mutex> lk(pending_mu_);
     return pending_.size();
+}
+
+std::vector<nlohmann::json>
+AskUserQuestionPrompter::snapshot_pending_requests() const {
+    std::vector<nlohmann::json> requests;
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    requests.reserve(pending_.size());
+    for (const auto& [request_id, pending] : pending_) {
+        if (!pending) continue;
+        auto payload = pending->request_payload;
+        if (!payload.contains("request_id")) payload["request_id"] = request_id;
+        requests.push_back(std::move(payload));
+    }
+    return requests;
 }
 
 } // namespace acecode
