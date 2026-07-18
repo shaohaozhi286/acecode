@@ -137,6 +137,7 @@
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/non_selectable.hpp"
+#include "tui/thinking_animation.hpp"
 #include "tui/thinking_heartbeat.hpp"
 #include "tui/tool_progress.hpp"
 #include "tui/tool_result_fold.hpp"
@@ -4156,47 +4157,29 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     if (!conhost_compat_layout && state.tool_running) {
         thinking_element = render_tool_progress(state);
     } else if (!conhost_compat_layout && state.is_waiting) {
-        int tick = anim_tick.load();
-        int dot_count = (tick % 3) + 1; // 1, 2, 3 dots cycling
+        const auto thinking_now = std::chrono::steady_clock::now();
+        const auto animation_origin =
+            state.thinking_start_time.time_since_epoch().count() != 0
+                ? state.thinking_start_time
+                : std::chrono::steady_clock::time_point{};
+        const long long animation_elapsed_ms = std::max<long long>(
+            0, std::chrono::duration_cast<std::chrono::milliseconds>(
+                   thinking_now - animation_origin).count());
 
-        std::string base = state.current_thinking_phrase;
-        std::vector<std::string> utf8_chars;
-        for (size_t i = 0; i < base.size();) {
-            unsigned char c = base[i];
-            size_t len = 1;
-            if ((c & 0xE0) == 0xC0) len = 2;
-            else if ((c & 0xF0) == 0xE0) len = 3;
-            else if ((c & 0xF8) == 0xF0) len = 4;
-            if (i + len > base.size()) len = base.size() - i;
-            utf8_chars.push_back(base.substr(i, len));
-            i += len;
-        }
-
-        int total_chars = static_cast<int>(utf8_chars.size());
-        int wave_pos = tick % (total_chars > 0 ? total_chars + 2 : 8);
-
+        // smooth-tui-thinking-animation:短语和固定三个点共用一条基于真实
+        // elapsed time 的流光。80ms 相邻帧只移动约 0.36 cell,再用颜色插值
+        // 补出亚字符过渡;漏帧时下一帧直接回到正确 phase,不会越跑越慢。
+        const std::vector<std::string> thinking_glyphs =
+            ftxui::Utf8ToGlyphs(state.current_thinking_phrase + "...");
+        const auto animation_frame = tui::make_thinking_animation_frame(
+            thinking_glyphs.size(), animation_elapsed_ms);
         Elements chars;
-        for (int i = 0; i < total_chars; i++) {
-            int dist = (i - wave_pos);
-            if (dist < 0) dist = -dist;
-            Color c;
-            if (dist == 0)
-                c = tui::theme().ui.accent;
-            else if (dist == 1)
-                c = is_light ? Color::RGB(130, 90, 0) : Color::RGB(180, 180, 60);
-            else if (dist == 2)
-                c = is_light ? Color::RGB(160, 130, 60) : Color::RGB(120, 120, 40);
-            else
-                c = tui::theme().ui.text_dim;
-            chars.push_back(text(utf8_chars[i]) | color(c));
-        }
-
-        // Dots also animate
-        for (int i = 0; i < 3; i++) {
-            if (i < dot_count)
-                chars.push_back(text(".") | color(tui::theme().ui.accent));
-            else
-                chars.push_back(text(".") | color(tui::theme().ui.text_dim));
+        for (std::size_t i = 0; i < thinking_glyphs.size(); ++i) {
+            const Color glyph_color = Color::Interpolate(
+                animation_frame.glyph_highlights[i],
+                tui::theme().ui.text_dim,
+                tui::theme().ui.accent);
+            chars.push_back(text(thinking_glyphs[i]) | color(glyph_color));
         }
 
         // inline-thinking-heartbeat:动画短语右侧挂 "[Ns · ↓ X tokens]" 数据段。
@@ -4205,13 +4188,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         // 天文数字,先例见 on_message 处的同款防御)。
         Element heartbeat = emptyElement();
         if (state.thinking_start_time.time_since_epoch().count() != 0) {
-            const auto hb_now = std::chrono::steady_clock::now();
-            const long hb_secs = static_cast<long>(
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    hb_now - state.thinking_start_time).count());
-            const long long hb_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    hb_now - state.thinking_start_time).count();
+            const long hb_secs = static_cast<long>(animation_elapsed_ms / 1000);
+            const long long hb_ms = animation_elapsed_ms;
             heartbeat = text("  " + tui::format_thinking_heartbeat(
                                         hb_secs, hb_ms,
                                         state.turn_completion_tokens_confirmed,
@@ -6072,23 +6050,45 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     // ---- Animation ticker thread ----
     std::atomic<bool> running{true};
     std::thread anim_thread([&running, &anim_tick, &state, &screen, &scroll_chat_by_lines, conhost_compat_layout] {
+        const auto legacy_tick_period = std::chrono::milliseconds(
+            conhost_compat_layout ? tui::kConhostAnimationFrameMs
+                                  : tui::kDefaultAnimationFrameMs);
+        auto last_legacy_tick_at = std::chrono::steady_clock::now();
         while (running) {
-            // drag-autoscroll: 拖动到边界期间提速到 50ms 唤醒, 其他时间保持 300ms.
-            // 每次唤醒前读最新 phase, 避免拖动开始后还得等一个完整的 300ms.
-            bool fast_tick = false;
+            // smooth-tui-thinking-animation:只有现代布局的 thinking 行真实可见
+            // 时才提速到 80ms。tool progress 接管该行后立即回到普通 cadence;
+            // drag-autoscroll 的 50ms 优先级仍最高,conhost 仍保持 1000ms。
+            bool drag_autoscroll_active = false;
+            bool thinking_visible = false;
             {
                 std::lock_guard<std::mutex> lk(state.mu);
-                fast_tick = (state.drag_phase == drag_scroll::Phase::ScrollingUp ||
-                             state.drag_phase == drag_scroll::Phase::ScrollingDown);
+                drag_autoscroll_active =
+                    state.drag_phase == drag_scroll::Phase::ScrollingUp ||
+                    state.drag_phase == drag_scroll::Phase::ScrollingDown;
+                thinking_visible = state.is_waiting && !state.tool_running;
             }
-            const int idle_tick_ms = conhost_compat_layout ? 1000 : 300;
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(fast_tick ? 50 : idle_tick_ms));
-            anim_tick++;
+            const int frame_interval_ms = tui::select_animation_frame_interval_ms(
+                conhost_compat_layout, thinking_visible,
+                drag_autoscroll_active);
+            std::this_thread::sleep_for(std::chrono::milliseconds(frame_interval_ms));
+
+            // anim_tick 仍服务 MCP 等旧动画。按真实经过时间维持原来的
+            // 300/1000ms phase,避免 thinking 的 80ms redraw 把其他效果加速。
+            const auto tick_now = std::chrono::steady_clock::now();
+            const auto legacy_elapsed = tick_now - last_legacy_tick_at;
+            if (legacy_elapsed >= legacy_tick_period) {
+                const auto legacy_steps =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        legacy_elapsed).count() /
+                    legacy_tick_period.count();
+                anim_tick.fetch_add(static_cast<int>(legacy_steps));
+                last_legacy_tick_at += legacy_tick_period * legacy_steps;
+            }
             // mouse-selection-copy: clear the "Copied N bytes" confirmation
             // ~2 s after the copy fired. Run before the post-event gate so we
             // always get a final render when the deadline passes.
             bool needs_post = false;
+            bool should_post = false;
             {
                 std::lock_guard<std::mutex> lk(state.mu);
                 const auto now = std::chrono::steady_clock::now();
@@ -6142,19 +6142,14 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                         }
                     }
                 }
+
+                // Drive re-render while waiting on LLM or while a live tool/
+                // subagent elapsed readout is visible,以及状态确认刚到清理期限时。
+                // 把读取留在同一把锁里,避免 ticker 与回调并发改 busy 字段。
+                should_post = needs_post || state.is_waiting || state.tool_running ||
+                    !state.subagent_tasks.empty();
             }
-            // Drive re-render while waiting on LLM OR while a tool is running
-            // (so the tool-timer chip in the status bar updates every second),
-            // or when we just cleared a pending status confirmation. 子代理
-            // 运行中同样持续 tick —— wait=false 点火后主会话 idle,右侧
-            // Background Tasks 的耗时要靠这里刷新。
-            bool has_subagent_tasks = false;
-            {
-                std::lock_guard<std::mutex> lk(state.mu);
-                has_subagent_tasks = !state.subagent_tasks.empty();
-            }
-            if (needs_post || state.is_waiting || state.tool_running ||
-                has_subagent_tasks) {
+            if (should_post) {
                 screen.PostEvent(Event::Custom);
             }
         }

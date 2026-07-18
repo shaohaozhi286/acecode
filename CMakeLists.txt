@@ -239,6 +239,7 @@ set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/sidebar_model.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/subagent_host.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/theme_palette.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/thinking_animation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/thinking_heartbeat.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/tool_result_fold.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/tool_row_format.cpp
