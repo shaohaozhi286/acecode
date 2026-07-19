@@ -14,7 +14,7 @@ The Windows desktop tray popup SHALL render its visible surface, rounded corners
 - **AND** Windows 11 SHALL NOT add a second corner, border, or system shadow
 
 ### Requirement: Tray popup chrome is DPI aware without changing content layout
-The Windows tray popup SHALL convert chrome design constants from DIP to device pixels exactly once using the configured scale factor of the monitor containing the tray anchor, independently from the process DPI-awareness mode, while preserving the existing visible menu width, row heights, and surface anchor.
+The Windows tray popup SHALL convert chrome design constants from DIP into its effective Win32 coordinate space exactly once, while preserving the existing visible menu width, row heights, and surface anchor. It SHALL use target monitor DPI only in a per-monitor-aware coordinate space, system DPI in a system-aware coordinate space, and 96 DPI in an unaware coordinate space.
 
 #### Scenario: Popup opens on a scaled display
 - **WHEN** the tray anchor is on a display whose configured scale factor differs from 100%
@@ -22,30 +22,45 @@ The Windows tray popup SHALL convert chrome design constants from DIP to device 
 - **AND** the transparent shadow inset SHALL NOT shift the visible surface away from its computed tray anchor
 
 #### Scenario: Windows 10 target display is configured to 100%
-- **WHEN** the target display scale is 100% even if the process or primary display reports a 144 system DPI
+- **WHEN** the target display scale is 100% and the popup uses a per-monitor-aware coordinate space
 - **THEN** popup geometry SHALL use 96 DPI
-- **AND** the visible menu surface SHALL retain its 280-pixel design width
+- **AND** the visible menu surface SHALL retain its 280-device-pixel design width
+
+#### Scenario: System-aware popup is virtualized onto a 150% target display
+- **WHEN** the effective popup context is system-aware at 96 system DPI and the target monitor scale is 150%
+- **THEN** ACECode SHALL lay out the popup at 96 DPI
+- **AND** SHALL NOT manually apply the target 150% factor before Windows applies its monitor virtualization
+
+#### Scenario: Unaware popup is virtualized onto a scaled display
+- **WHEN** the effective popup context is DPI-unaware
+- **THEN** ACECode SHALL lay out the popup at 96 DPI
+- **AND** SHALL leave the target-monitor scaling to Windows exactly once
 
 #### Scenario: Monitor scale query fails
 - **WHEN** the target monitor scale factor cannot be read
 - **THEN** popup geometry SHALL fall back to 96 DPI
 - **AND** SHALL NOT reuse a process-awareness-dependent system DPI
 
-### Requirement: Tray popup font composes display DPI and text size exactly once
-The Windows tray popup SHALL calculate its font height from the unscaled design font, the target monitor geometry DPI, and the Windows text-size percentage, applying each scale exactly once.
+### Requirement: Tray popup font composes layout DPI and text size exactly once
+The Windows tray popup SHALL calculate its font height from the unscaled design font, the effective popup coordinate-space DPI, and the Windows text-size percentage, applying each ACECode-owned scale exactly once.
 
 #### Scenario: Default-size Windows 10 display
 - **WHEN** Windows text size is 100% and the target monitor geometry DPI is 96
 - **THEN** the popup SHALL create its font at the 13-pixel design height
 
 #### Scenario: 140% 4K display
-- **WHEN** Windows text size is 100% and the target monitor reports 140% scale, producing 134 geometry DPI
+- **WHEN** Windows text size is 100%, the popup is per-monitor-aware, and the target monitor reports 140% scale, producing 134 layout DPI
 - **THEN** the popup SHALL create an 18-pixel font
 - **AND** text measurement and rendering SHALL use that same font
 
 #### Scenario: 150% display
-- **WHEN** Windows text size is 100% and the target monitor geometry DPI is 144
+- **WHEN** Windows text size is 100%, the popup is per-monitor-aware, and the target monitor layout DPI is 144
 - **THEN** the popup SHALL create a 20-pixel font
+
+#### Scenario: System-aware font is virtualized
+- **WHEN** Windows text size is 100%, the popup is system-aware at 96 system DPI, and the target monitor is 150%
+- **THEN** the popup SHALL create a 13-logical-pixel font
+- **AND** Windows SHALL provide the target-monitor transform instead of ACECode applying it a second time
 
 #### Scenario: Accessibility text size is enlarged
 - **WHEN** Windows text size is greater than 100%
@@ -75,6 +90,19 @@ The main Windows tray popup and every custom `More` submenu SHALL use the same l
 - **WHEN** the user opens a `More` row from either the Pinned or Recent section
 - **THEN** the submenu SHALL use the same corner and shadow treatment as the main popup
 - **AND** submenu placement SHALL be calculated from the main popup's visible surface rather than its transparent shadow bounds
+
+### Requirement: Popup creation uses one verified DPI context
+The Windows tray popup SHALL establish its DPI context before reading the tray anchor or monitor bounds and SHALL use the same context through top-level popup creation. A failed per-monitor request SHALL NOT be treated as proof that the thread is per-monitor-aware.
+
+#### Scenario: Per-monitor thread context is available
+- **WHEN** the user opens the tray popup on a Windows build that accepts a per-monitor thread context
+- **THEN** anchor coordinates, monitor bounds, popup layout, and layered-window creation SHALL all use that context
+- **AND** the previous thread context SHALL be restored after the open operation
+
+#### Scenario: Compatibility policy preserves a non-per-monitor context
+- **WHEN** the per-monitor thread request is unavailable, rejected, or overridden
+- **THEN** the popup SHALL select layout DPI from the effective context
+- **AND** diagnostics SHALL report target monitor scale, layout DPI, owner awareness, and popup awareness
 
 ### Requirement: Native fallback remains available
 The Windows tray implementation SHALL retain the native menu fallback when the initial custom layered popup cannot be created or rendered.

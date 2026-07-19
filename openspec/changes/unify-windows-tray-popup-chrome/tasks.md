@@ -40,3 +40,10 @@
 - [x] 7.2 Use the composed font height consistently for text measurement and popup rendering.
 - [x] 7.3 Add regressions for 96 DPI → 13px, 134 DPI → 18px, 144 DPI → 20px, and combined accessibility scaling.
 - [x] 7.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff without including unrelated worktree changes.
+
+## 8. DPI Awareness Coordinate-Space Correction
+
+- [x] 8.1 Add a pure awareness-to-layout-DPI helper and regressions for per-monitor, system-aware, unaware, and invalid contexts.
+- [x] 8.2 Enter a per-monitor thread DPI context before reading the tray anchor and keep it through custom popup creation, restoring the previous context afterward.
+- [x] 8.3 Fall back to the effective thread coordinate-space DPI when per-monitor mode is unavailable, and log target, layout, owner, and popup DPI contexts for machine-to-machine diagnosis.
+- [x] 8.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff without including unrelated worktree changes.

@@ -39,6 +39,13 @@ struct TrayPopupChromeGeometry {
     int surface_height = 0;
 };
 
+enum class TrayPopupDpiAwareness {
+    Unknown = -1,
+    Unaware = 0,
+    SystemAware = 1,
+    PerMonitorAware = 2,
+};
+
 inline int compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
     int monitor_scale_percent) {
     if (monitor_scale_percent < 100 || monitor_scale_percent > 500) {
@@ -48,9 +55,27 @@ inline int compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
         (96LL * monitor_scale_percent + 50) / 100);
 }
 
-inline int scale_tray_popup_size_px(int size_dip, int geometry_dpi) {
+inline int compute_tray_popup_layout_dpi(
+    int target_monitor_dpi,
+    int system_dpi,
+    TrayPopupDpiAwareness awareness) {
+    const int target_dpi = target_monitor_dpi > 0 ? target_monitor_dpi : 96;
+    const int fallback_system_dpi = system_dpi > 0 ? system_dpi : 96;
+    switch (awareness) {
+        case TrayPopupDpiAwareness::PerMonitorAware:
+            return target_dpi;
+        case TrayPopupDpiAwareness::SystemAware:
+            return fallback_system_dpi;
+        case TrayPopupDpiAwareness::Unaware:
+        case TrayPopupDpiAwareness::Unknown:
+            return 96;
+    }
+    return 96;
+}
+
+inline int scale_tray_popup_size_px(int size_dip, int layout_dpi) {
     const int size = std::max(0, size_dip);
-    const int dpi = geometry_dpi > 0 ? geometry_dpi : 96;
+    const int dpi = layout_dpi > 0 ? layout_dpi : 96;
     return static_cast<int>(
         (static_cast<long long>(size) * dpi + 48) / 96);
 }
@@ -64,10 +89,10 @@ inline int normalize_tray_popup_text_scale_percent(int text_scale_percent) {
 
 inline int compute_tray_popup_font_height_px(
     int base_font_height_dip,
-    int geometry_dpi,
+    int layout_dpi,
     int text_scale_percent) {
     const int base_height = std::max(1, base_font_height_dip);
-    const int dpi = geometry_dpi > 0 ? geometry_dpi : 96;
+    const int dpi = layout_dpi > 0 ? layout_dpi : 96;
     const int text_scale =
         normalize_tray_popup_text_scale_percent(text_scale_percent);
     constexpr long long kScaleDenominator = 96LL * 100;

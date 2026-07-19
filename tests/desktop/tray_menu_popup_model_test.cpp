@@ -153,6 +153,63 @@ TEST(TrayMenuPopupModel, InvalidMonitorScaleFallsBackToCompactGeometry) {
         96);
 }
 
+TEST(TrayMenuPopupModel, PerMonitorLayoutUsesTargetMonitorDpi) {
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            144,
+            96,
+            TrayPopupDpiAwareness::PerMonitorAware),
+        144);
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            96,
+            144,
+            TrayPopupDpiAwareness::PerMonitorAware),
+        96);
+}
+
+TEST(TrayMenuPopupModel, SystemAwareLayoutUsesSystemDpi) {
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            144,
+            96,
+            TrayPopupDpiAwareness::SystemAware),
+        96);
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            96,
+            144,
+            TrayPopupDpiAwareness::SystemAware),
+        144);
+}
+
+TEST(TrayMenuPopupModel, UnawareAndUnknownLayoutsStayAtNinetySixDpi) {
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            144,
+            144,
+            TrayPopupDpiAwareness::Unaware),
+        96);
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            144,
+            144,
+            TrayPopupDpiAwareness::Unknown),
+        96);
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            0,
+            0,
+            TrayPopupDpiAwareness::PerMonitorAware),
+        96);
+    EXPECT_EQ(
+        compute_tray_popup_layout_dpi(
+            144,
+            0,
+            TrayPopupDpiAwareness::SystemAware),
+        96);
+}
+
 TEST(TrayMenuPopupModel, MonitorScaleChangesMenuWidthExactlyOnce) {
     EXPECT_EQ(scale_tray_popup_size_px(280, 96), 280);
     EXPECT_EQ(scale_tray_popup_size_px(280, 120), 350);
@@ -169,13 +226,13 @@ TEST(TrayMenuPopupModel, EnlargedTextScaleRoundsFontHeightToNearestPixel) {
     EXPECT_EQ(compute_tray_popup_font_height_px(13, 96, 225), 29);
 }
 
-TEST(TrayMenuPopupModel, DisplayDpiScalesFontAtDefaultTextSize) {
+TEST(TrayMenuPopupModel, PerMonitorLayoutDpiScalesFontAtDefaultTextSize) {
     EXPECT_EQ(compute_tray_popup_font_height_px(13, 96, 100), 13);
     EXPECT_EQ(compute_tray_popup_font_height_px(13, 134, 100), 18);
     EXPECT_EQ(compute_tray_popup_font_height_px(13, 144, 100), 20);
 }
 
-TEST(TrayMenuPopupModel, DisplayDpiAndAccessibilityScaleComposeOnce) {
+TEST(TrayMenuPopupModel, LayoutDpiAndAccessibilityScaleComposeOnce) {
     EXPECT_EQ(compute_tray_popup_font_height_px(13, 134, 125), 23);
 }
 

@@ -29,6 +29,7 @@
 #include <memory>
 #include <mutex>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -167,8 +168,171 @@ constexpr int kTrayPopupShadowBlurDip = 12;
 constexpr int kTrayPopupShadowOffsetYDip = 2;
 constexpr int kTrayPopupShadowMaxAlpha = 46;
 
+struct TrayPopupDpiApi {
+    using SetThreadDpiAwarenessContextFn = HANDLE(WINAPI*)(HANDLE);
+    using GetThreadDpiAwarenessContextFn = HANDLE(WINAPI*)();
+    using GetWindowDpiAwarenessContextFn = HANDLE(WINAPI*)(HWND);
+    using GetAwarenessFromDpiAwarenessContextFn = int(WINAPI*)(HANDLE);
+    using GetDpiForSystemFn = UINT(WINAPI*)();
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+
+    SetThreadDpiAwarenessContextFn set_thread_context = nullptr;
+    GetThreadDpiAwarenessContextFn get_thread_context = nullptr;
+    GetWindowDpiAwarenessContextFn get_window_context = nullptr;
+    GetAwarenessFromDpiAwarenessContextFn get_awareness = nullptr;
+    GetDpiForSystemFn get_system_dpi = nullptr;
+    GetDpiForWindowFn get_window_dpi = nullptr;
+
+    TrayPopupDpiApi() {
+        HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+        if (!user32) return;
+        set_thread_context =
+            reinterpret_cast<SetThreadDpiAwarenessContextFn>(
+                ::GetProcAddress(user32, "SetThreadDpiAwarenessContext"));
+        get_thread_context =
+            reinterpret_cast<GetThreadDpiAwarenessContextFn>(
+                ::GetProcAddress(user32, "GetThreadDpiAwarenessContext"));
+        get_window_context =
+            reinterpret_cast<GetWindowDpiAwarenessContextFn>(
+                ::GetProcAddress(user32, "GetWindowDpiAwarenessContext"));
+        get_awareness =
+            reinterpret_cast<GetAwarenessFromDpiAwarenessContextFn>(
+                ::GetProcAddress(user32, "GetAwarenessFromDpiAwarenessContext"));
+        get_system_dpi = reinterpret_cast<GetDpiForSystemFn>(
+            ::GetProcAddress(user32, "GetDpiForSystem"));
+        get_window_dpi = reinterpret_cast<GetDpiForWindowFn>(
+            ::GetProcAddress(user32, "GetDpiForWindow"));
+    }
+};
+
+const TrayPopupDpiApi& tray_popup_dpi_api() {
+    static const TrayPopupDpiApi api;
+    return api;
+}
+
+TrayPopupDpiAwareness tray_popup_dpi_awareness_from_raw(int awareness) {
+    switch (awareness) {
+        case 0:
+            return TrayPopupDpiAwareness::Unaware;
+        case 1:
+            return TrayPopupDpiAwareness::SystemAware;
+        case 2:
+            return TrayPopupDpiAwareness::PerMonitorAware;
+        default:
+            return TrayPopupDpiAwareness::Unknown;
+    }
+}
+
+const char* tray_popup_dpi_awareness_name(TrayPopupDpiAwareness awareness) {
+    switch (awareness) {
+        case TrayPopupDpiAwareness::Unaware:
+            return "unaware";
+        case TrayPopupDpiAwareness::SystemAware:
+            return "system";
+        case TrayPopupDpiAwareness::PerMonitorAware:
+            return "per-monitor";
+        case TrayPopupDpiAwareness::Unknown:
+            return "unknown";
+    }
+    return "unknown";
+}
+
+TrayPopupDpiAwareness current_thread_dpi_awareness() {
+    const auto& api = tray_popup_dpi_api();
+    if (api.get_thread_context && api.get_awareness) {
+        return tray_popup_dpi_awareness_from_raw(
+            api.get_awareness(api.get_thread_context()));
+    }
+
+    if (HMODULE shcore = ::LoadLibraryW(L"Shcore.dll")) {
+        using GetProcessDpiAwarenessFn = HRESULT(WINAPI*)(HANDLE, int*);
+        auto get_process_awareness =
+            reinterpret_cast<GetProcessDpiAwarenessFn>(
+                ::GetProcAddress(shcore, "GetProcessDpiAwareness"));
+        int awareness = -1;
+        if (get_process_awareness &&
+            SUCCEEDED(get_process_awareness(::GetCurrentProcess(), &awareness))) {
+            ::FreeLibrary(shcore);
+            return tray_popup_dpi_awareness_from_raw(awareness);
+        }
+        ::FreeLibrary(shcore);
+    }
+    return TrayPopupDpiAwareness::Unknown;
+}
+
+TrayPopupDpiAwareness window_dpi_awareness(HWND hwnd) {
+    const auto& api = tray_popup_dpi_api();
+    if (hwnd && api.get_window_context && api.get_awareness) {
+        return tray_popup_dpi_awareness_from_raw(
+            api.get_awareness(api.get_window_context(hwnd)));
+    }
+    return TrayPopupDpiAwareness::Unknown;
+}
+
+int current_system_dpi() {
+    const auto& api = tray_popup_dpi_api();
+    if (api.get_system_dpi) {
+        const UINT dpi = api.get_system_dpi();
+        if (dpi > 0) return static_cast<int>(dpi);
+    }
+
+    HDC hdc = ::GetDC(nullptr);
+    const int dpi = hdc ? ::GetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    if (hdc) ::ReleaseDC(nullptr, hdc);
+    return dpi > 0 ? dpi : 96;
+}
+
+int window_dpi(HWND hwnd) {
+    const auto& api = tray_popup_dpi_api();
+    if (hwnd && api.get_window_dpi) {
+        const UINT dpi = api.get_window_dpi(hwnd);
+        if (dpi > 0) return static_cast<int>(dpi);
+    }
+    return 0;
+}
+
+class ScopedTrayPopupDpiContext {
+public:
+    ScopedTrayPopupDpiContext() {
+        set_context_ = tray_popup_dpi_api().set_thread_context;
+        if (!set_context_) return;
+
+        constexpr INT_PTR kPerMonitorAwareV2 = -4;
+        previous_context_ =
+            set_context_(reinterpret_cast<HANDLE>(kPerMonitorAwareV2));
+        if (previous_context_) {
+            requested_context_ = "per-monitor-v2";
+            return;
+        }
+
+        constexpr INT_PTR kPerMonitorAware = -3;
+        previous_context_ =
+            set_context_(reinterpret_cast<HANDLE>(kPerMonitorAware));
+        if (previous_context_) requested_context_ = "per-monitor";
+    }
+
+    ScopedTrayPopupDpiContext(const ScopedTrayPopupDpiContext&) = delete;
+    ScopedTrayPopupDpiContext& operator=(const ScopedTrayPopupDpiContext&) =
+        delete;
+
+    ~ScopedTrayPopupDpiContext() {
+        if (set_context_ && previous_context_) {
+            set_context_(previous_context_);
+        }
+    }
+
+    const char* requested_context_name() const {
+        return requested_context_;
+    }
+
+private:
+    TrayPopupDpiApi::SetThreadDpiAwarenessContextFn set_context_ = nullptr;
+    HANDLE previous_context_ = nullptr;
+    const char* requested_context_ = "unchanged";
+};
+
 struct Win32TrayPopupMetrics {
-    int dpi = 96;
+    int layout_dpi = 96;
     int text_scale_percent = 100;
     int font_height = kTrayPopupFontHeightDip;
     int width = kTrayPopupWidthDip;
@@ -253,32 +417,22 @@ int windows_text_scale_percent() {
     return normalize_tray_popup_text_scale_percent(static_cast<int>(value));
 }
 
-int point_geometry_dpi(POINT pt) {
-    // GetDpiForMonitor is process-awareness-dependent. On a Windows 10
-    // system-aware fallback it can return the primary system DPI for a
-    // different 100% target monitor, inflating the whole popup.
+int point_target_monitor_dpi(POINT pt, int& monitor_scale_percent) {
+    monitor_scale_percent = 100;
     HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     if (HMODULE shcore = ::LoadLibraryW(L"Shcore.dll")) {
         using GetScaleFactorForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int*);
         auto get_scale_factor = reinterpret_cast<GetScaleFactorForMonitorFn>(
             ::GetProcAddress(shcore, "GetScaleFactorForMonitor"));
-        int monitor_scale_percent = 100;
         if (get_scale_factor &&
             SUCCEEDED(get_scale_factor(monitor, &monitor_scale_percent))) {
             ::FreeLibrary(shcore);
-            const int dpi =
-                compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
-                    monitor_scale_percent);
-            LOG_DEBUG(
-                "[desktop] tray popup: monitor scale " +
-                std::to_string(monitor_scale_percent) +
-                "% -> geometry DPI " + std::to_string(dpi));
-            return dpi;
+            return compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
+                monitor_scale_percent);
         }
         ::FreeLibrary(shcore);
     }
-    LOG_DEBUG(
-        "[desktop] tray popup: monitor scale unavailable, using 96 geometry DPI");
+    monitor_scale_percent = 100;
     return 96;
 }
 
@@ -317,15 +471,15 @@ int measure_text_width(HDC hdc, const std::wstring& text) {
 
 Win32TrayPopupMetrics compute_popup_metrics(
     const TrayMenuLayout& layout,
-    int dpi,
+    int layout_dpi,
     int text_scale_percent) {
     Win32TrayPopupMetrics metrics;
-    metrics.dpi = dpi;
+    metrics.layout_dpi = layout_dpi;
     metrics.text_scale_percent =
         normalize_tray_popup_text_scale_percent(text_scale_percent);
     metrics.font_height = compute_tray_popup_font_height_px(
         kTrayPopupFontHeightDip,
-        dpi,
+        layout_dpi,
         metrics.text_scale_percent);
 
     HDC hdc = ::GetDC(nullptr);
@@ -343,31 +497,31 @@ Win32TrayPopupMetrics compute_popup_metrics(
     if (font) ::DeleteObject(font);
     if (hdc) ::ReleaseDC(nullptr, hdc);
 
-    metrics.outer_padding = scale_px(8, dpi);
-    metrics.horizontal_padding = scale_px(20, dpi);
-    metrics.text_gap = scale_px(16, dpi);
+    metrics.outer_padding = scale_px(8, layout_dpi);
+    metrics.horizontal_padding = scale_px(20, layout_dpi);
+    metrics.text_gap = scale_px(16, layout_dpi);
     const int geometry_row_height =
-        scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
+        scale_half_dip(kTrayPopupRowHeightHalfDip, layout_dpi);
     const int text_row_height = compute_tray_popup_text_row_height(
         geometry_row_height,
         metrics.font_height,
-        scale_px(12, dpi));
+        scale_px(12, layout_dpi));
     metrics.header_height = text_row_height;
     metrics.item_height = text_row_height;
     metrics.action_height = text_row_height;
-    metrics.separator_height = std::max(1, scale_px(1, dpi));
-    metrics.corner_radius = scale_px(12, dpi);
-    metrics.chrome_inset = scale_px(kTrayPopupChromeInsetDip, dpi);
-    metrics.shadow_blur = scale_px(kTrayPopupShadowBlurDip, dpi);
-    metrics.shadow_offset_y = scale_px(kTrayPopupShadowOffsetYDip, dpi);
+    metrics.separator_height = std::max(1, scale_px(1, layout_dpi));
+    metrics.corner_radius = scale_px(12, layout_dpi);
+    metrics.chrome_inset = scale_px(kTrayPopupChromeInsetDip, layout_dpi);
+    metrics.shadow_blur = scale_px(kTrayPopupShadowBlurDip, layout_dpi);
+    metrics.shadow_offset_y = scale_px(kTrayPopupShadowOffsetYDip, layout_dpi);
     metrics.shadow_max_alpha = kTrayPopupShadowMaxAlpha;
     if (max_subtitle_width > 0) {
         metrics.right_column_width = std::clamp(
             max_subtitle_width,
-            scale_px(64, dpi),
-            scale_px(104, dpi));
+            scale_px(64, layout_dpi),
+            scale_px(104, layout_dpi));
     }
-    metrics.width = scale_px(kTrayPopupWidthDip, dpi);
+    metrics.width = scale_px(kTrayPopupWidthDip, layout_dpi);
     return metrics;
 }
 
@@ -515,8 +669,11 @@ void fill_rounded_rect(HDC hdc, const RECT& rect, int radius, COLORREF color) {
 void draw_popup_chevron(HDC hdc, const RECT& row_rect, const Win32TrayPopupMetrics& metrics) {
     const int center_x = row_rect.right - metrics.horizontal_padding;
     const int center_y = (row_rect.top + row_rect.bottom) / 2;
-    const int half = scale_px(3, metrics.dpi);
-    HPEN pen = ::CreatePen(PS_SOLID, std::max(1, scale_px(1, metrics.dpi)), RGB(76, 76, 76));
+    const int half = scale_px(3, metrics.layout_dpi);
+    HPEN pen = ::CreatePen(
+        PS_SOLID,
+        std::max(1, scale_px(1, metrics.layout_dpi)),
+        RGB(76, 76, 76));
     HGDIOBJ old_pen = pen ? ::SelectObject(hdc, pen) : nullptr;
     ::MoveToEx(hdc, center_x - half, center_y - half, nullptr);
     ::LineTo(hdc, center_x, center_y);
@@ -678,7 +835,7 @@ void draw_tray_popup_contents(
 
         ::SetTextColor(draw, RGB(28, 28, 28));
         if (kind == TrayMenuEntryKind::MoreSubmenuRoot) {
-            text_rect.right -= scale_px(16, state.metrics.dpi);
+            text_rect.right -= scale_px(16, state.metrics.layout_dpi);
         }
         ::DrawTextW(draw,
                     label.c_str(),
@@ -692,24 +849,28 @@ void draw_tray_popup_contents(
 
     const int max_scroll = max_popup_scroll(state);
     if (max_scroll > 0) {
-        const int track_inset = scale_px(8, state.metrics.dpi);
+        const int track_inset = scale_px(8, state.metrics.layout_dpi);
         const int track_top = surface.top + track_inset;
         const int track_height = std::max(
             1, state.viewport_height - track_inset * 2);
         const int full_height = state.content_height + state.metrics.outer_padding * 2;
         const int thumb_height = std::clamp(
             state.viewport_height * track_height / std::max(1, full_height),
-            scale_px(18, state.metrics.dpi),
+            scale_px(18, state.metrics.layout_dpi),
             track_height);
         const int thumb_top = track_top +
             state.scroll_offset * (track_height - thumb_height) / max_scroll;
         RECT thumb{
-            surface.right - scale_px(4, state.metrics.dpi),
+            surface.right - scale_px(4, state.metrics.layout_dpi),
             thumb_top,
-            surface.right - scale_px(2, state.metrics.dpi),
+            surface.right - scale_px(2, state.metrics.layout_dpi),
             thumb_top + thumb_height,
         };
-        fill_rounded_rect(draw, thumb, scale_px(2, state.metrics.dpi), RGB(190, 190, 190));
+        fill_rounded_rect(
+            draw,
+            thumb,
+            scale_px(2, state.metrics.layout_dpi),
+            RGB(190, 190, 190));
     }
 
     ::SetBkMode(draw, old_bk_mode);
@@ -961,8 +1122,8 @@ bool open_tray_submenu(Win32TrayPopupWindow& main_window,
     const RECT main_rect = popup_surface_screen_rect(main_window);
     POINT monitor_point{main_rect.left, main_rect.top};
     const RECT work = monitor_work_area(monitor_point);
-    const int margin = scale_px(8, main_window.metrics.dpi);
-    const int gap = scale_px(6, main_window.metrics.dpi);
+    const int margin = scale_px(8, main_window.metrics.layout_dpi);
+    const int gap = scale_px(6, main_window.metrics.layout_dpi);
     const int desired_height = submenu->content_height + submenu->metrics.outer_padding * 2;
     const int work_left = static_cast<int>(work.left);
     const int work_top = static_cast<int>(work.top);
@@ -1180,22 +1341,27 @@ bool register_tray_popup_class(HINSTANCE hinst) {
 
 bool show_custom_tray_popup(HWND owner,
                             const TrayMenuLayout& layout,
-                            POINT anchor) {
+                            POINT anchor,
+                            const char* requested_dpi_context) {
     HINSTANCE hinst = ::GetModuleHandleW(nullptr);
     if (!register_tray_popup_class(hinst)) return false;
 
     auto controller = std::make_unique<Win32TrayPopupController>();
     controller->layout = layout;
-    const int dpi = point_geometry_dpi(anchor);
+    int monitor_scale_percent = 100;
+    const int target_monitor_dpi =
+        point_target_monitor_dpi(anchor, monitor_scale_percent);
+    const TrayPopupDpiAwareness thread_awareness =
+        current_thread_dpi_awareness();
+    const int system_dpi = current_system_dpi();
+    const int layout_dpi = compute_tray_popup_layout_dpi(
+        target_monitor_dpi,
+        system_dpi,
+        thread_awareness);
     const Win32TrayPopupMetrics metrics = compute_popup_metrics(
         layout,
-        dpi,
+        layout_dpi,
         windows_text_scale_percent());
-    LOG_DEBUG(
-        "[desktop] tray popup: geometry DPI " + std::to_string(metrics.dpi) +
-        ", text scale " + std::to_string(metrics.text_scale_percent) +
-        "%, font " + std::to_string(metrics.font_height) +
-        "px, surface width " + std::to_string(metrics.width) + "px");
     auto rows = build_tray_popup_rows(layout);
     auto main_window = make_popup_window_state(
         controller.get(), false, std::move(rows), metrics);
@@ -1223,9 +1389,39 @@ bool show_custom_tray_popup(HWND owner,
     const int x = position.x;
     const int y = position.y;
 
-    if (!create_popup_hwnd(*main_window, owner, x, y, height, false)) return false;
+    if (!create_popup_hwnd(*main_window, owner, x, y, height, false)) {
+        LOG_WARN(
+            "[desktop] tray popup DPI: request " +
+            std::string(requested_dpi_context) +
+            ", thread " + tray_popup_dpi_awareness_name(thread_awareness) +
+            ", target scale " + std::to_string(monitor_scale_percent) +
+            "%, target DPI " + std::to_string(target_monitor_dpi) +
+            ", system DPI " + std::to_string(system_dpi) +
+            ", layout DPI " + std::to_string(layout_dpi) +
+            "; popup creation failed");
+        return false;
+    }
     controller->main_window = std::move(main_window);
     g_tray_popup = std::move(controller);
+    const TrayPopupDpiAwareness owner_awareness =
+        window_dpi_awareness(owner);
+    const TrayPopupDpiAwareness popup_awareness =
+        window_dpi_awareness(g_tray_popup->main_window->hwnd);
+    LOG_DEBUG(
+        "[desktop] tray popup DPI: request " +
+        std::string(requested_dpi_context) +
+        ", thread " + tray_popup_dpi_awareness_name(thread_awareness) +
+        ", owner " + tray_popup_dpi_awareness_name(owner_awareness) +
+        ", popup " + tray_popup_dpi_awareness_name(popup_awareness) +
+        ", target scale " + std::to_string(monitor_scale_percent) +
+        "%, target DPI " + std::to_string(target_monitor_dpi) +
+        ", system DPI " + std::to_string(system_dpi) +
+        ", layout DPI " + std::to_string(layout_dpi) +
+        ", window DPI " +
+        std::to_string(window_dpi(g_tray_popup->main_window->hwnd)) +
+        ", text scale " + std::to_string(metrics.text_scale_percent) +
+        "%, font " + std::to_string(metrics.font_height) +
+        "px, surface width " + std::to_string(metrics.width) + "px");
 
     ::SetForegroundWindow(owner);
     const auto main_chrome = popup_chrome_geometry(
@@ -1351,10 +1547,15 @@ void show_native_fallback_menu(HWND hwnd,
 
 void show_context_menu(HWND hwnd) {
     close_tray_popup();
+    ScopedTrayPopupDpiContext dpi_context;
     TrayMenuLayout layout = compute_menu_layout(snapshot_payload());
     POINT pt{};
     ::GetCursorPos(&pt);
-    if (!show_custom_tray_popup(hwnd, layout, pt)) {
+    if (!show_custom_tray_popup(
+            hwnd,
+            layout,
+            pt,
+            dpi_context.requested_context_name())) {
         LOG_WARN("[desktop] tray: custom popup unavailable, using native fallback");
         show_native_fallback_menu(hwnd, layout, pt);
     }
