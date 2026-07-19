@@ -35,6 +35,16 @@ run('global find is controlled and searches only the conversation root', () => {
   assert.match(overlay, /placeholder="搜索当前对话内容"/);
 });
 
+run('global find closes only when a pointer starts outside the overlay', () => {
+  const overlay = source('components/GlobalFindOverlay.jsx');
+  assert.match(
+    overlay,
+    /const onPointerDown = \(event\) => \{\s*if \(overlayRef\.current\?\.contains\(event\.target\)\) return;\s*close\(\);\s*\}/,
+  );
+  assert.match(overlay, /document\.addEventListener\('pointerdown', onPointerDown, true\)/);
+  assert.match(overlay, /document\.removeEventListener\('pointerdown', onPointerDown, true\)/);
+});
+
 run('search palette renders task and project groups in one result sequence', () => {
   const palette = source('components/SearchPalette.jsx');
   assert.match(palette, /buildSearchResultSequence\(taskItems, projectItems\)/);

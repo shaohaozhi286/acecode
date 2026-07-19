@@ -33,6 +33,7 @@ export function GlobalFindOverlay({
   const [activeIndex, setActiveIndex] = useState(-1);
   const [focusNonce, setFocusNonce] = useState(0);
   const [navigationNonce, setNavigationNonce] = useState(0);
+  const overlayRef = useRef(null);
   const inputRef = useRef(null);
   const composingRef = useRef(false);
   const queryRef = useRef(query);
@@ -124,6 +125,16 @@ export function GlobalFindOverlay({
   }, [close, scopeKey]);
 
   useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (event) => {
+      if (overlayRef.current?.contains(event.target)) return;
+      close();
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [close, open]);
+
+  useEffect(() => {
     if (!open) return;
     clearFindHighlights(document);
     const nextMatches = collectFindMatches(resolveFindRoot(), query);
@@ -190,7 +201,12 @@ export function GlobalFindOverlay({
   const disabled = matches.length === 0;
 
   return (
-    <div className="ace-global-find" role="search" aria-label="当前对话内容查找">
+    <div
+      ref={overlayRef}
+      className="ace-global-find"
+      role="search"
+      aria-label="当前对话内容查找"
+    >
       <VsIcon name="search" size={15} className="ace-global-find-search" />
       <input
         ref={inputRef}
