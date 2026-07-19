@@ -6,12 +6,12 @@
 
 namespace acecode { namespace tui {
 
-inline constexpr int kThinkingAnimationFrameMs = 60;
+inline constexpr int kThinkingAnimationFrameMs = 20;
 inline constexpr int kDefaultAnimationFrameMs = 300;
 inline constexpr int kConhostAnimationFrameMs = 1000;
 inline constexpr int kDragAutoscrollFrameMs = 50;
 
-inline constexpr double kThinkingShimmerCellsPerSecond = 6.75;
+inline constexpr double kThinkingShimmerCellsPerSecond = 20.25;
 inline constexpr double kThinkingShimmerEdgePaddingCells = 2.5;
 
 struct ThinkingGlyphHighlight {

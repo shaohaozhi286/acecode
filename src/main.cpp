@@ -4168,7 +4168,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
 
         // smooth-tui-thinking-animation:短语和固定三个点共用一条基于真实
         // elapsed time 的方向性流光。黄色尾迹接亮白核心,前沿自然回落到灰色;
-        // 60ms 相邻帧只移动约 0.405 cell,漏帧时也会直接回到正确 phase。
+        // 20ms 相邻帧仍只移动约 0.405 cell,漏帧时也会直接回到正确 phase。
         const std::vector<std::string> thinking_glyphs =
             ftxui::Utf8ToGlyphs(state.current_thinking_phrase + "...");
         const auto animation_frame = tui::make_thinking_animation_frame(

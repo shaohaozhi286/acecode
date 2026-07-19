@@ -19,7 +19,7 @@ using acecode::tui::make_thinking_animation_frame;
 using acecode::tui::select_animation_frame_interval_ms;
 
 // 触发场景:共享 ticker 在拖动、旧终端、现代 thinking 与空闲状态间选择节奏。
-// 期望行为:拖动优先级最高;旧终端保持 1s;只有可见 thinking 使用 60ms。
+// 期望行为:拖动优先级最高;旧终端保持 1s;只有可见 thinking 使用 20ms。
 TEST(ThinkingAnimationCadence, SelectsActiveOnlyIntervalWithStablePriority) {
     EXPECT_EQ(select_animation_frame_interval_ms(false, true, true),
               kDragAutoscrollFrameMs);
@@ -31,7 +31,7 @@ TEST(ThinkingAnimationCadence, SelectsActiveOnlyIntervalWithStablePriority) {
               kDefaultAnimationFrameMs);
 
     EXPECT_EQ(kDragAutoscrollFrameMs, 50);
-    EXPECT_EQ(kThinkingAnimationFrameMs, 60);
+    EXPECT_EQ(kThinkingAnimationFrameMs, 20);
     EXPECT_EQ(kDefaultAnimationFrameMs, 300);
     EXPECT_EQ(kConhostAnimationFrameMs, 1000);
 }
@@ -39,7 +39,7 @@ TEST(ThinkingAnimationCadence, SelectsActiveOnlyIntervalWithStablePriority) {
 // 触发场景:为短语和固定三个点生成一帧双色流光权重。
 // 期望行为:每个 glyph 都有一组可用于两段颜色插值的 [0,1] 权重。
 TEST(ThinkingAnimationFrame, ProducesBoundedWarmAndWhiteWeightsPerGlyph) {
-    const auto frame = make_thinking_animation_frame(9, 640);
+    const auto frame = make_thinking_animation_frame(9, 321);
     ASSERT_EQ(frame.glyph_highlights.size(), 9u);
     float peak_warm = 0.0f;
     float peak_white = 0.0f;
@@ -55,12 +55,12 @@ TEST(ThinkingAnimationFrame, ProducesBoundedWarmAndWhiteWeightsPerGlyph) {
     EXPECT_GT(peak_white, 0.8f);
 }
 
-// 触发场景:相邻两帧相隔产品设定的 60ms。
-// 期望行为:速度从 4.5 精确增加 50% 到 6.75 cells/s,高光中心每帧
-// 只移动 0.405 个 cell,多个 glyph 的中间亮度随之渐变,
+// 触发场景:相邻两帧相隔产品设定的 20ms。
+// 期望行为:速度从 6.75 再增加 200% 到 20.25 cells/s,高光中心每帧
+// 仍只移动 0.405 个 cell,多个 glyph 的中间亮度随之渐变,
 // 而不是直接从一个整字符跳到下一个整字符。
 TEST(ThinkingAnimationFrame, AdjacentFramesInterpolateSubcellMovement) {
-    EXPECT_DOUBLE_EQ(kThinkingShimmerCellsPerSecond, 4.5 * 1.5);
+    EXPECT_DOUBLE_EQ(kThinkingShimmerCellsPerSecond, 6.75 * 3.0);
 
     const auto first = make_thinking_animation_frame(12, 500);
     const auto next = make_thinking_animation_frame(
@@ -68,6 +68,7 @@ TEST(ThinkingAnimationFrame, AdjacentFramesInterpolateSubcellMovement) {
 
     const double expected_delta =
         kThinkingShimmerCellsPerSecond * kThinkingAnimationFrameMs / 1000.0;
+    EXPECT_NEAR(expected_delta, 0.405, 1e-12);
     EXPECT_NEAR(next.highlight_center - first.highlight_center,
                 expected_delta, 1e-9);
 
