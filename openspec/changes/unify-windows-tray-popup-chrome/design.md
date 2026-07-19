@@ -10,6 +10,7 @@ The menu must retain its current payload, two-column session rows, `More` submen
 
 - Render the same popup surface, corner radius, and shadow on Windows 10 and Windows 11.
 - Keep geometry in DIPs and scale it exactly once for the monitor containing the tray anchor.
+- Keep the 100% Windows text-size font at the intended 13-pixel height instead of multiplying it by monitor display DPI.
 - Preserve current mouse, keyboard, scrolling, submenu, command-dispatch, and fallback behavior.
 - Keep transparent shadow pixels outside the interactive menu surface.
 
@@ -46,12 +47,19 @@ Corner radius, shadow extent, vertical shadow offset, blur falloff, and maximum 
 
 The first layered render is part of custom popup creation. If the window, DIB, or initial `UpdateLayeredWindow` operation fails, the custom window is destroyed and the existing native menu fallback is used. A later transient repaint failure leaves the previous layered pixels visible rather than changing menu backend mid-interaction.
 
+### 6. Separate display scaling from Windows text-size scaling
+
+Popup width, padding, row geometry, corners, and shadow remain monitor-DPI-scaled. The Segoe UI font instead starts from a 13-pixel design height and applies only the current Windows text-size percentage. At the default 100% text size this therefore creates a 13-pixel font even when the popup is on a 150% display.
+
+The text-size percentage is read whenever the tray popup opens, so a settings change is reflected without restarting ACECode. Values are constrained to Windows' supported 100%-225% range and fall back to 100% when the setting is unavailable. Text rows keep their existing DPI-scaled height unless an enlarged accessibility font requires more vertical space.
+
 ## Risks / Trade-offs
 
 - [Software alpha rendering adds work when a popup opens] → The surface is small, rendering happens only on open or visible state changes, and no timer is introduced.
 - [GDI drawing can overwrite DIB alpha bytes] → Keep separate surface-coverage and shadow-alpha masks, then restore alpha and premultiply every pixel after all text/row drawing.
 - [The expanded HWND could intercept clicks in invisible margins] → Return `HTTRANSPARENT` for every point outside the rounded menu surface.
 - [Layered rendering could fail on a constrained machine] → Treat initial render failure as custom-popup creation failure and retain the native menu fallback.
+- [Large accessibility text could clip inside the compact row layout] → Use the larger of the existing DPI-scaled row height and the scaled font height plus vertical padding.
 
 ## Migration Plan
 

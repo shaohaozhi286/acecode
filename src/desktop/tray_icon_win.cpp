@@ -161,7 +161,7 @@ constexpr wchar_t kTrayPopupWndClass[] = L"ACECodeDesktopTrayPopupWindow";
 constexpr UINT kTrayPopupDismissMessage = WM_APP + 0x351;
 constexpr int kTrayPopupWidthDip = 280;
 constexpr int kTrayPopupRowHeightHalfDip = 55;
-constexpr int kTrayPopupFontHeightDip = 13;
+constexpr int kTrayPopupFontHeightPx = 13;
 constexpr int kTrayPopupChromeInsetDip = 16;
 constexpr int kTrayPopupShadowBlurDip = 12;
 constexpr int kTrayPopupShadowOffsetYDip = 2;
@@ -169,6 +169,8 @@ constexpr int kTrayPopupShadowMaxAlpha = 46;
 
 struct Win32TrayPopupMetrics {
     int dpi = 96;
+    int text_scale_percent = 100;
+    int font_height = kTrayPopupFontHeightPx;
     int width = kTrayPopupWidthDip;
     int outer_padding = 8;
     int horizontal_padding = 20;
@@ -232,6 +234,25 @@ int scale_half_dip(int half_dip_value, int dpi) {
     return ::MulDiv(half_dip_value, dpi > 0 ? dpi : 96, 96 * 2);
 }
 
+int windows_text_scale_percent() {
+    // "Make text bigger" is independent from monitor DPI. The registry value
+    // is absent at the default 100%, so failure deliberately means 100%.
+    DWORD value = 100;
+    DWORD value_size = sizeof(value);
+    const LONG result = ::RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Accessibility",
+        L"TextScaleFactor",
+        RRF_RT_REG_DWORD,
+        nullptr,
+        &value,
+        &value_size);
+    if (result != ERROR_SUCCESS || value_size != sizeof(value)) {
+        return 100;
+    }
+    return normalize_tray_popup_text_scale_percent(static_cast<int>(value));
+}
+
 int hdc_dpi(HDC hdc) {
     const int dpi = hdc ? ::GetDeviceCaps(hdc, LOGPIXELSX) : 96;
     return dpi > 0 ? dpi : 96;
@@ -257,9 +278,9 @@ int point_dpi(POINT pt) {
     return dpi;
 }
 
-HFONT create_popup_font(int dpi) {
+HFONT create_popup_font(int font_height_px) {
     return ::CreateFontW(
-        -scale_px(kTrayPopupFontHeightDip, dpi),
+        -std::max(1, font_height_px),
         0,
         0,
         0,
@@ -290,9 +311,20 @@ int measure_text_width(HDC hdc, const std::wstring& text) {
     return rc.right - rc.left;
 }
 
-Win32TrayPopupMetrics compute_popup_metrics(const TrayMenuLayout& layout, int dpi) {
+Win32TrayPopupMetrics compute_popup_metrics(
+    const TrayMenuLayout& layout,
+    int dpi,
+    int text_scale_percent) {
+    Win32TrayPopupMetrics metrics;
+    metrics.dpi = dpi;
+    metrics.text_scale_percent =
+        normalize_tray_popup_text_scale_percent(text_scale_percent);
+    metrics.font_height = compute_tray_popup_font_height_px(
+        kTrayPopupFontHeightPx,
+        metrics.text_scale_percent);
+
     HDC hdc = ::GetDC(nullptr);
-    HFONT font = create_popup_font(dpi);
+    HFONT font = create_popup_font(metrics.font_height);
     HGDIOBJ old_font = nullptr;
     if (hdc && font) old_font = ::SelectObject(hdc, font);
 
@@ -306,14 +338,18 @@ Win32TrayPopupMetrics compute_popup_metrics(const TrayMenuLayout& layout, int dp
     if (font) ::DeleteObject(font);
     if (hdc) ::ReleaseDC(nullptr, hdc);
 
-    Win32TrayPopupMetrics metrics;
-    metrics.dpi = dpi;
     metrics.outer_padding = scale_px(8, dpi);
     metrics.horizontal_padding = scale_px(20, dpi);
     metrics.text_gap = scale_px(16, dpi);
-    metrics.header_height = scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
-    metrics.item_height = scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
-    metrics.action_height = scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
+    const int geometry_row_height =
+        scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
+    const int text_row_height = compute_tray_popup_text_row_height(
+        geometry_row_height,
+        metrics.font_height,
+        scale_px(12, dpi));
+    metrics.header_height = text_row_height;
+    metrics.item_height = text_row_height;
+    metrics.action_height = text_row_height;
     metrics.separator_height = std::max(1, scale_px(1, dpi));
     metrics.corner_radius = scale_px(12, dpi);
     metrics.chrome_inset = scale_px(kTrayPopupChromeInsetDip, dpi);
@@ -346,7 +382,7 @@ std::unique_ptr<Win32TrayPopupWindow> make_popup_window_state(
     state->controller = controller;
     state->is_submenu = is_submenu;
     state->metrics = metrics;
-    state->font = create_popup_font(metrics.dpi);
+    state->font = create_popup_font(metrics.font_height);
     int top = 0;
     for (auto& row : rows) {
         Win32TrayPopupRow view;
@@ -1146,7 +1182,10 @@ bool show_custom_tray_popup(HWND owner,
     auto controller = std::make_unique<Win32TrayPopupController>();
     controller->layout = layout;
     const int dpi = point_dpi(anchor);
-    const Win32TrayPopupMetrics metrics = compute_popup_metrics(layout, dpi);
+    const Win32TrayPopupMetrics metrics = compute_popup_metrics(
+        layout,
+        dpi,
+        windows_text_scale_percent());
     auto rows = build_tray_popup_rows(layout);
     auto main_window = make_popup_window_state(
         controller.get(), false, std::move(rows), metrics);

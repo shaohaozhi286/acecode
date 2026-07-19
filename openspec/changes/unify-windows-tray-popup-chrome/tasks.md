@@ -19,3 +19,10 @@
 
 - [x] 4.1 Run focused tray popup/model tests and strict OpenSpec validation.
 - [x] 4.2 Build the Windows desktop support target, run applicable tray regressions, and check the final diff for whitespace or unrelated changes.
+
+## 5. Text Scale Follow-up
+
+- [x] 5.1 Add pure helpers and tests for 100%-225% Windows text scaling and row-height accommodation.
+- [x] 5.2 Read the current Windows text-size percentage whenever the tray popup opens and use it for font creation and text measurement.
+- [x] 5.3 Keep menu geometry monitor-DPI-aware while preventing enlarged accessibility text from clipping.
+- [x] 5.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff.

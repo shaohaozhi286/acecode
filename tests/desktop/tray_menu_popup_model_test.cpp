@@ -129,6 +129,28 @@ TEST(TrayMenuPopupModel, FlipsAtTopLeftWithoutMovingCursorAnchor) {
     EXPECT_EQ(position.y, 20);
 }
 
+TEST(TrayMenuPopupModel, DefaultTextScaleKeepsFontAtItsPixelDesignHeight) {
+    EXPECT_EQ(compute_tray_popup_font_height_px(13, 100), 13);
+}
+
+TEST(TrayMenuPopupModel, EnlargedTextScaleRoundsFontHeightToNearestPixel) {
+    EXPECT_EQ(compute_tray_popup_font_height_px(13, 125), 16);
+    EXPECT_EQ(compute_tray_popup_font_height_px(13, 150), 20);
+    EXPECT_EQ(compute_tray_popup_font_height_px(13, 225), 29);
+}
+
+TEST(TrayMenuPopupModel, UnsupportedTextScaleFallsBackToOneHundredPercent) {
+    EXPECT_EQ(normalize_tray_popup_text_scale_percent(0), 100);
+    EXPECT_EQ(normalize_tray_popup_text_scale_percent(99), 100);
+    EXPECT_EQ(normalize_tray_popup_text_scale_percent(226), 100);
+    EXPECT_EQ(compute_tray_popup_font_height_px(13, 0), 13);
+}
+
+TEST(TrayMenuPopupModel, TextRowsExpandOnlyWhenFontNeedsMoreSpace) {
+    EXPECT_EQ(compute_tray_popup_text_row_height(41, 13, 18), 41);
+    EXPECT_EQ(compute_tray_popup_text_row_height(28, 29, 12), 41);
+}
+
 TEST(TrayMenuPopupModel, ChromeBoundsPreserveVisibleSurfaceAnchor) {
     const auto geometry = compute_tray_popup_chrome_geometry(
         776,

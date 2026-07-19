@@ -21,6 +21,23 @@ The Windows tray popup SHALL convert chrome design constants from DIP to device 
 - **THEN** the corner radius and shadow geometry SHALL scale proportionally with the menu surface
 - **AND** the transparent shadow inset SHALL NOT shift the visible surface away from its computed tray anchor
 
+### Requirement: Tray popup font follows text size independently from display DPI
+The Windows tray popup SHALL size its font from the Windows text-size percentage independently from the monitor display DPI, while all non-text popup geometry remains monitor-DPI-aware.
+
+#### Scenario: Default text size on a scaled display
+- **WHEN** Windows text size is 100% and the tray anchor is on a display whose DPI is 144
+- **THEN** the popup SHALL create its font at the 13-pixel design height
+- **AND** the popup width, padding, rows, corners, and shadow SHALL continue to use the 144-DPI geometry
+
+#### Scenario: Accessibility text size is enlarged
+- **WHEN** Windows text size is greater than 100%
+- **THEN** the popup font SHALL scale by that text-size percentage
+- **AND** text rows SHALL expand when required to prevent vertical clipping
+
+#### Scenario: Windows text-size setting is unavailable
+- **WHEN** the text-size value cannot be read or is outside the supported range
+- **THEN** the popup SHALL use the default 100% text size
+
 ### Requirement: Shadow pixels are not interactive menu content
 The expanded layered window SHALL treat every point outside the rounded white menu surface as transparent for hit testing, including partially visible shadow pixels.
 
