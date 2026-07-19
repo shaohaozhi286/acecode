@@ -474,8 +474,8 @@ body {
   to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
-/* WorkBuddy-style composer footer: fixed session controls surround a flexible,
-   horizontally accessible selected-context strip. */
+/* WorkBuddy-style composer footer: session controls stay on one line around a
+   flexible, horizontally accessible selected-context strip. */
 .ace-composer-card {
   container-type: inline-size;
 }
@@ -502,6 +502,11 @@ body {
   justify-content: flex-end;
   gap: 5px;
   flex-shrink: 0;
+}
+.ace-composer-permission-control,
+.ace-composer-model-control {
+  min-width: 0;
+  flex: 0 1 auto;
 }
 .ace-composer-context-strip {
   display: flex;
@@ -548,6 +553,7 @@ body {
   outline-offset: 1px;
 }
 .ace-composer-permission-button {
+  width: 100%;
   max-width: 156px;
 }
 .ace-composer-permission-label {
@@ -558,6 +564,7 @@ body {
   white-space: nowrap;
 }
 .ace-composer-model-button {
+  width: 100%;
   max-width: 176px;
 }
 .ace-composer-model-label {
@@ -652,15 +659,6 @@ body {
   gap: 7px;
   text-align: left;
   transition: background-color 0.14s ease;
-}
-@container (max-width: 560px) {
-  .ace-composer-session-footer {
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 2px;
-  }
-  .ace-composer-session-right {
-    justify-self: end;
-  }
 }
 @container (max-width: 410px) {
   .ace-composer-permission-button {

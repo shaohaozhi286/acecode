@@ -150,7 +150,10 @@ export function ComposerSessionControls({
           {addControl}
         </div>
 
-        <div data-composer-control="permission" className="relative shrink-0">
+        <div
+          data-composer-control="permission"
+          className="ace-composer-permission-control relative min-w-0"
+        >
           <button
             type="button"
             disabled={permissionSwitching}
@@ -228,7 +231,10 @@ export function ComposerSessionControls({
           </span>
         )}
 
-        <div data-composer-control="model" className="relative min-w-0 shrink-0">
+        <div
+          data-composer-control="model"
+          className="ace-composer-model-control relative min-w-0"
+        >
           <button
             type="button"
             disabled={modelSwitching || !canOpenModelMenu}

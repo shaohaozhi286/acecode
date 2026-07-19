@@ -60,9 +60,14 @@ run('composer footer preserves required left-to-right control order', () => {
   ]);
 });
 
-run('selected contexts remain horizontally accessible while fixed controls do not shrink', () => {
+run('selected contexts remain accessible while the composer footer stays on one row', () => {
+  const component = source('components/ComposerSessionControls.jsx');
   const styles = source('styles/globals.css');
 
+  assert.match(
+    styles,
+    /\.ace-composer-session-footer\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) auto;/s,
+  );
   assert.match(
     styles,
     /\.ace-composer-context-strip\s*\{[^}]*flex: 1 1 auto;[^}]*overflow-x: auto;/s,
@@ -71,7 +76,19 @@ run('selected contexts remain horizontally accessible while fixed controls do no
     styles,
     /\.ace-composer-session-right\s*\{[^}]*flex-shrink: 0;/s,
   );
-  assert.match(styles, /@container \(max-width: 560px\)/);
+  assert.match(
+    styles,
+    /\.ace-composer-permission-control,[\s\S]*?\.ace-composer-model-control\s*\{[^}]*flex: 0 1 auto;/,
+  );
+  assert.match(
+    component,
+    /data-composer-control="permission"\s+className="ace-composer-permission-control relative min-w-0"/,
+  );
+  assert.match(
+    component,
+    /data-composer-control="model"\s+className="ace-composer-model-control relative min-w-0"/,
+  );
+  assert.doesNotMatch(styles, /@container \(max-width: 560px\)/);
 });
 
 run('composer permission and model selectors share a 13px label size', () => {
