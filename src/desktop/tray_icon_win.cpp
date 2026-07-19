@@ -161,7 +161,7 @@ constexpr wchar_t kTrayPopupWndClass[] = L"ACECodeDesktopTrayPopupWindow";
 constexpr UINT kTrayPopupDismissMessage = WM_APP + 0x351;
 constexpr int kTrayPopupWidthDip = 280;
 constexpr int kTrayPopupRowHeightHalfDip = 55;
-constexpr int kTrayPopupFontHeightPx = 13;
+constexpr int kTrayPopupFontHeightDip = 13;
 constexpr int kTrayPopupChromeInsetDip = 16;
 constexpr int kTrayPopupShadowBlurDip = 12;
 constexpr int kTrayPopupShadowOffsetYDip = 2;
@@ -170,7 +170,7 @@ constexpr int kTrayPopupShadowMaxAlpha = 46;
 struct Win32TrayPopupMetrics {
     int dpi = 96;
     int text_scale_percent = 100;
-    int font_height = kTrayPopupFontHeightPx;
+    int font_height = kTrayPopupFontHeightDip;
     int width = kTrayPopupWidthDip;
     int outer_padding = 8;
     int horizontal_padding = 20;
@@ -324,7 +324,8 @@ Win32TrayPopupMetrics compute_popup_metrics(
     metrics.text_scale_percent =
         normalize_tray_popup_text_scale_percent(text_scale_percent);
     metrics.font_height = compute_tray_popup_font_height_px(
-        kTrayPopupFontHeightPx,
+        kTrayPopupFontHeightDip,
+        dpi,
         metrics.text_scale_percent);
 
     HDC hdc = ::GetDC(nullptr);
@@ -1190,6 +1191,11 @@ bool show_custom_tray_popup(HWND owner,
         layout,
         dpi,
         windows_text_scale_percent());
+    LOG_DEBUG(
+        "[desktop] tray popup: geometry DPI " + std::to_string(metrics.dpi) +
+        ", text scale " + std::to_string(metrics.text_scale_percent) +
+        "%, font " + std::to_string(metrics.font_height) +
+        "px, surface width " + std::to_string(metrics.width) + "px");
     auto rows = build_tray_popup_rows(layout);
     auto main_window = make_popup_window_state(
         controller.get(), false, std::move(rows), metrics);

@@ -31,17 +31,25 @@ The Windows tray popup SHALL convert chrome design constants from DIP to device 
 - **THEN** popup geometry SHALL fall back to 96 DPI
 - **AND** SHALL NOT reuse a process-awareness-dependent system DPI
 
-### Requirement: Tray popup font follows text size independently from display DPI
-The Windows tray popup SHALL size its font from the Windows text-size percentage independently from the monitor display DPI, while all non-text popup geometry remains monitor-DPI-aware.
+### Requirement: Tray popup font composes display DPI and text size exactly once
+The Windows tray popup SHALL calculate its font height from the unscaled design font, the target monitor geometry DPI, and the Windows text-size percentage, applying each scale exactly once.
 
-#### Scenario: Default text size on a scaled display
-- **WHEN** Windows text size is 100% and the tray anchor is on a display whose DPI is 144
+#### Scenario: Default-size Windows 10 display
+- **WHEN** Windows text size is 100% and the target monitor geometry DPI is 96
 - **THEN** the popup SHALL create its font at the 13-pixel design height
-- **AND** the popup width, padding, rows, corners, and shadow SHALL continue to use the 144-DPI geometry
+
+#### Scenario: 140% 4K display
+- **WHEN** Windows text size is 100% and the target monitor reports 140% scale, producing 134 geometry DPI
+- **THEN** the popup SHALL create an 18-pixel font
+- **AND** text measurement and rendering SHALL use that same font
+
+#### Scenario: 150% display
+- **WHEN** Windows text size is 100% and the target monitor geometry DPI is 144
+- **THEN** the popup SHALL create a 20-pixel font
 
 #### Scenario: Accessibility text size is enlarged
 - **WHEN** Windows text size is greater than 100%
-- **THEN** the popup font SHALL scale by that text-size percentage
+- **THEN** the monitor-DPI-scaled popup font SHALL additionally scale by that text-size percentage exactly once
 - **AND** text rows SHALL expand when required to prevent vertical clipping
 
 #### Scenario: Windows text-size setting is unavailable

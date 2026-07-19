@@ -33,3 +33,10 @@
 - [x] 6.2 Replace the process-awareness-dependent `GetDpiForMonitor` query with the target monitor's configured scale factor and a compact 96-DPI fallback.
 - [x] 6.3 Verify that 100% monitor scale preserves the 280-pixel menu width while higher configured scales still scale geometry exactly once.
 - [x] 6.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff without including unrelated worktree changes.
+
+## 7. High-DPI Typography Correction
+
+- [x] 7.1 Replace the text-only font helper with a single composed display-DPI and text-scale calculation.
+- [x] 7.2 Use the composed font height consistently for text measurement and popup rendering.
+- [x] 7.3 Add regressions for 96 DPI → 13px, 134 DPI → 18px, 144 DPI → 20px, and combined accessibility scaling.
+- [x] 7.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff without including unrelated worktree changes.

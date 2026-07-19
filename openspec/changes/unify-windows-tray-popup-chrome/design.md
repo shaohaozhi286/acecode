@@ -10,7 +10,7 @@ The menu must retain its current payload, two-column session rows, `More` submen
 
 - Render the same popup surface, corner radius, and shadow on Windows 10 and Windows 11.
 - Keep geometry in DIPs and scale it exactly once from the configured scale factor of the monitor containing the tray anchor.
-- Keep the 100% Windows text-size font at the intended 13-pixel height instead of multiplying it by monitor display DPI.
+- Keep the font at its intended 13-pixel height only at 96 DPI/100% text size, then apply monitor DPI and Windows text-size scaling exactly once each.
 - Preserve current mouse, keyboard, scrolling, submenu, command-dispatch, and fallback behavior.
 - Keep transparent shadow pixels outside the interactive menu surface.
 
@@ -47,11 +47,11 @@ Corner radius, shadow extent, vertical shadow offset, blur falloff, and maximum 
 
 The first layered render is part of custom popup creation. If the window, DIB, or initial `UpdateLayeredWindow` operation fails, the custom window is destroyed and the existing native menu fallback is used. A later transient repaint failure leaves the previous layered pixels visible rather than changing menu backend mid-interaction.
 
-### 6. Separate display scaling from Windows text-size scaling
+### 6. Compose display scaling and Windows text-size scaling
 
-Popup width, padding, row geometry, corners, and shadow remain monitor-DPI-scaled. The Segoe UI font instead starts from a 13-pixel design height and applies only the current Windows text-size percentage. At the default 100% text size this therefore creates a 13-pixel font even when the popup is on a 150% display.
+Popup width, padding, row geometry, corners, shadow, and the Segoe UI font all start from design values at 96 DPI. The font additionally honors the independent Windows text-size percentage. Its pixel height is therefore calculated in one step as `round(13 × geometryDpi / 96 × textScalePercent / 100)`.
 
-The text-size percentage is read whenever the tray popup opens, so a settings change is reflected without restarting ACECode. Values are constrained to Windows' supported 100%-225% range and fall back to 100% when the setting is unavailable. Text rows keep their existing DPI-scaled height unless an enlarged accessibility font requires more vertical space.
+At 96 DPI/100% text size the font remains 13 pixels. The observed 4K monitor reports 140% (`geometryDpi = 134`), so the same 100% text-size setting produces an 18-pixel font instead of the incorrect 13-pixel font. A 150% display produces 20 pixels. The text-size percentage is read whenever the tray popup opens, so a settings change is reflected without restarting ACECode. Values are constrained to Windows' supported 100%-225% range and fall back to 100% when unavailable. Text rows keep their existing DPI-scaled height unless the composed font height requires more vertical space.
 
 ### 7. Query the monitor scale directly instead of inferring it from process DPI
 
@@ -66,6 +66,7 @@ The popup will dynamically call `GetScaleFactorForMonitor` for the monitor conta
 - [The expanded HWND could intercept clicks in invisible margins] → Return `HTTRANSPARENT` for every point outside the rounded menu surface.
 - [Layered rendering could fail on a constrained machine] → Treat initial render failure as custom-popup creation failure and retain the native menu fallback.
 - [Large accessibility text could clip inside the compact row layout] → Use the larger of the existing DPI-scaled row height and the scaled font height plus vertical padding.
+- [Display DPI or text scale could be applied twice] → Compute the font height in one pure helper from the unscaled 13-pixel design value, geometry DPI, and text scale, with explicit 96/134/144-DPI tests.
 - [Monitor scale query could fail on a constrained Windows image] → Fall back to the compact 96-DPI design geometry and retain functional input/rendering.
 
 ## Migration Plan

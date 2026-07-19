@@ -63,14 +63,20 @@ inline int normalize_tray_popup_text_scale_percent(int text_scale_percent) {
 }
 
 inline int compute_tray_popup_font_height_px(
-    int base_font_height_px,
+    int base_font_height_dip,
+    int geometry_dpi,
     int text_scale_percent) {
-    const int base_height = std::max(1, base_font_height_px);
-    const int scale = normalize_tray_popup_text_scale_percent(text_scale_percent);
+    const int base_height = std::max(1, base_font_height_dip);
+    const int dpi = geometry_dpi > 0 ? geometry_dpi : 96;
+    const int text_scale =
+        normalize_tray_popup_text_scale_percent(text_scale_percent);
+    constexpr long long kScaleDenominator = 96LL * 100;
     return std::max(
         1,
         static_cast<int>(
-            (static_cast<long long>(base_height) * scale + 50) / 100));
+            (static_cast<long long>(base_height) * dpi * text_scale +
+             kScaleDenominator / 2) /
+            kScaleDenominator));
 }
 
 inline int compute_tray_popup_text_row_height(

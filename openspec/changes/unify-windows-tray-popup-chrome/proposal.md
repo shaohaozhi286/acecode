@@ -8,7 +8,7 @@ The Windows tray popup still delegates its outer shadow and part of its corner t
 - Use one explicit rounded-surface geometry on supported Windows versions, avoiding the current Win32 radius/diameter ambiguity.
 - Suppress version-specific DWM corner and border decoration so Windows 10 and Windows 11 use the same popup geometry.
 - Apply the same chrome path to the main tray popup and its `More` submenus.
-- Decouple popup typography from monitor display DPI: menu geometry remains DPI-aware, while the font follows the Windows text-size setting and stays at its 13-pixel design height when text size is 100%.
+- Compose popup typography from both monitor display DPI and the Windows text-size setting: the 13-pixel design font stays 13 pixels at 96 DPI/100% text size and scales proportionally on high-DPI displays.
 - Derive popup geometry from the target monitor's configured scale factor instead of the process-awareness-dependent `GetDpiForMonitor` result, so a 100% Windows 10 display keeps the 280-pixel design width.
 - Add focused regression coverage for deterministic popup chrome geometry and retain the native menu only as a creation-failure fallback.
 
