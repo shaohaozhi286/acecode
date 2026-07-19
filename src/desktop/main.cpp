@@ -9,7 +9,7 @@
 //   5. 若 active workspace 存在 → DaemonPool::activate → 拼 URL → navigate
 //      若不存在 → 仍启动 shared daemon 只用于承载前端,sidebar 渲染为空列表 + "+ 添加项目"
 //   6. WebHost.run() 阻塞直到窗口关闭
-//   7. quit: pool.stop_all() + 写 last_active_workspace_hash
+//   7. quit: pool.shutdown_all() 按用户策略 stop/release + 写 last_active
 //
 // daemon 端通过 workspace-aware API 在同一进程内服务多个 workspace。
 
@@ -21,7 +21,7 @@
 #include "edge_app_launcher.hpp"
 #include "external_url.hpp"
 #include "folder_picker.hpp"
-#include "notifications_win.hpp"
+#include "notifications.hpp"
 #include "open_in_explorer.hpp"
 #include "pick_active.hpp"
 #include "single_instance.hpp"
@@ -33,6 +33,8 @@
 #include "workspace_registry.hpp"
 
 #include "../config/config.hpp"
+#include "../daemon/platform.hpp"
+#include "../daemon/runtime_files.hpp"
 #include "../utils/clipboard.hpp"
 #include "../utils/base64.hpp"
 #include "../utils/cwd_hash.hpp"
@@ -40,6 +42,7 @@
 #include "../utils/logger.hpp"
 #include "../utils/state_file.hpp"
 #include "../utils/utf8_path.hpp"
+#include "../utils/uuid.hpp"
 #include "version.hpp"
 
 #include <nlohmann/json.hpp>
@@ -613,7 +616,7 @@ int run_browser_fallback(const std::string& url,
     if (edge_process) ::CloseHandle(static_cast<HANDLE>(edge_process));
     shutdown_tray_icon();
 
-    auto failures = pool.stop_all();
+    auto failures = pool.shutdown_all();
     return failures.empty() ? 0 : 100;
 #else
     // 非 Windows:desktop 用 WebKitGTK,几乎不会走到这里。best-effort 开默认浏览器
@@ -624,7 +627,7 @@ int run_browser_fallback(const std::string& url,
     if (!ext.ok) {
         LOG_ERROR("[desktop] browser fallback failed to open default browser: " + ext.error);
     }
-    auto failures = pool.stop_all();
+    auto failures = pool.shutdown_all();
     return failures.empty() ? (ext.ok ? 0 : 1) : 100;
 #endif
 }
@@ -677,6 +680,20 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    const std::int64_t desktop_owner_pid =
+        acecode::daemon::current_pid();
+    const std::string desktop_owner_instance = acecode::generate_uuid();
+    const std::string shared_run_dir = desktop_shared_run_dir();
+    if (!acecode::daemon::write_desktop_owner_record(
+            shared_run_dir,
+            acecode::daemon::DesktopOwnerRecord{
+                desktop_owner_pid,
+                desktop_owner_instance,
+                acecode::daemon::now_unix_ms(),
+            })) {
+        LOG_WARN("[desktop] failed to publish Desktop owner record");
+    }
+
     SplashScreen splash;
     splash.show();
 
@@ -685,6 +702,7 @@ int main(int argc, char** argv) {
     // 默认值仍生效。Daemon 子进程会自己再次 load_config,所以 Desktop 这次读
     // 不会污染或覆盖 daemon 端配置。
     acecode::AppConfig desktop_cfg;
+    std::mutex desktop_config_mu;
     try {
         desktop_cfg = acecode::load_config();
     } catch (const std::exception& e) {
@@ -752,6 +770,15 @@ int main(int argc, char** argv) {
     //   b) WebView2 parent 不 hide,只是在屏幕外可见,避免 hidden controller
     //      暂停渲染,同时用户只能看到透明 icon。
     DaemonPool pool;
+    pool.set_keep_alive_on_exit(
+        desktop_cfg.desktop.continue_background_process);
+    auto configure_managed_request =
+        [&](ActivateRequest& request) {
+            request.run_dir = shared_run_dir;
+            request.desktop_managed = true;
+            request.desktop_owner_pid = desktop_owner_pid;
+            request.desktop_owner_instance = desktop_owner_instance;
+        };
     std::mutex active_mu;
     std::string active_hash_dynamic = active_hash; // 后续切 workspace 时更新
 
@@ -774,7 +801,7 @@ int main(int argc, char** argv) {
             req.daemon_exe_path = daemon_exe;
             req.static_dir = dev_web_dir;
             req.context_id = kSharedDaemonContextId;
-            req.run_dir = desktop_shared_run_dir();
+            configure_managed_request(req);
             req.native_folder_picker_enabled = true;
             ActivateResult r;
             if (launch_cwd.empty()) {
@@ -807,7 +834,7 @@ int main(int argc, char** argv) {
         req.daemon_exe_path = daemon_exe;
         req.static_dir = dev_web_dir;
         req.context_id = kSharedDaemonContextId;
-        req.run_dir = desktop_shared_run_dir();
+        configure_managed_request(req);
         req.native_folder_picker_enabled = true;
         ActivateResult r;
         if (launch_cwd.empty()) {
@@ -859,7 +886,7 @@ int main(int argc, char** argv) {
     host.set_title("ACECode");
     host.set_size(kDefaultDesktopWindowWidth, kDefaultDesktopWindowHeight);
 
-    // 系统托盘与 WinToast 通知各自初始化。通知不再依赖 tray message HWND,
+    // 系统托盘与 native 通知各自初始化。通知不再依赖 tray message HWND,
     // 因此托盘被策略禁用或创建失败时,会话完成提醒仍然可用。
     auto bring_window_foreground = [&host]() {
 #ifdef _WIN32
@@ -880,9 +907,15 @@ int main(int argc, char** argv) {
         },
         nullptr);
 
-    // close-to-tray:WM_CLOSE / Alt+F4 / aceDesktop_closeWindow 全部归到
-    // ShowWindow(SW_HIDE),保留 daemon + tray 在后台。`config.desktop.close_to_tray
-    // == false` 或 tray 安装失败时跳过该 handler,回到旧的关窗即退出。
+    // Window close and application quit are separate lifecycle events. macOS
+    // always hides the window and keeps the Dock/menu-bar restore paths alive.
+    // Windows retains the configurable close-to-tray behavior.
+#ifdef __APPLE__
+    host.set_close_request_handler([&host]() {
+        host.set_visible(false);
+        return true;
+    });
+#else
     if (tray_ok && desktop_cfg.desktop.close_to_tray) {
         host.set_close_request_handler([&host]() {
 #ifdef _WIN32
@@ -897,9 +930,10 @@ int main(int argc, char** argv) {
             return false;
         });
     }
+#endif
 
-    // 共享的 "focus session" lambda — toast 点击 / tray 菜单 session 项 / 直接
-     // bridge 调用都走同一份 JS 派发逻辑。
+    // 共享的 "focus session" lambda — native 通知 / tray 菜单 session 项 / 直接
+    // bridge 调用都走同一份 JS 派发逻辑。
     auto focus_session = [&host, &active_mu, &active_hash_dynamic, &bring_window_foreground](
                               const std::string& workspace_hash,
                               const std::string& session_id) {
@@ -928,12 +962,53 @@ int main(int argc, char** argv) {
         host.eval(js);
     };
 
-    // WinToast 的 click handler 复用 focus_session。每个 toast handler 自带
-    // 完整 payload,不会被后来显示的通知覆盖。
-#ifdef _WIN32
+    auto notification_authorization_json =
+        [](const NotificationAuthorizationState& state) {
+            return nlohmann::json{
+                {"ok", state.status !=
+                    NotificationAuthorizationStatus::Unavailable},
+                {"status",
+                    notification_authorization_status_name(state.status)},
+                {"can_request", state.can_request},
+                {"can_open_settings", state.can_open_settings},
+            };
+        };
+
+    // Keep native callbacks from outliving the WebHost or focus-session state
+    // if any later Desktop setup/run step throws. Normal shutdown dismisses
+    // this guard after performing the same cleanup explicitly.
+    class NotificationShutdownGuard {
+    public:
+        ~NotificationShutdownGuard() {
+            if (armed_) shutdown_notifications();
+        }
+        void dismiss() { armed_ = false; }
+
+    private:
+        bool armed_ = true;
+    } notification_shutdown_guard;
+
+    // Authorization callbacks may arrive on a UserNotifications worker queue.
+    // WebHost::eval marshals the DOM event back onto the WebView loop.
+    set_notification_authorization_handler(
+        [&host, notification_authorization_json](
+            const NotificationAuthorizationState& state) {
+            const std::string detail =
+                notification_authorization_json(state).dump();
+            host.eval(
+                "(function(){try{window.dispatchEvent(new CustomEvent("
+                "'acecode:notification-authorization-changed',{detail:" +
+                detail + "}));}catch(e){}})();");
+        });
+
+    // Native click handler 复用 focus_session。每条通知自带完整 payload,
+    // 不会被后来显示的通知覆盖。
+#if defined(_WIN32) || defined(__APPLE__)
     NotificationInitOptions notification_options;
-    notification_options.app_name = L"ACECode Desktop";
-    notification_options.app_user_model_id = L"ACECode.ACECode.Desktop.1";
+    notification_options.app_name = "ACECode Desktop";
+#ifdef _WIN32
+    notification_options.application_id = "ACECode.ACECode.Desktop.1";
+#endif
     notification_options.activation_window = host.native_window();
     const bool notifications_ok = init_notifications(notification_options);
     if (notifications_ok) {
@@ -941,7 +1016,7 @@ int main(int argc, char** argv) {
             focus_session(payload.workspace_hash, payload.session_id);
         });
     } else {
-        LOG_WARN("[desktop] WinToast notifications unavailable");
+        LOG_WARN("[desktop] native notifications unavailable");
     }
 #endif
 
@@ -980,6 +1055,58 @@ int main(int argc, char** argv) {
     host.bind("aceDesktop_pageReady", [&](const std::string& /*req*/) -> std::string {
         close_splash_once();
         return nlohmann::json{{"ok", true}}.dump();
+    });
+
+    host.bind("aceDesktop_getBackgroundProcessPreference",
+              [&](const std::string& /*req*/) -> std::string {
+        std::lock_guard<std::mutex> lock(desktop_config_mu);
+        return nlohmann::json{
+            {"ok", true},
+            {"enabled",
+             desktop_cfg.desktop.continue_background_process},
+        }.dump();
+    });
+
+    host.bind("aceDesktop_setBackgroundProcessPreference",
+              [&](const std::string& req) -> std::string {
+        bool enabled = false;
+        try {
+            const auto args = nlohmann::json::parse(req);
+            if (!args.is_array() || args.empty() ||
+                !args[0].is_boolean()) {
+                return nlohmann::json{
+                    {"ok", false},
+                    {"error", "expect [enabled:boolean]"},
+                }.dump();
+            }
+            enabled = args[0].get<bool>();
+
+            // Reload-merge so daemon-side config writes made after Desktop
+            // startup are not overwritten by this native preference update.
+            acecode::AppConfig latest = acecode::load_config();
+            latest.desktop.continue_background_process = enabled;
+            const bool previous_keep_alive = pool.keep_alive_on_exit();
+            pool.set_keep_alive_on_exit(enabled);
+            try {
+                acecode::save_config(latest);
+            } catch (...) {
+                pool.set_keep_alive_on_exit(previous_keep_alive);
+                throw;
+            }
+            {
+                std::lock_guard<std::mutex> lock(desktop_config_mu);
+                desktop_cfg.desktop.continue_background_process = enabled;
+            }
+            return nlohmann::json{
+                {"ok", true},
+                {"enabled", enabled},
+            }.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{
+                {"ok", false},
+                {"error", e.what()},
+            }.dump();
+        }
     });
 
     // Post-upgrade restart bridge. Preflight while the current UI is still alive
@@ -1223,8 +1350,38 @@ int main(int argc, char** argv) {
         const bool shown = show_notification(*payload);
         return nlohmann::json{
             {"ok", shown},
-            {"error", shown ? std::string{} : std::string{"WinToast unavailable"}},
+            {"error", shown ? std::string{} :
+                std::string{"native notifications unavailable"}},
         }.dump();
+    });
+
+    host.bind("aceDesktop_getNotificationAuthorization",
+              [notification_authorization_json](
+                  const std::string& /*req*/) -> std::string {
+        // Return the current snapshot immediately and ask the backend to
+        // publish a fresh asynchronous state. This picks up changes made in
+        // macOS System Settings while ACECode remained open.
+        refresh_notification_authorization();
+        return notification_authorization_json(
+            notification_authorization_state()).dump();
+    });
+    host.bind("aceDesktop_requestNotificationAuthorization",
+              [notification_authorization_json](
+                  const std::string& /*req*/) -> std::string {
+        const bool requested = request_notification_authorization();
+        auto response = notification_authorization_json(
+            notification_authorization_state());
+        if (!requested) response["ok"] = false;
+        return response.dump();
+    });
+    host.bind("aceDesktop_openNotificationSettings",
+              [notification_authorization_json](
+                  const std::string& /*req*/) -> std::string {
+        const bool opened = open_notification_settings();
+        auto response = notification_authorization_json(
+            notification_authorization_state());
+        response["ok"] = opened;
+        return response.dump();
     });
 
     // 直接触发"切到某 session"。前端可在 SearchPalette 等场景调用,与 toast 点击
@@ -1463,7 +1620,7 @@ int main(int argc, char** argv) {
         // Keep runtime files isolated from standalone daemon runs, but do not
         // create per-workspace or per-resume run dirs.
         req.context_id = kSharedDaemonContextId;
-        req.run_dir = desktop_shared_run_dir();
+        configure_managed_request(req);
         req.native_folder_picker_enabled = true;
         auto r = pool.activate(req);
         if (!r.ok) {
@@ -1511,7 +1668,7 @@ int main(int argc, char** argv) {
             areq.cwd = choose_launch_cwd(m->cwd, proc_cwd, daemon_exe);
             areq.daemon_exe_path = daemon_exe;
             areq.static_dir = dev_web_dir;
-            areq.run_dir = desktop_shared_run_dir();
+            configure_managed_request(areq);
             areq.native_folder_picker_enabled = true;
             auto ar = pool.activate(areq);
             if (!ar.ok) return nlohmann::json{{"error", ar.error}}.dump();
@@ -1692,9 +1849,10 @@ int main(int argc, char** argv) {
     }
     // 退出前撤销系统通知 + 移除托盘图标。顺序与 init 相反。
     shutdown_notifications();
+    notification_shutdown_guard.dismiss();
     shutdown_tray_icon();
 
-    auto failures = pool.stop_all();
+    auto failures = pool.shutdown_all();
     if (restart_requested.load()) {
         // The replacement must not see the dying process's singleton guard and
         // focus it instead of starting. At this point the WebView loop, tray,

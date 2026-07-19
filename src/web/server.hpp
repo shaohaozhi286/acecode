@@ -64,6 +64,8 @@ struct WebServerDeps {
     std::string                guid;
     std::int64_t               pid = 0;
     std::int64_t               start_time_unix_ms = 0;
+    bool                       desktop_managed = false;
+    int                        desktop_protocol_version = 0;
     SessionClient*             session_client = nullptr;
     SessionRegistry*           session_registry = nullptr;
     HookManager*               hook_manager = nullptr;

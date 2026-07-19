@@ -39,6 +39,7 @@ void print_help(std::ostream& os) {
        << "  --run-dir=<PATH>       isolate runtime files (heartbeat/pid/port/token) to PATH\n"
        << "  --native-folder-picker enable Desktop native folder picker API\n"
        << "  --supervised --guid=G  launcher-internal: launched by Service supervisor\n"
+       << "  --desktop-managed      Desktop-internal managed lifecycle metadata\n"
        << "  --yolo, --dangerous    skip permission checks (loopback bind only)\n"
        << "  --question-policy=<P>  AskUserQuestion policy: ask | deny | timeout[:seconds]\n";
 }
@@ -146,6 +147,36 @@ Args parse(const std::vector<std::string>& tokens) {
             a.run_dir_override = tokens[++i];
         } else if (t == "--native-folder-picker") {
             a.native_folder_picker_enabled = true;
+        } else if (t == "--desktop-managed") {
+            a.desktop_managed = true;
+        } else if (starts_with(t, "--desktop-protocol=")) {
+            try {
+                a.desktop_protocol_version = std::stoi(t.substr(19));
+            } catch (...) {
+                a.error = "--desktop-protocol=<N> not an integer";
+                return a;
+            }
+            if (a.desktop_protocol_version <= 0) {
+                a.error = "--desktop-protocol=<N> must be positive";
+                return a;
+            }
+        } else if (starts_with(t, "--desktop-owner-pid=")) {
+            try {
+                a.desktop_owner_pid = std::stoll(t.substr(20));
+            } catch (...) {
+                a.error = "--desktop-owner-pid=<PID> not an integer";
+                return a;
+            }
+            if (a.desktop_owner_pid <= 0) {
+                a.error = "--desktop-owner-pid=<PID> must be positive";
+                return a;
+            }
+        } else if (starts_with(t, "--desktop-owner-instance=")) {
+            a.desktop_owner_instance = t.substr(25);
+            if (a.desktop_owner_instance.empty()) {
+                a.error = "--desktop-owner-instance=<ID> empty value";
+                return a;
+            }
         } else if (starts_with(t, "--question-policy=")) {
             std::string err;
             if (!parse_question_policy_value(
@@ -178,6 +209,20 @@ Args parse(const std::vector<std::string>& tokens) {
     }
     if (a.supervised && a.guid.empty()) {
         a.error = "--supervised requires --guid=<G>";
+    }
+    const bool has_desktop_lifecycle_fields =
+        a.desktop_protocol_version > 0 || a.desktop_owner_pid > 0 ||
+        !a.desktop_owner_instance.empty();
+    if (!a.desktop_managed && has_desktop_lifecycle_fields) {
+        a.error = "desktop lifecycle fields require --desktop-managed";
+    } else if (a.desktop_managed &&
+               (a.sub != "foreground" || !a.supervised || a.guid.empty() ||
+                a.desktop_protocol_version <= 0 ||
+                a.desktop_owner_pid <= 0 ||
+                a.desktop_owner_instance.empty())) {
+        a.error = "--desktop-managed requires --supervised, --guid, "
+                  "--foreground, --desktop-protocol, --desktop-owner-pid, "
+                  "and --desktop-owner-instance";
     }
     return a;
 }
@@ -230,6 +275,10 @@ static int do_foreground(const Args& a, const std::string& exe_path) {
     opts.static_dir_override = a.static_dir_override;
     opts.cwd_override        = a.cwd_override;
     opts.native_folder_picker_enabled = a.native_folder_picker_enabled;
+    opts.desktop_managed     = a.desktop_managed;
+    opts.desktop_protocol_version = a.desktop_protocol_version;
+    opts.desktop_owner_pid   = a.desktop_owner_pid;
+    opts.desktop_owner_instance = a.desktop_owner_instance;
     return run_worker(opts, cfg);
 }
 

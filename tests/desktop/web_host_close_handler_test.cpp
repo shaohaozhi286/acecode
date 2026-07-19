@@ -66,3 +66,17 @@ TEST(WebHostCloseDispatch, HandlerInvokedEachCall) {
     dispatch_wm_close(handler);
     EXPECT_EQ(call_count, 3);
 }
+
+TEST(WebHostCloseDispatch, MacCloseHidesButExplicitQuitStillTerminates) {
+    bool hidden = false;
+    std::function<bool()> hide_window = [&] {
+        hidden = true;
+        return true;
+    };
+
+    EXPECT_EQ(dispatch_wm_close(hide_window),
+              CloseDispatch::ConsumedByHandler);
+    EXPECT_TRUE(hidden);
+    EXPECT_EQ(dispatch_request_quit(),
+              CloseDispatch::FallthroughToDestroy);
+}

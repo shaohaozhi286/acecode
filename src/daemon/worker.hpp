@@ -15,6 +15,7 @@
 
 #include "../config/config.hpp"
 
+#include <cstdint>
 #include <string>
 
 namespace acecode::daemon {
@@ -29,6 +30,10 @@ struct WorkerOptions {
     std::string static_dir_override; // 非空时覆盖 cfg.web.static_dir(desktop dev 模式注入仓库 web/ 路径)
     std::string cwd_override;       // 非空时先切到该目录,让 session/history/tools 使用指定 workspace
     bool        native_folder_picker_enabled = false; // desktop/webapp 内部:允许 daemon 调 OS 目录选择器
+    bool        desktop_managed = false;
+    int         desktop_protocol_version = 0;
+    std::int64_t desktop_owner_pid = 0;
+    std::string desktop_owner_instance;
 };
 
 // 主入口。返回进程退出码: 0 成功正常退出,非 0 启动失败 / 异常。

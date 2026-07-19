@@ -1333,6 +1333,11 @@ AppConfig load_config() {
                     if (dj.contains("close_to_tray") && dj["close_to_tray"].is_boolean()) {
                         cfg.desktop.close_to_tray = dj["close_to_tray"].get<bool>();
                     }
+                    if (dj.contains("continue_background_process") &&
+                        dj["continue_background_process"].is_boolean()) {
+                        cfg.desktop.continue_background_process =
+                            dj["continue_background_process"].get<bool>();
+                    }
                     if (dj.contains("notifications")) {
                         if (!dj["notifications"].is_object()) {
                             LOG_WARN("[config] 'desktop.notifications' must be an object, "
@@ -1786,6 +1791,11 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json deskj = nlohmann::json::object();
         if (cfg.desktop.close_to_tray != desk_d.close_to_tray)
             deskj["close_to_tray"] = cfg.desktop.close_to_tray;
+        if (cfg.desktop.continue_background_process !=
+            desk_d.continue_background_process) {
+            deskj["continue_background_process"] =
+                cfg.desktop.continue_background_process;
+        }
         if (!dnj.empty()) {
             deskj["notifications"] = dnj;
         }

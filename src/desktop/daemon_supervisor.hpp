@@ -16,6 +16,7 @@
 // 正常退出时 stop() 会回收 daemon；父进程崩溃后的 PDEATHSIG 等增强留作后续。
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 
 namespace acecode::desktop {
@@ -29,6 +30,11 @@ struct SpawnRequest {
     std::string static_dir;        // 非空时通过 --static-dir=<path> 注入,daemon 走 FileSystem 资源(dev 模式)
     std::string run_dir;           // 非空时通过 --run-dir=<path> 注入,daemon 把 runtime files (heartbeat/pid/port/token/GUID 锁) 写到这里。多 workspace 必填,避免共享 ~/.acecode/run/。
     bool        native_folder_picker_enabled = false; // desktop/webapp 内部:启用 daemon native picker API
+    bool        desktop_managed = false;
+    std::string guid;
+    int         desktop_protocol_version = 0;
+    std::int64_t desktop_owner_pid = 0;
+    std::string desktop_owner_instance;
 };
 
 struct SpawnResult {
@@ -43,8 +49,11 @@ class IDaemonSupervisor {
 public:
     virtual ~IDaemonSupervisor() = default;
     virtual SpawnResult spawn(const SpawnRequest& req) = 0;
+    virtual SpawnResult attach(std::int64_t pid) = 0;
     virtual bool wait_until_ready(int port, std::chrono::milliseconds timeout) = 0;
     virtual void stop() = 0;
+    virtual void release() = 0;
+    virtual void set_keep_alive_on_exit(bool keep_alive) = 0;
     virtual bool running() const = 0;
 };
 
@@ -59,6 +68,7 @@ public:
     // 起子进程并把 stdout/stderr 重定向到 nul(MVP 不读输出 — 父子之间靠
     // port+token 已对齐,不需要 daemon 喷 JSON line)。
     SpawnResult spawn(const SpawnRequest& req) override;
+    SpawnResult attach(std::int64_t pid) override;
 
     // 阻塞等子进程的 TCP 端口可 connect。timeout 过期返回 false。
     // 实现: 每 100ms TCP connect 一次,首个成功即返回。
@@ -67,6 +77,8 @@ public:
     // 优雅停: Windows 下对 Job 调 TerminateJobObject(干脆,因为
     // GenerateConsoleCtrlEvent 跨进程到 detached child 不可靠)。
     void stop() override;
+    void release() override;
+    void set_keep_alive_on_exit(bool keep_alive) override;
 
     bool running() const override;
 

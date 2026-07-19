@@ -16,6 +16,7 @@
 #include "daemon_supervisor.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -34,6 +35,28 @@ enum class DaemonState {
     Failed,     // spawn 或 wait_until_ready 失败
 };
 
+enum class DaemonConnectionSource {
+    None,
+    Spawned,
+    Attached,
+};
+
+enum class ExistingDaemonAction {
+    None,
+    Reuse,
+    Replace,
+    Unsafe,
+};
+
+struct ExistingDaemonProbeResult {
+    ExistingDaemonAction action = ExistingDaemonAction::None;
+    std::int64_t pid = 0;
+    int port = 0;
+    std::string token;
+    std::string guid;
+    std::string reason;
+};
+
 struct ActivateRequest {
     std::string hash;             // cwd_hash
     std::string context_id = "default"; // 同一 cwd 下的 daemon 上下文(default / resume-...)
@@ -43,6 +66,9 @@ struct ActivateRequest {
     std::string static_dir;       // 非空 → daemon 走 FileSystem 静态资源(dev 热重载)
     std::string run_dir;          // 非空 → daemon 把 runtime files 写到这里(per-workspace 隔离 GUID 锁 / heartbeat / port / token)
     bool        native_folder_picker_enabled = false; // desktop/webapp 内部:允许 shared daemon 打开 OS 目录选择器
+    bool        desktop_managed = false;
+    std::int64_t desktop_owner_pid = 0;
+    std::string desktop_owner_instance;
 };
 
 struct ActivateResult {
@@ -72,6 +98,7 @@ public:
         int port = 0;
         std::string token;
         std::string error; // state=Failed 时填
+        DaemonConnectionSource source = DaemonConnectionSource::None;
     };
     Snapshot lookup(const std::string& hash,
                     const std::string& context_id = "default") const;
@@ -82,10 +109,16 @@ public:
     // 关闭所有 slot 的 supervisor。返回失败列表(hash + 错误描述);best-effort,
     // 一个 stop 异常不阻塞下一个。
     std::vector<std::pair<std::string, std::string>> stop_all();
+    std::vector<std::pair<std::string, std::string>> shutdown_all();
+    void set_keep_alive_on_exit(bool keep_alive);
+    bool keep_alive_on_exit() const;
 
     // 测试 hook: 注入 supervisor 工厂(默认是直接 new DaemonSupervisor)。
     using SupervisorFactory = std::function<std::unique_ptr<IDaemonSupervisor>()>;
     void set_supervisor_factory_for_test(SupervisorFactory factory);
+    using ExistingDaemonProbe =
+        std::function<ExistingDaemonProbeResult(const ActivateRequest&)>;
+    void set_existing_daemon_probe_for_test(ExistingDaemonProbe probe);
 
 private:
     struct Slot {
@@ -96,6 +129,7 @@ private:
         int port = 0;
         std::string token;
         std::string error;
+        DaemonConnectionSource source = DaemonConnectionSource::None;
         std::mutex mu;
         std::condition_variable cv;
     };
@@ -106,6 +140,8 @@ private:
     mutable std::mutex main_mu_;
     std::unordered_map<std::string, std::unique_ptr<Slot>> slots_;
     SupervisorFactory factory_;
+    ExistingDaemonProbe existing_daemon_probe_;
+    bool keep_alive_on_exit_ = false;
 };
 
 } // namespace acecode::desktop

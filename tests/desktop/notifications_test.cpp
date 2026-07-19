@@ -1,12 +1,13 @@
-// notifications_win.{hpp,cpp} 公共生命周期契约的可移植测试。
+// notifications.{hpp,cpp} 公共生命周期契约的可移植测试。
 //
-// Windows 实现使用 WinToast；其他平台保留 no-op 桩。这里覆盖不依赖真实
-// Windows 通知中心的默认值、失败降级与重复清理行为。Payload 解析、Unicode
-// 截断和独立 activation 路由见 notifications_win_test.cpp。
+// Windows 实现使用 WinToast，macOS Desktop 使用 UserNotifications，其他平台
+// 保留 no-op 桩。这里覆盖不依赖真实通知中心的默认值、失败降级与重复清理行为。
+// Payload 解析、Unicode 截断和独立 activation 路由见
+// notifications_native_test.cpp。
 
 #include <gtest/gtest.h>
 
-#include "desktop/notifications_win.hpp"
+#include "desktop/notifications.hpp"
 
 using namespace acecode::desktop;
 
@@ -34,15 +35,22 @@ TEST(DesktopNotificationsPayload, AssignAllFieldsCopiesCleanly) {
     EXPECT_EQ(copy.body, "请确认是否继续");
 }
 
-TEST(DesktopNotificationsLifecycle, InitWithMissingAumiReturnsFalseAndIsSafe) {
+TEST(DesktopNotificationsLifecycle, InitWithoutPlatformIdentityIsSafe) {
     shutdown_notifications();
     NotificationInitOptions options;
+#ifdef __APPLE__
+    // A command-line test runner may or may not be wrapped in a bundle by the
+    // generator. Either result is valid; lifecycle safety is the contract.
+    const bool initialized = init_notifications(options);
+    if (initialized) shutdown_notifications();
+#else
     EXPECT_FALSE(init_notifications(options));
     NotifyPayload p;
     p.title = "x";
     p.body = "y";
     EXPECT_FALSE(show_notification(p));
     EXPECT_NO_THROW(shutdown_notifications());
+#endif
 }
 
 TEST(DesktopNotificationsLifecycle, RepeatedShutdownIsSafe) {

@@ -1,7 +1,9 @@
 #include "worker.hpp"
 
 #include "../desktop/folder_picker.hpp"
+#include "../desktop/daemon_protocol.hpp"
 #include "../desktop/open_in_explorer.hpp"
+#include "version.hpp"
 #include "../tool/spawn_subagent_tool.hpp"
 #include "../desktop/workspace_registry.hpp"
 #include "../connectors/connector_auth_recovery.hpp"
@@ -287,6 +289,37 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         std::cerr << "write token failed\n";
         return 4;
     }
+    if (opts.desktop_managed) {
+        DesktopManagedRuntime managed;
+        managed.pid = pid;
+        managed.guid = guid;
+        managed.kind = acecode::desktop::kDesktopManagedRuntimeKind;
+        managed.protocol_version = opts.desktop_protocol_version;
+        managed.acecode_version = ACECODE_VERSION;
+        if (!write_desktop_managed_runtime(managed)) {
+            std::cerr << "write desktop managed runtime failed\n";
+            cleanup_runtime_files_if_owned(pid, guid, std::string(), true);
+            return 4;
+        }
+        DesktopOwnerRecord owner;
+        owner.pid = opts.desktop_owner_pid;
+        owner.instance_id = opts.desktop_owner_instance;
+        owner.timestamp_ms = now_unix_ms();
+        // A new Desktop can acquire the singleton and publish its owner while
+        // this worker is still starting after the original Desktop crashed.
+        // Preserve that live handoff instead of overwriting it with stale
+        // launch arguments.
+        if (auto published = read_desktop_owner_record();
+            published && published->instance_id != owner.instance_id &&
+            is_pid_alive(published->pid)) {
+            owner = *published;
+        }
+        if (!write_desktop_owner_record(std::string(), owner)) {
+            std::cerr << "write desktop owner record failed\n";
+            cleanup_runtime_files_if_owned(pid, guid, std::string(), true);
+            return 4;
+        }
+    }
 
     {
         std::ostringstream oss;
@@ -303,6 +336,9 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     heartbeat.start();
 
     install_term_handlers();
+
+    std::atomic<bool> desktop_owner_monitor_stop{false};
+    std::thread desktop_owner_monitor;
 
     // ----- 装配 daemon-side 的 Provider / Tools / SessionRegistry -----
     // 这一段重现了 main.cpp 在 TUI 路径下的初始化,但缩到 daemon 必要项:
@@ -487,6 +523,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.guid               = guid;
     web_deps.pid                = pid;
     web_deps.start_time_unix_ms = now_unix_ms();
+    web_deps.desktop_managed = opts.desktop_managed;
+    web_deps.desktop_protocol_version = opts.desktop_protocol_version;
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
     web_deps.hook_manager       = &hook_manager;
@@ -625,6 +663,68 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // 日志,不阻塞 daemon 启动。
     rc_binder.rebuild_from_config();
 
+    // POSIX has no Windows Job Object. A managed daemon therefore watches the
+    // Desktop owner record and applies the persisted exit preference when that
+    // owner disappears. Start only after all throwable initialization has
+    // completed so an early setup exception cannot strand a joinable thread.
+    if (opts.desktop_managed) {
+        const bool initial_continue_background =
+            cfg.desktop.continue_background_process;
+        desktop_owner_monitor = std::thread(
+            [&, initial_continue_background] {
+                DesktopOwnerRecord current{
+                    opts.desktop_owner_pid,
+                    opts.desktop_owner_instance,
+                    now_unix_ms(),
+                };
+                std::string handled_dead_instance;
+                while (!desktop_owner_monitor_stop.load() &&
+                       !g_term_requested.load()) {
+                    auto disk = read_desktop_owner_record();
+                    if (disk && disk->instance_id != handled_dead_instance &&
+                        disk->instance_id != current.instance_id &&
+                        is_pid_alive(disk->pid)) {
+                        current = *disk;
+                    }
+
+                    if (current.pid > 0 && is_pid_alive(current.pid)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                        continue;
+                    }
+
+                    // Give a replacement Desktop enough time to acquire the
+                    // singleton and publish its new owner generation.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                    disk = read_desktop_owner_record();
+                    if (disk && disk->instance_id != handled_dead_instance &&
+                        disk->instance_id != current.instance_id &&
+                        is_pid_alive(disk->pid)) {
+                        current = *disk;
+                        continue;
+                    }
+
+                    bool continue_background = initial_continue_background;
+                    try {
+                        continue_background =
+                            load_config().desktop.continue_background_process;
+                    } catch (const std::exception& e) {
+                        LOG_WARN(std::string("[daemon] failed to reload Desktop "
+                                             "background preference: ") + e.what());
+                    }
+                    if (!continue_background) {
+                        LOG_INFO("[daemon] Desktop owner exited; stopping coupled "
+                                 "managed process");
+                        request_terminate();
+                        break;
+                    }
+
+                    handled_dead_instance = current.instance_id;
+                    current = {};
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                }
+            });
+    }
+
     // 信号 / 终止 → 主循环退出。Crow app.run() 阻塞跑;另起个观察线程在
     // term 信号时调 server.stop() 让 Crow 退出。这样我们就在主线程上 join。
     std::thread watcher([&server] {
@@ -643,6 +743,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     auth_recovery.set_on_config_refreshed({});
     request_terminate(); // 唤醒 watcher(防 server 自然退出但信号还没来)
     if (watcher.joinable()) watcher.join();
+    desktop_owner_monitor_stop.store(true);
+    if (desktop_owner_monitor.joinable()) desktop_owner_monitor.join();
 
     LOG_INFO("[daemon] worker shutting down");
     if (opts.foreground) std::cerr << "[daemon] shutting down\n";
@@ -653,7 +755,8 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     acecode::model_pool_status_service().stop(); // 幂等;未 start 过也安全
 
     heartbeat.stop();
-    cleanup_runtime_files();
+    cleanup_runtime_files_if_owned(
+        pid, guid, std::string(), opts.desktop_managed);
     return rc;
 }
 

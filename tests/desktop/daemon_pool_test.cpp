@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "daemon/platform.hpp"
 #include "desktop/daemon_pool.hpp"
 #include "desktop/daemon_supervisor.hpp"
 
@@ -17,7 +18,10 @@
 using acecode::desktop::ActivateRequest;
 using acecode::desktop::ActivateResult;
 using acecode::desktop::DaemonPool;
+using acecode::desktop::DaemonConnectionSource;
 using acecode::desktop::DaemonState;
+using acecode::desktop::ExistingDaemonAction;
+using acecode::desktop::ExistingDaemonProbeResult;
 using acecode::desktop::IDaemonSupervisor;
 using acecode::desktop::SpawnRequest;
 using acecode::desktop::SpawnResult;
@@ -31,6 +35,10 @@ public:
         std::atomic<int> spawn_calls{0};
         std::atomic<int> wait_calls{0};
         std::atomic<int> stop_calls{0};
+        std::atomic<int> attach_calls{0};
+        std::atomic<int> release_calls{0};
+        std::atomic<int> policy_calls{0};
+        std::atomic<bool> last_keep_alive{false};
         std::atomic<bool> spawn_should_succeed{true};
         std::atomic<bool> ready_should_succeed{true};
         std::atomic<int> ready_succeeds_on_wait_call{0};
@@ -41,6 +49,7 @@ public:
         std::chrono::milliseconds wait_delay{0};
         std::mutex mu;
         std::vector<std::string> run_dirs;
+        std::vector<SpawnRequest> spawn_requests;
         std::vector<std::chrono::milliseconds> wait_timeouts;
     };
     explicit MockSupervisor(std::shared_ptr<SharedState> s) : state_(std::move(s)) {}
@@ -50,6 +59,7 @@ public:
         {
             std::lock_guard<std::mutex> lk(state_->mu);
             state_->run_dirs.push_back(req.run_dir);
+            state_->spawn_requests.push_back(req);
         }
         if (state_->spawn_delay.count() > 0) {
             std::this_thread::sleep_for(state_->spawn_delay);
@@ -62,6 +72,15 @@ public:
             r.error = "mock: spawn_should_succeed=false";
         }
         return r;
+    }
+
+    SpawnResult attach(std::int64_t pid) override {
+        state_->attach_calls.fetch_add(1);
+        SpawnResult result;
+        result.ok = pid > 0;
+        result.pid = pid;
+        if (!result.ok) result.error = "mock invalid attach pid";
+        return result;
     }
 
     bool wait_until_ready(int, std::chrono::milliseconds timeout) override {
@@ -81,6 +100,11 @@ public:
     }
 
     void stop() override { state_->stop_calls.fetch_add(1); }
+    void release() override { state_->release_calls.fetch_add(1); }
+    void set_keep_alive_on_exit(bool keep_alive) override {
+        state_->policy_calls.fetch_add(1);
+        state_->last_keep_alive.store(keep_alive);
+    }
     bool running() const override { return state_->running_should_succeed.load(); }
 
 private:
@@ -331,4 +355,192 @@ TEST(DaemonPool, ActivateRejectsMissingFields) {
 
     // slot 仍未创建
     EXPECT_TRUE(pool.snapshot_all().empty());
+}
+
+TEST(DaemonPool, ConnectFirstAttachesCompatibleManagedDaemon) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+    pool.set_existing_daemon_probe_for_test([](const ActivateRequest&) {
+        ExistingDaemonProbeResult existing;
+        existing.action = ExistingDaemonAction::Reuse;
+        existing.pid = 4242;
+        existing.port = 38111;
+        existing.token = "existing-token";
+        existing.guid = "existing-guid";
+        return existing;
+    });
+
+    auto req = make_request("__shared_daemon__");
+    req.run_dir = "/run/desktop-shared";
+    auto result = pool.activate(req);
+
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.port, 38111);
+    EXPECT_EQ(result.token, "existing-token");
+    EXPECT_EQ(state->attach_calls.load(), 1);
+    EXPECT_EQ(state->spawn_calls.load(), 0);
+    EXPECT_EQ(pool.lookup("__shared_daemon__").source,
+              DaemonConnectionSource::Attached);
+}
+
+TEST(DaemonPool, AttachedDaemonStopsWhenKeepAliveIsDisabled) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+    pool.set_existing_daemon_probe_for_test([](const ActivateRequest&) {
+        ExistingDaemonProbeResult existing;
+        existing.action = ExistingDaemonAction::Reuse;
+        existing.pid = 4242;
+        existing.port = 38111;
+        existing.token = "existing-token";
+        existing.guid = "existing-guid";
+        return existing;
+    });
+
+    auto req = make_request("__shared_daemon__");
+    req.run_dir = "/run/desktop-shared";
+    ASSERT_TRUE(pool.activate(req).ok);
+    ASSERT_TRUE(pool.shutdown_all().empty());
+    EXPECT_EQ(state->stop_calls.load(), 1);
+    EXPECT_EQ(state->release_calls.load(), 0);
+}
+
+TEST(DaemonPool, IncompatibleManagedDaemonIsStoppedBeforeReplacementSpawn) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+    pool.set_existing_daemon_probe_for_test([](const ActivateRequest&) {
+        ExistingDaemonProbeResult existing;
+        existing.action = ExistingDaemonAction::Replace;
+        existing.pid = 4242;
+        existing.guid = "old-guid";
+        existing.reason = "protocol mismatch";
+        return existing;
+    });
+
+    auto req = make_request("__shared_daemon__");
+    req.run_dir = "/does/not/exist/desktop-shared";
+    auto result = pool.activate(req);
+
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(state->attach_calls.load(), 1);
+    EXPECT_EQ(state->stop_calls.load(), 1);
+    EXPECT_EQ(state->spawn_calls.load(), 1);
+    EXPECT_EQ(pool.lookup("__shared_daemon__").source,
+              DaemonConnectionSource::Spawned);
+}
+
+TEST(DaemonPool, ReplacementDoesNotSpawnUntilOldProcessActuallyExits) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+    const auto live_pid = acecode::daemon::current_pid();
+    pool.set_existing_daemon_probe_for_test(
+        [live_pid](const ActivateRequest&) {
+            ExistingDaemonProbeResult existing;
+            existing.action = ExistingDaemonAction::Replace;
+            existing.pid = live_pid;
+            existing.guid = "old-guid";
+            existing.reason = "protocol mismatch";
+            return existing;
+        });
+
+    auto req = make_request("__shared_daemon__");
+    req.run_dir = "/does/not/exist/desktop-shared";
+    auto result = pool.activate(req);
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.find("did not exit"), std::string::npos);
+    EXPECT_EQ(state->attach_calls.load(), 1);
+    EXPECT_GE(state->stop_calls.load(), 1);
+    EXPECT_EQ(state->spawn_calls.load(), 0);
+}
+
+TEST(DaemonPool, UnsafeExistingRuntimeFailsClosedWithoutSpawn) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+    pool.set_existing_daemon_probe_for_test([](const ActivateRequest&) {
+        ExistingDaemonProbeResult existing;
+        existing.action = ExistingDaemonAction::Unsafe;
+        existing.reason = "identity mismatch";
+        return existing;
+    });
+
+    auto result = pool.activate(make_request("__shared_daemon__"));
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.find("identity mismatch"), std::string::npos);
+    EXPECT_EQ(state->attach_calls.load(), 0);
+    EXPECT_EQ(state->spawn_calls.load(), 0);
+}
+
+TEST(DaemonPool, PolicyAwareShutdownReleasesWhenKeepAliveEnabled) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_keep_alive_on_exit(true);
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+
+    ASSERT_TRUE(pool.activate(make_request("managed")).ok);
+    EXPECT_TRUE(pool.keep_alive_on_exit());
+    EXPECT_TRUE(state->last_keep_alive.load());
+
+    auto failures = pool.shutdown_all();
+    EXPECT_TRUE(failures.empty());
+    EXPECT_EQ(state->release_calls.load(), 1);
+    EXPECT_EQ(state->stop_calls.load(), 0);
+}
+
+TEST(DaemonPool, DisablingKeepAliveDoesNotStopUntilShutdown) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_keep_alive_on_exit(true);
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+    ASSERT_TRUE(pool.activate(make_request("managed")).ok);
+
+    pool.set_keep_alive_on_exit(false);
+    EXPECT_FALSE(pool.keep_alive_on_exit());
+    EXPECT_EQ(state->stop_calls.load(), 0);
+
+    auto failures = pool.shutdown_all();
+    EXPECT_TRUE(failures.empty());
+    EXPECT_EQ(state->release_calls.load(), 0);
+    EXPECT_EQ(state->stop_calls.load(), 1);
+}
+
+TEST(DaemonPool, ManagedSpawnCarriesProtocolAndOwnerIdentity) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+
+    auto req = make_request("__shared_daemon__");
+    req.desktop_managed = true;
+    req.desktop_owner_pid = 1234;
+    req.desktop_owner_instance = "desktop-instance";
+    ASSERT_TRUE(pool.activate(req).ok);
+
+    std::lock_guard<std::mutex> lk(state->mu);
+    ASSERT_EQ(state->spawn_requests.size(), 1u);
+    const auto& spawn = state->spawn_requests[0];
+    EXPECT_TRUE(spawn.desktop_managed);
+    EXPECT_FALSE(spawn.guid.empty());
+    EXPECT_GT(spawn.desktop_protocol_version, 0);
+    EXPECT_EQ(spawn.desktop_owner_pid, 1234);
+    EXPECT_EQ(spawn.desktop_owner_instance, "desktop-instance");
 }

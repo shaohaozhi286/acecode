@@ -130,6 +130,56 @@ TEST(DaemonCliParse, PortAndTokenCombined) {
     EXPECT_EQ(a.sub, "foreground");
 }
 
+TEST(DaemonCliParse, DesktopManagedIdentityParsesAsOneValidatedBundle) {
+    Args a = parse({
+        "--foreground",
+        "--supervised",
+        "--guid=daemon-guid",
+        "--desktop-managed",
+        "--desktop-protocol=1",
+        "--desktop-owner-pid=1234",
+        "--desktop-owner-instance=desktop-instance",
+    });
+    EXPECT_TRUE(a.error.empty()) << a.error;
+    EXPECT_TRUE(a.desktop_managed);
+    EXPECT_EQ(a.guid, "daemon-guid");
+    EXPECT_EQ(a.desktop_protocol_version, 1);
+    EXPECT_EQ(a.desktop_owner_pid, 1234);
+    EXPECT_EQ(a.desktop_owner_instance, "desktop-instance");
+}
+
+TEST(DaemonCliParse, DesktopManagedIdentityRejectsPartialBundle) {
+    Args a = parse({
+        "--foreground",
+        "--desktop-managed",
+        "--desktop-protocol=1",
+    });
+    EXPECT_FALSE(a.error.empty());
+}
+
+TEST(DaemonCliParse, DesktopLifecycleFieldsRequireManagedMode) {
+    Args a = parse({
+        "--foreground",
+        "--desktop-protocol=1",
+        "--desktop-owner-pid=1234",
+        "--desktop-owner-instance=desktop-instance",
+    });
+    EXPECT_FALSE(a.error.empty());
+}
+
+TEST(DaemonCliParse, DesktopManagedModeRequiresForegroundWorker) {
+    Args a = parse({
+        "start",
+        "--supervised",
+        "--guid=daemon-guid",
+        "--desktop-managed",
+        "--desktop-protocol=1",
+        "--desktop-owner-pid=1234",
+        "--desktop-owner-instance=desktop-instance",
+    });
+    EXPECT_FALSE(a.error.empty());
+}
+
 // 场景: --cwd=<path> 正常解析,让 daemon 从任意启动目录服务指定 workspace。
 TEST(DaemonCliParse, CwdOverrideEqualsForm) {
     Args a = parse({"--foreground", "--cwd=C:\\Users\\shao\\shzdebug"});
