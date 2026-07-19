@@ -1,0 +1,4 @@
+interface:
+  display_name: "ACECode Desktop 使用指南"
+  short_description: "讲解 ACECode Desktop 的界面、任务与常用操作方法"
+  default_prompt: "使用 $acecode-desktop-usage 说明如何在 ACECode Desktop 中完成这个任务。"

@@ -28,7 +28,8 @@ On the first ACECode initialization, ACECode installs a small offline seed bundl
 - `skill-creator`
 - `native-mcp`
 - `mcporter`
-- `acecode-usage`
+- `acecode-tui-usage`
+- `acecode-desktop-usage`
 - `vision-image-reader`
 
 Existing skill directories are never overwritten. ACECode records the install result in `~/.acecode/.seed_skills_state.json`.

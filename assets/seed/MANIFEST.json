@@ -1,5 +1,5 @@
 {
-  "bundle_version": "2026-06-28.1",
+  "bundle_version": "2026-07-20.1",
   "description": "Default ACECode global skill seed bundle installed on first ACECode initialization.",
   "skills": [
     {
@@ -33,10 +33,16 @@
       "skill_md_sha256": "5cceb4559103e63ba9bed156192d13f61b5d62b0774cde22339b435aa3f763ce"
     },
     {
-      "name": "acecode-usage",
-      "source_id": "acecode:acecode-usage@2026-06-28",
-      "relative_path": "acecode/acecode-usage",
-      "skill_md_sha256": "f8c53a633a2999e5fb15ec5e9ea68a4874e5976e553d4afc3d87b0a52b672010"
+      "name": "acecode-tui-usage",
+      "source_id": "acecode:acecode-tui-usage@2026-07-20",
+      "relative_path": "acecode/acecode-tui-usage",
+      "skill_md_sha256": "b738642df9da0535d20412169eac649a74d869a00822f099c4100563a26cab4c"
+    },
+    {
+      "name": "acecode-desktop-usage",
+      "source_id": "acecode:acecode-desktop-usage@2026-07-20",
+      "relative_path": "acecode/acecode-desktop-usage",
+      "skill_md_sha256": "e17379c466308b60b4344cde3e3275228558f88f4256a992cf5aac4b7ffb1eb3"
     },
     {
       "name": "vision-image-reader",

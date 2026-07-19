@@ -1,0 +1,4 @@
+interface:
+  display_name: "ACECode TUI Usage"
+  short_description: "ACECode terminal TUI usage and operations"
+  default_prompt: "Use $acecode-tui-usage to explain how to complete this task in the ACECode terminal TUI."
