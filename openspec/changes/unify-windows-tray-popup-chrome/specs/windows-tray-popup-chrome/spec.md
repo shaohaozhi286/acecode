@@ -14,12 +14,22 @@ The Windows desktop tray popup SHALL render its visible surface, rounded corners
 - **AND** Windows 11 SHALL NOT add a second corner, border, or system shadow
 
 ### Requirement: Tray popup chrome is DPI aware without changing content layout
-The Windows tray popup SHALL convert chrome design constants from DIP to device pixels exactly once using the DPI of the monitor containing the tray anchor, while preserving the existing visible menu width, row heights, and surface anchor.
+The Windows tray popup SHALL convert chrome design constants from DIP to device pixels exactly once using the configured scale factor of the monitor containing the tray anchor, independently from the process DPI-awareness mode, while preserving the existing visible menu width, row heights, and surface anchor.
 
 #### Scenario: Popup opens on a scaled display
-- **WHEN** the tray anchor is on a display whose DPI differs from 96
+- **WHEN** the tray anchor is on a display whose configured scale factor differs from 100%
 - **THEN** the corner radius and shadow geometry SHALL scale proportionally with the menu surface
 - **AND** the transparent shadow inset SHALL NOT shift the visible surface away from its computed tray anchor
+
+#### Scenario: Windows 10 target display is configured to 100%
+- **WHEN** the target display scale is 100% even if the process or primary display reports a 144 system DPI
+- **THEN** popup geometry SHALL use 96 DPI
+- **AND** the visible menu surface SHALL retain its 280-pixel design width
+
+#### Scenario: Monitor scale query fails
+- **WHEN** the target monitor scale factor cannot be read
+- **THEN** popup geometry SHALL fall back to 96 DPI
+- **AND** SHALL NOT reuse a process-awareness-dependent system DPI
 
 ### Requirement: Tray popup font follows text size independently from display DPI
 The Windows tray popup SHALL size its font from the Windows text-size percentage independently from the monitor display DPI, while all non-text popup geometry remains monitor-DPI-aware.

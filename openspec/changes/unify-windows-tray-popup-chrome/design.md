@@ -9,7 +9,7 @@ The menu must retain its current payload, two-column session rows, `More` submen
 **Goals:**
 
 - Render the same popup surface, corner radius, and shadow on Windows 10 and Windows 11.
-- Keep geometry in DIPs and scale it exactly once for the monitor containing the tray anchor.
+- Keep geometry in DIPs and scale it exactly once from the configured scale factor of the monitor containing the tray anchor.
 - Keep the 100% Windows text-size font at the intended 13-pixel height instead of multiplying it by monitor display DPI.
 - Preserve current mouse, keyboard, scrolling, submenu, command-dispatch, and fallback behavior.
 - Keep transparent shadow pixels outside the interactive menu surface.
@@ -39,9 +39,9 @@ Mouse row lookup subtracts the chrome inset. Rounded-corner and shadow-only poin
 
 The popup class will no longer request `CS_DROPSHADOW`. When DWM attributes are available, the window will request `DWMWCP_DONOTROUND` and no system border; unsupported calls on Windows 10 remain harmless. ACECode's alpha surface is therefore the only visible corner and shadow path on both systems.
 
-### 4. Keep rendering constants deterministic and DPI-aware
+### 4. Keep rendering constants deterministic and monitor-scale-aware
 
-Corner radius, shadow extent, vertical shadow offset, blur falloff, and maximum opacity are fixed design constants converted from DIP once through the existing monitor DPI. Software coverage uses rounded-rectangle distance, producing the same pixel geometry for the same effective DPI regardless of OS version or desktop effects policy.
+Corner radius, shadow extent, vertical shadow offset, blur falloff, and maximum opacity are fixed design constants converted from DIP once through the target monitor's configured scale factor. Software coverage uses rounded-rectangle distance, producing the same pixel geometry for the same configured scale regardless of OS version, process DPI-awareness fallback, or desktop effects policy.
 
 ### 5. Keep the native fallback scoped to real custom-popup failure
 
@@ -53,6 +53,12 @@ Popup width, padding, row geometry, corners, and shadow remain monitor-DPI-scale
 
 The text-size percentage is read whenever the tray popup opens, so a settings change is reflected without restarting ACECode. Values are constrained to Windows' supported 100%-225% range and fall back to 100% when the setting is unavailable. Text rows keep their existing DPI-scaled height unless an enlarged accessibility font requires more vertical space.
 
+### 7. Query the monitor scale directly instead of inferring it from process DPI
+
+`GetDpiForMonitor` changes its result according to the caller's process DPI awareness. On a Windows 10 system-aware fallback it can therefore return the primary/system DPI for a 100% target display and inflate the 280-pixel popup to 420 pixels.
+
+The popup will dynamically call `GetScaleFactorForMonitor` for the monitor containing the tray anchor, then convert that percentage to geometry DPI (`100% → 96`, `125% → 120`, `150% → 144`). The conversion is pure and covered by tests. If the supported API is unexpectedly unavailable or fails, geometry falls back to 100%/96 DPI rather than risking another oversized popup.
+
 ## Risks / Trade-offs
 
 - [Software alpha rendering adds work when a popup opens] → The surface is small, rendering happens only on open or visible state changes, and no timer is introduced.
@@ -60,6 +66,7 @@ The text-size percentage is read whenever the tray popup opens, so a settings ch
 - [The expanded HWND could intercept clicks in invisible margins] → Return `HTTRANSPARENT` for every point outside the rounded menu surface.
 - [Layered rendering could fail on a constrained machine] → Treat initial render failure as custom-popup creation failure and retain the native menu fallback.
 - [Large accessibility text could clip inside the compact row layout] → Use the larger of the existing DPI-scaled row height and the scaled font height plus vertical padding.
+- [Monitor scale query could fail on a constrained Windows image] → Fall back to the compact 96-DPI design geometry and retain functional input/rendering.
 
 ## Migration Plan
 

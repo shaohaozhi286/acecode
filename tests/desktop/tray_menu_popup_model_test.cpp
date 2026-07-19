@@ -129,6 +129,36 @@ TEST(TrayMenuPopupModel, FlipsAtTopLeftWithoutMovingCursorAnchor) {
     EXPECT_EQ(position.y, 20);
 }
 
+TEST(TrayMenuPopupModel, MonitorScaleConvertsToGeometryDpi) {
+    EXPECT_EQ(
+        compute_tray_popup_geometry_dpi_from_monitor_scale_percent(100),
+        96);
+    EXPECT_EQ(
+        compute_tray_popup_geometry_dpi_from_monitor_scale_percent(125),
+        120);
+    EXPECT_EQ(
+        compute_tray_popup_geometry_dpi_from_monitor_scale_percent(150),
+        144);
+}
+
+TEST(TrayMenuPopupModel, InvalidMonitorScaleFallsBackToCompactGeometry) {
+    EXPECT_EQ(
+        compute_tray_popup_geometry_dpi_from_monitor_scale_percent(0),
+        96);
+    EXPECT_EQ(
+        compute_tray_popup_geometry_dpi_from_monitor_scale_percent(99),
+        96);
+    EXPECT_EQ(
+        compute_tray_popup_geometry_dpi_from_monitor_scale_percent(501),
+        96);
+}
+
+TEST(TrayMenuPopupModel, MonitorScaleChangesMenuWidthExactlyOnce) {
+    EXPECT_EQ(scale_tray_popup_size_px(280, 96), 280);
+    EXPECT_EQ(scale_tray_popup_size_px(280, 120), 350);
+    EXPECT_EQ(scale_tray_popup_size_px(280, 144), 420);
+}
+
 TEST(TrayMenuPopupModel, DefaultTextScaleKeepsFontAtItsPixelDesignHeight) {
     EXPECT_EQ(compute_tray_popup_font_height_px(13, 100), 13);
 }

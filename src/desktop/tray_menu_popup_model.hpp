@@ -39,6 +39,22 @@ struct TrayPopupChromeGeometry {
     int surface_height = 0;
 };
 
+inline int compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
+    int monitor_scale_percent) {
+    if (monitor_scale_percent < 100 || monitor_scale_percent > 500) {
+        return 96;
+    }
+    return static_cast<int>(
+        (96LL * monitor_scale_percent + 50) / 100);
+}
+
+inline int scale_tray_popup_size_px(int size_dip, int geometry_dpi) {
+    const int size = std::max(0, size_dip);
+    const int dpi = geometry_dpi > 0 ? geometry_dpi : 96;
+    return static_cast<int>(
+        (static_cast<long long>(size) * dpi + 48) / 96);
+}
+
 inline int normalize_tray_popup_text_scale_percent(int text_scale_percent) {
     if (text_scale_percent < 100 || text_scale_percent > 225) {
         return 100;

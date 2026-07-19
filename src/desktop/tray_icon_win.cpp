@@ -227,7 +227,7 @@ std::unique_ptr<Win32TrayPopupController> g_tray_popup;
 LRESULT CALLBACK tray_popup_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 int scale_px(int value, int dpi) {
-    return ::MulDiv(value, dpi > 0 ? dpi : 96, 96);
+    return scale_tray_popup_size_px(value, dpi);
 }
 
 int scale_half_dip(int half_dip_value, int dpi) {
@@ -253,29 +253,33 @@ int windows_text_scale_percent() {
     return normalize_tray_popup_text_scale_percent(static_cast<int>(value));
 }
 
-int hdc_dpi(HDC hdc) {
-    const int dpi = hdc ? ::GetDeviceCaps(hdc, LOGPIXELSX) : 96;
-    return dpi > 0 ? dpi : 96;
-}
-
-int point_dpi(POINT pt) {
+int point_geometry_dpi(POINT pt) {
+    // GetDpiForMonitor is process-awareness-dependent. On a Windows 10
+    // system-aware fallback it can return the primary system DPI for a
+    // different 100% target monitor, inflating the whole popup.
     HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     if (HMODULE shcore = ::LoadLibraryW(L"Shcore.dll")) {
-        using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
-        auto get_dpi = reinterpret_cast<GetDpiForMonitorFn>(
-            ::GetProcAddress(shcore, "GetDpiForMonitor"));
-        UINT x = 96;
-        UINT y = 96;
-        if (get_dpi && SUCCEEDED(get_dpi(monitor, 0, &x, &y)) && x > 0) {
+        using GetScaleFactorForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int*);
+        auto get_scale_factor = reinterpret_cast<GetScaleFactorForMonitorFn>(
+            ::GetProcAddress(shcore, "GetScaleFactorForMonitor"));
+        int monitor_scale_percent = 100;
+        if (get_scale_factor &&
+            SUCCEEDED(get_scale_factor(monitor, &monitor_scale_percent))) {
             ::FreeLibrary(shcore);
-            return static_cast<int>(x);
+            const int dpi =
+                compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
+                    monitor_scale_percent);
+            LOG_DEBUG(
+                "[desktop] tray popup: monitor scale " +
+                std::to_string(monitor_scale_percent) +
+                "% -> geometry DPI " + std::to_string(dpi));
+            return dpi;
         }
         ::FreeLibrary(shcore);
     }
-    HDC hdc = ::GetDC(nullptr);
-    const int dpi = hdc_dpi(hdc);
-    if (hdc) ::ReleaseDC(nullptr, hdc);
-    return dpi;
+    LOG_DEBUG(
+        "[desktop] tray popup: monitor scale unavailable, using 96 geometry DPI");
+    return 96;
 }
 
 HFONT create_popup_font(int font_height_px) {
@@ -1181,7 +1185,7 @@ bool show_custom_tray_popup(HWND owner,
 
     auto controller = std::make_unique<Win32TrayPopupController>();
     controller->layout = layout;
-    const int dpi = point_dpi(anchor);
+    const int dpi = point_geometry_dpi(anchor);
     const Win32TrayPopupMetrics metrics = compute_popup_metrics(
         layout,
         dpi,

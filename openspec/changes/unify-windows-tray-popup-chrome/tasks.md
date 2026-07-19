@@ -26,3 +26,10 @@
 - [x] 5.2 Read the current Windows text-size percentage whenever the tray popup opens and use it for font creation and text measurement.
 - [x] 5.3 Keep menu geometry monitor-DPI-aware while preventing enlarged accessibility text from clipping.
 - [x] 5.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff.
+
+## 6. Windows 10 Geometry Scale Correction
+
+- [x] 6.1 Add a pure monitor-scale-to-DPI conversion with regression tests for 100%, 125%, 150%, and invalid values.
+- [x] 6.2 Replace the process-awareness-dependent `GetDpiForMonitor` query with the target monitor's configured scale factor and a compact 96-DPI fallback.
+- [x] 6.3 Verify that 100% monitor scale preserves the 280-pixel menu width while higher configured scales still scale geometry exactly once.
+- [x] 6.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff without including unrelated worktree changes.
