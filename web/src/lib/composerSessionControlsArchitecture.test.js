@@ -45,6 +45,37 @@ run('global, workspace, and active-session composers share integrated session co
   assert.doesNotMatch(chatView, /<StatusBar/);
 });
 
+run('new-conversation hero composer alone uses the 700 by 120 layout', () => {
+  const chatView = source('components/ChatView.jsx');
+  const inputBar = source('components/InputBar.jsx');
+  const styles = source('styles/globals.css');
+
+  assert.match(
+    chatView,
+    /data-tour-target="home-composer" className="ace-home-composer"/,
+  );
+  assert.match(
+    styles,
+    /\.ace-home-content\s*\{[^}]*width: min\(100%, 660px\);/s,
+  );
+  assert.match(
+    styles,
+    /\.ace-home-composer\s*\{[^}]*width: 700px;[^}]*max-width: calc\(100% \+ 40px\);/s,
+  );
+  assert.match(
+    styles,
+    /\.ace-inputbar-hero-card\s*\{[^}]*min-height: 120px;[^}]*display: flex;[^}]*flex-direction: column;/s,
+  );
+  assert.match(
+    inputBar,
+    /isHero \? 'ace-inputbar-hero-card rounded-2xl' : 'rounded-xl'/,
+  );
+  assert.match(
+    inputBar,
+    /isHero && 'ace-inputbar-hero-editor'/,
+  );
+});
+
 run('composer footer preserves required left-to-right control order', () => {
   const component = source('components/ComposerSessionControls.jsx');
   const footer = component.slice(component.indexOf('data-composer-session-controls="true"'));

@@ -1051,11 +1051,27 @@ body {
   font-weight: 400;
   letter-spacing: -0.02em;
 }
+.ace-home-composer {
+  align-self: center;
+  width: 700px;
+  max-width: calc(100% + 40px);
+}
 .ace-inputbar-hero {
   width: 100%;
 }
 .ace-inputbar-hero-card {
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.08);
+}
+.ace-inputbar-hero-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ace-inputbar-hero-editor > div,
+.ace-inputbar-hero-editor .ace-rich-composer-input {
+  height: 100%;
 }
 [data-theme="dark"] .ace-inputbar-hero-card {
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.32);

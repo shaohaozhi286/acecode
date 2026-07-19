@@ -3146,7 +3146,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
           <div className="ace-home-content">
             <img src="/acecode-logo.png" alt="ACECode" width="64" height="64" className="ace-home-logo select-none" draggable="false" />
             <h1 className="ace-home-title">{homeProjectTitle}</h1>
-            <div data-tour-target="home-composer" className="w-full">
+            <div data-tour-target="home-composer" className="ace-home-composer">
               <InputBar
                 ref={inputRef}
                 variant="hero"

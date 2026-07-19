@@ -871,7 +871,7 @@ export const InputBar = forwardRef(function InputBar({
             })}
           </div>
         )}
-        <div className="relative">
+        <div className={clsx('relative', isHero && 'ace-inputbar-hero-editor')}>
           <RichComposer
             ref={ta}
             value={value}
