@@ -1,6 +1,6 @@
 {
     "name":  "acecode",
-    "version-semver":  "0.7.4",
+    "version-semver":  "0.7.5",
     "dependencies":  [
                          "cpr",
                          "crow",
