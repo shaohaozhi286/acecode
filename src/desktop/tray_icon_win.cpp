@@ -25,6 +25,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <cstdint>
@@ -161,6 +162,10 @@ constexpr UINT kTrayPopupDismissMessage = WM_APP + 0x351;
 constexpr int kTrayPopupWidthDip = 280;
 constexpr int kTrayPopupRowHeightHalfDip = 55;
 constexpr int kTrayPopupFontHeightDip = 13;
+constexpr int kTrayPopupChromeInsetDip = 16;
+constexpr int kTrayPopupShadowBlurDip = 12;
+constexpr int kTrayPopupShadowOffsetYDip = 2;
+constexpr int kTrayPopupShadowMaxAlpha = 46;
 
 struct Win32TrayPopupMetrics {
     int dpi = 96;
@@ -174,6 +179,10 @@ struct Win32TrayPopupMetrics {
     int separator_height = 17;
     int corner_radius = 12;
     int right_column_width = 0;
+    int chrome_inset = kTrayPopupChromeInsetDip;
+    int shadow_blur = kTrayPopupShadowBlurDip;
+    int shadow_offset_y = kTrayPopupShadowOffsetYDip;
+    int shadow_max_alpha = kTrayPopupShadowMaxAlpha;
 };
 
 struct Win32TrayPopupRow {
@@ -195,6 +204,7 @@ struct Win32TrayPopupWindow {
     int scroll_offset = 0;
     int hovered_index = -1;
     HFONT font = nullptr;
+    bool repaint_failure_logged = false;
 
     ~Win32TrayPopupWindow() {
         if (font) ::DeleteObject(font);
@@ -306,6 +316,10 @@ Win32TrayPopupMetrics compute_popup_metrics(const TrayMenuLayout& layout, int dp
     metrics.action_height = scale_half_dip(kTrayPopupRowHeightHalfDip, dpi);
     metrics.separator_height = std::max(1, scale_px(1, dpi));
     metrics.corner_radius = scale_px(12, dpi);
+    metrics.chrome_inset = scale_px(kTrayPopupChromeInsetDip, dpi);
+    metrics.shadow_blur = scale_px(kTrayPopupShadowBlurDip, dpi);
+    metrics.shadow_offset_y = scale_px(kTrayPopupShadowOffsetYDip, dpi);
+    metrics.shadow_max_alpha = kTrayPopupShadowMaxAlpha;
     if (max_subtitle_width > 0) {
         metrics.right_column_width = std::clamp(
             max_subtitle_width,
@@ -362,6 +376,41 @@ RECT monitor_bounds(POINT pt) {
     return RECT{0, 0, ::GetSystemMetrics(SM_CXSCREEN), ::GetSystemMetrics(SM_CYSCREEN)};
 }
 
+TrayPopupChromeGeometry popup_chrome_geometry(
+    const Win32TrayPopupWindow& state,
+    int surface_x,
+    int surface_y) {
+    return compute_tray_popup_chrome_geometry(
+        surface_x,
+        surface_y,
+        state.metrics.width,
+        state.viewport_height,
+        state.metrics.chrome_inset);
+}
+
+RECT popup_surface_screen_rect(const Win32TrayPopupWindow& state) {
+    RECT window{};
+    if (!state.hwnd || !::GetWindowRect(state.hwnd, &window)) return {};
+    const auto chrome = popup_chrome_geometry(state, 0, 0);
+    return {
+        window.left + chrome.surface_left,
+        window.top + chrome.surface_top,
+        window.left + chrome.surface_left + chrome.surface_width,
+        window.top + chrome.surface_top + chrome.surface_height,
+    };
+}
+
+bool popup_point_in_surface(
+    const Win32TrayPopupWindow& state,
+    int window_x,
+    int window_y) {
+    return tray_popup_point_in_rounded_surface(
+        popup_chrome_geometry(state, 0, 0),
+        window_x,
+        window_y,
+        state.metrics.corner_radius);
+}
+
 int max_popup_scroll(const Win32TrayPopupWindow& state) {
     const int visible_content = std::max(
         0,
@@ -390,8 +439,14 @@ void ensure_popup_row_visible(Win32TrayPopupWindow& state, int index) {
 }
 
 int popup_row_at(const Win32TrayPopupWindow& state, int x, int y) {
-    if (x < 0 || x >= state.metrics.width) return -1;
-    const int content_y = y - state.metrics.outer_padding + state.scroll_offset;
+    const auto chrome = popup_chrome_geometry(state, 0, 0);
+    if (!tray_popup_point_in_rounded_surface(
+            chrome, x, y, state.metrics.corner_radius)) {
+        return -1;
+    }
+    const int surface_y = y - chrome.surface_top;
+    const int content_y =
+        surface_y - state.metrics.outer_padding + state.scroll_offset;
     for (std::size_t i = 0; i < state.rows.size(); ++i) {
         const auto& row = state.rows[i];
         if (content_y >= row.top && content_y < row.top + row.height) {
@@ -402,13 +457,14 @@ int popup_row_at(const Win32TrayPopupWindow& state, int x, int y) {
 }
 
 void fill_rounded_rect(HDC hdc, const RECT& rect, int radius, COLORREF color) {
+    const int diameter = std::max(1, radius * 2);
     HRGN region = ::CreateRoundRectRgn(
         rect.left,
         rect.top,
         rect.right + 1,
         rect.bottom + 1,
-        radius,
-        radius);
+        diameter,
+        diameter);
     HBRUSH brush = ::CreateSolidBrush(color);
     if (region && brush) ::FillRgn(hdc, region, brush);
     if (brush) ::DeleteObject(brush);
@@ -428,24 +484,73 @@ void draw_popup_chevron(HDC hdc, const RECT& row_rect, const Win32TrayPopupMetri
     if (pen) ::DeleteObject(pen);
 }
 
-void paint_tray_popup(Win32TrayPopupWindow& state) {
-    PAINTSTRUCT ps{};
-    HDC target = ::BeginPaint(state.hwnd, &ps);
-    if (!target) return;
+struct Win32LayeredDib {
+    HDC screen = nullptr;
+    HDC memory = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ old_bitmap = nullptr;
+    std::uint32_t* pixels = nullptr;
 
-    RECT client{};
-    ::GetClientRect(state.hwnd, &client);
-    const int width = client.right - client.left;
-    const int height = client.bottom - client.top;
-    HDC buffer = ::CreateCompatibleDC(target);
-    HBITMAP bitmap = buffer ? ::CreateCompatibleBitmap(target, width, height) : nullptr;
-    HGDIOBJ old_bitmap = bitmap ? ::SelectObject(buffer, bitmap) : nullptr;
-    HDC draw = buffer && bitmap ? buffer : target;
+    ~Win32LayeredDib() {
+        if (old_bitmap && memory) ::SelectObject(memory, old_bitmap);
+        if (bitmap) ::DeleteObject(bitmap);
+        if (memory) ::DeleteDC(memory);
+        if (screen) ::ReleaseDC(nullptr, screen);
+    }
 
-    HBRUSH background = ::CreateSolidBrush(RGB(255, 255, 255));
-    ::FillRect(draw, &client, background);
-    ::DeleteObject(background);
+    bool create(int width, int height) {
+        if (width <= 0 || height <= 0) return false;
+        screen = ::GetDC(nullptr);
+        if (!screen) return false;
+        memory = ::CreateCompatibleDC(screen);
+        if (!memory) return false;
 
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        bitmap = ::CreateDIBSection(
+            screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!bitmap || !bits) return false;
+        old_bitmap = ::SelectObject(memory, bitmap);
+        if (!old_bitmap || old_bitmap == HGDI_ERROR) {
+            old_bitmap = nullptr;
+            return false;
+        }
+        pixels = static_cast<std::uint32_t*>(bits);
+        return true;
+    }
+};
+
+std::uint8_t popup_surface_coverage(double signed_distance) {
+    const double coverage = std::clamp(0.5 - signed_distance, 0.0, 1.0);
+    return static_cast<std::uint8_t>(std::lround(coverage * 255.0));
+}
+
+std::uint8_t popup_shadow_alpha(
+    double signed_distance,
+    const Win32TrayPopupMetrics& metrics) {
+    if (metrics.shadow_blur <= 0 ||
+        signed_distance >= static_cast<double>(metrics.shadow_blur)) {
+        return 0;
+    }
+    const double normalized = 1.0 -
+        std::max(0.0, signed_distance) /
+            static_cast<double>(metrics.shadow_blur);
+    return static_cast<std::uint8_t>(std::lround(
+        static_cast<double>(metrics.shadow_max_alpha) *
+        normalized * normalized));
+}
+
+void draw_tray_popup_contents(
+    Win32TrayPopupWindow& state,
+    HDC draw,
+    const RECT& surface) {
     HFONT font = state.font
         ? state.font
         : static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
@@ -455,20 +560,25 @@ void paint_tray_popup(Win32TrayPopupWindow& state) {
     for (std::size_t i = 0; i < state.rows.size(); ++i) {
         const auto& row = state.rows[i];
         RECT row_rect{
-            0,
-            state.metrics.outer_padding + row.top - state.scroll_offset,
-            width,
-            state.metrics.outer_padding + row.top + row.height - state.scroll_offset,
+            surface.left,
+            surface.top + state.metrics.outer_padding +
+                row.top - state.scroll_offset,
+            surface.right,
+            surface.top + state.metrics.outer_padding +
+                row.top + row.height - state.scroll_offset,
         };
-        if (row_rect.bottom <= 0 || row_rect.top >= height) continue;
+        if (row_rect.bottom <= surface.top ||
+            row_rect.top >= surface.bottom) {
+            continue;
+        }
 
         const auto kind = row.model.entry.kind;
         if (kind == TrayMenuEntryKind::Separator) {
             const int y = (row_rect.top + row_rect.bottom) / 2;
             HPEN pen = ::CreatePen(PS_SOLID, 1, RGB(225, 230, 238));
             HGDIOBJ old_pen = pen ? ::SelectObject(draw, pen) : nullptr;
-            ::MoveToEx(draw, 0, y, nullptr);
-            ::LineTo(draw, width, y);
+            ::MoveToEx(draw, surface.left, y, nullptr);
+            ::LineTo(draw, surface.right, y);
             if (old_pen) ::SelectObject(draw, old_pen);
             if (pen) ::DeleteObject(pen);
             continue;
@@ -541,8 +651,10 @@ void paint_tray_popup(Win32TrayPopupWindow& state) {
 
     const int max_scroll = max_popup_scroll(state);
     if (max_scroll > 0) {
-        const int track_top = scale_px(8, state.metrics.dpi);
-        const int track_height = std::max(1, height - track_top * 2);
+        const int track_inset = scale_px(8, state.metrics.dpi);
+        const int track_top = surface.top + track_inset;
+        const int track_height = std::max(
+            1, state.viewport_height - track_inset * 2);
         const int full_height = state.content_height + state.metrics.outer_padding * 2;
         const int thumb_height = std::clamp(
             state.viewport_height * track_height / std::max(1, full_height),
@@ -551,9 +663,9 @@ void paint_tray_popup(Win32TrayPopupWindow& state) {
         const int thumb_top = track_top +
             state.scroll_offset * (track_height - thumb_height) / max_scroll;
         RECT thumb{
-            width - scale_px(4, state.metrics.dpi),
+            surface.right - scale_px(4, state.metrics.dpi),
             thumb_top,
-            width - scale_px(2, state.metrics.dpi),
+            surface.right - scale_px(2, state.metrics.dpi),
             thumb_top + thumb_height,
         };
         fill_rounded_rect(draw, thumb, scale_px(2, state.metrics.dpi), RGB(190, 190, 190));
@@ -561,39 +673,115 @@ void paint_tray_popup(Win32TrayPopupWindow& state) {
 
     ::SetBkMode(draw, old_bk_mode);
     if (old_font) ::SelectObject(draw, old_font);
-    if (buffer && bitmap) {
-        ::BitBlt(target, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
-    }
-    if (old_bitmap) ::SelectObject(buffer, old_bitmap);
-    if (bitmap) ::DeleteObject(bitmap);
-    if (buffer) ::DeleteDC(buffer);
-    ::EndPaint(state.hwnd, &ps);
 }
 
-void apply_popup_window_shape(Win32TrayPopupWindow& state) {
-    if (!state.hwnd) return;
-    RECT client{};
-    ::GetClientRect(state.hwnd, &client);
-    HRGN region = ::CreateRoundRectRgn(
-        0,
-        0,
-        client.right + 1,
-        client.bottom + 1,
-        state.metrics.corner_radius,
-        state.metrics.corner_radius);
-    if (region) {
-        if (!::SetWindowRgn(state.hwnd, region, TRUE)) {
-            ::DeleteObject(region);
+bool paint_tray_popup(Win32TrayPopupWindow& state) {
+    if (!state.hwnd) return false;
+    const auto chrome = popup_chrome_geometry(state, 0, 0);
+    const int width = chrome.window_width;
+    const int height = chrome.window_height;
+    const std::size_t pixel_count =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+
+    Win32LayeredDib dib;
+    if (!dib.create(width, height)) return false;
+    std::vector<std::uint8_t> surface_alpha(pixel_count);
+    std::vector<std::uint8_t> shadow_alpha(pixel_count);
+
+    const RECT surface{
+        chrome.surface_left,
+        chrome.surface_top,
+        chrome.surface_left + chrome.surface_width,
+        chrome.surface_top + chrome.surface_height,
+    };
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t index =
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x);
+            const double surface_x =
+                static_cast<double>(x - surface.left) + 0.5;
+            const double surface_y =
+                static_cast<double>(y - surface.top) + 0.5;
+            const double surface_distance = tray_popup_rounded_rect_distance(
+                surface_x,
+                surface_y,
+                chrome.surface_width,
+                chrome.surface_height,
+                state.metrics.corner_radius);
+            surface_alpha[index] =
+                popup_surface_coverage(surface_distance);
+
+            const double shadow_y = surface_y -
+                static_cast<double>(state.metrics.shadow_offset_y);
+            const double shadow_distance = tray_popup_rounded_rect_distance(
+                surface_x,
+                shadow_y,
+                chrome.surface_width,
+                chrome.surface_height,
+                state.metrics.corner_radius);
+            shadow_alpha[index] =
+                popup_shadow_alpha(shadow_distance, state.metrics);
+            dib.pixels[index] =
+                surface_alpha[index] > 0 ? 0x00FFFFFFu : 0u;
         }
     }
 
+    draw_tray_popup_contents(state, dib.memory, surface);
+
+    for (std::size_t i = 0; i < pixel_count; ++i) {
+        const unsigned surface_a = surface_alpha[i];
+        const unsigned shadow_a = shadow_alpha[i];
+        const unsigned alpha =
+            surface_a + (shadow_a * (255u - surface_a) + 127u) / 255u;
+        const std::uint32_t straight = dib.pixels[i];
+        const unsigned blue = straight & 0xFFu;
+        const unsigned green = (straight >> 8u) & 0xFFu;
+        const unsigned red = (straight >> 16u) & 0xFFu;
+        const unsigned premul_blue = (blue * surface_a + 127u) / 255u;
+        const unsigned premul_green = (green * surface_a + 127u) / 255u;
+        const unsigned premul_red = (red * surface_a + 127u) / 255u;
+        dib.pixels[i] =
+            (alpha << 24u) |
+            (premul_red << 16u) |
+            (premul_green << 8u) |
+            premul_blue;
+    }
+
+    RECT window{};
+    if (!::GetWindowRect(state.hwnd, &window)) return false;
+    POINT destination{window.left, window.top};
+    POINT source{0, 0};
+    SIZE size{width, height};
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    if (!::UpdateLayeredWindow(
+            state.hwnd,
+            dib.screen,
+            &destination,
+            &size,
+            dib.memory,
+            &source,
+            0,
+            &blend,
+            ULW_ALPHA)) {
+        return false;
+    }
+    return true;
+}
+
+void suppress_system_popup_chrome(Win32TrayPopupWindow& state) {
+    if (!state.hwnd) return;
     if (HMODULE dwm = ::LoadLibraryW(L"dwmapi.dll")) {
         using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
         auto set_attribute = reinterpret_cast<DwmSetWindowAttributeFn>(
             ::GetProcAddress(dwm, "DwmSetWindowAttribute"));
         if (set_attribute) {
-            const DWORD rounded_preference = 2; // DWMWCP_ROUND
-            set_attribute(state.hwnd, 33, &rounded_preference, sizeof(rounded_preference));
+            const DWORD no_system_rounding = 1; // DWMWCP_DONOTROUND
+            set_attribute(
+                state.hwnd, 33, &no_system_rounding, sizeof(no_system_rounding));
             const DWORD no_border = 0xFFFFFFFEu; // DWMWA_COLOR_NONE
             set_attribute(state.hwnd, 34, &no_border, sizeof(no_border));
         }
@@ -608,23 +796,31 @@ bool create_popup_hwnd(Win32TrayPopupWindow& state,
                        int height,
                        bool no_activate) {
     state.viewport_height = height;
-    const DWORD ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
+    const auto chrome = popup_chrome_geometry(state, x, y);
+    const DWORD ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
         (no_activate ? WS_EX_NOACTIVATE : 0);
     state.hwnd = ::CreateWindowExW(
         ex_style,
         kTrayPopupWndClass,
         L"ACECode Tray Menu",
         WS_POPUP,
-        x,
-        y,
-        state.metrics.width,
-        height,
+        chrome.window_x,
+        chrome.window_y,
+        chrome.window_width,
+        chrome.window_height,
         owner,
         nullptr,
         ::GetModuleHandleW(nullptr),
         &state);
     if (!state.hwnd) return false;
-    apply_popup_window_shape(state);
+    suppress_system_popup_chrome(state);
+    if (!paint_tray_popup(state)) {
+        HWND failed = state.hwnd;
+        state.hwnd = nullptr;
+        ::SetWindowLongPtrW(failed, GWLP_USERDATA, 0);
+        ::DestroyWindow(failed);
+        return false;
+    }
     return true;
 }
 
@@ -721,8 +917,7 @@ bool open_tray_submenu(Win32TrayPopupWindow& main_window,
     auto submenu = make_popup_window_state(
         g_tray_popup.get(), true, std::move(rows), main_window.metrics);
 
-    RECT main_rect{};
-    ::GetWindowRect(main_window.hwnd, &main_rect);
+    const RECT main_rect = popup_surface_screen_rect(main_window);
     POINT monitor_point{main_rect.left, main_rect.top};
     const RECT work = monitor_work_area(monitor_point);
     const int margin = scale_px(8, main_window.metrics.dpi);
@@ -752,13 +947,15 @@ bool open_tray_submenu(Win32TrayPopupWindow& main_window,
     g_tray_popup->main_more_index = row_index;
     g_tray_popup->keyboard_in_submenu = for_keyboard;
     g_tray_popup->submenu_window = std::move(submenu);
+    const auto submenu_chrome = popup_chrome_geometry(
+        *g_tray_popup->submenu_window, x, y);
     ::SetWindowPos(
         g_tray_popup->submenu_window->hwnd,
         HWND_TOPMOST,
-        x,
-        y,
-        g_tray_popup->submenu_window->metrics.width,
-        height,
+        submenu_chrome.window_x,
+        submenu_chrome.window_y,
+        submenu_chrome.window_width,
+        submenu_chrome.window_height,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
     ::UpdateWindow(g_tray_popup->submenu_window->hwnd);
     if (for_keyboard) {
@@ -826,9 +1023,27 @@ LRESULT CALLBACK tray_popup_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
     switch (msg) {
         case WM_ERASEBKGND:
             return TRUE;
-        case WM_PAINT:
-            paint_tray_popup(*state);
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC paint = ::BeginPaint(hwnd, &ps);
+            if (paint) ::EndPaint(hwnd, &ps);
+            if (!paint_tray_popup(*state) &&
+                !state->repaint_failure_logged) {
+                state->repaint_failure_logged = true;
+                LOG_WARN("[desktop] tray: layered popup repaint failed");
+            }
             return 0;
+        }
+        case WM_NCHITTEST: {
+            POINT point{
+                static_cast<int>(static_cast<short>(LOWORD(lparam))),
+                static_cast<int>(static_cast<short>(HIWORD(lparam))),
+            };
+            ::ScreenToClient(hwnd, &point);
+            return popup_point_in_surface(*state, point.x, point.y)
+                ? HTCLIENT
+                : HTTRANSPARENT;
+        }
         case WM_MOUSEACTIVATE:
             return state->is_submenu ? MA_NOACTIVATE : MA_ACTIVATE;
         case WM_ACTIVATE:
@@ -914,7 +1129,6 @@ LRESULT CALLBACK tray_popup_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
 bool register_tray_popup_class(HINSTANCE hinst) {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_DROPSHADOW;
     wc.hInstance = hinst;
     wc.hCursor = ::LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.lpszClassName = kTrayPopupWndClass;
@@ -965,13 +1179,15 @@ bool show_custom_tray_popup(HWND owner,
     g_tray_popup = std::move(controller);
 
     ::SetForegroundWindow(owner);
+    const auto main_chrome = popup_chrome_geometry(
+        *g_tray_popup->main_window, x, y);
     ::SetWindowPos(
         g_tray_popup->main_window->hwnd,
         HWND_TOPMOST,
-        x,
-        y,
-        metrics.width,
-        height,
+        main_chrome.window_x,
+        main_chrome.window_y,
+        main_chrome.window_width,
+        main_chrome.window_height,
         SWP_SHOWWINDOW);
     ::SetForegroundWindow(g_tray_popup->main_window->hwnd);
     ::SetFocus(g_tray_popup->main_window->hwnd);

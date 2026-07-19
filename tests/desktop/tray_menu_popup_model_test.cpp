@@ -129,5 +129,58 @@ TEST(TrayMenuPopupModel, FlipsAtTopLeftWithoutMovingCursorAnchor) {
     EXPECT_EQ(position.y, 20);
 }
 
+TEST(TrayMenuPopupModel, ChromeBoundsPreserveVisibleSurfaceAnchor) {
+    const auto geometry = compute_tray_popup_chrome_geometry(
+        776,
+        508,
+        420,
+        483,
+        18);
+
+    EXPECT_EQ(geometry.window_x, 758);
+    EXPECT_EQ(geometry.window_y, 490);
+    EXPECT_EQ(geometry.window_width, 456);
+    EXPECT_EQ(geometry.window_height, 519);
+    EXPECT_EQ(geometry.surface_left, 18);
+    EXPECT_EQ(geometry.surface_top, 18);
+    EXPECT_EQ(geometry.window_x + geometry.surface_left, 776);
+    EXPECT_EQ(geometry.window_y + geometry.surface_top, 508);
+    EXPECT_EQ(geometry.surface_width, 420);
+    EXPECT_EQ(geometry.surface_height, 483);
+}
+
+TEST(TrayMenuPopupModel, ChromeBoundsScaleInsetWithoutRescalingSurface) {
+    const auto geometry = compute_tray_popup_chrome_geometry(
+        100,
+        200,
+        560,
+        644,
+        32);
+
+    EXPECT_EQ(geometry.window_x, 68);
+    EXPECT_EQ(geometry.window_y, 168);
+    EXPECT_EQ(geometry.window_width, 624);
+    EXPECT_EQ(geometry.window_height, 708);
+    EXPECT_EQ(geometry.surface_width, 560);
+    EXPECT_EQ(geometry.surface_height, 644);
+}
+
+TEST(TrayMenuPopupModel, RoundedSurfaceHitTestRejectsShadowAndCornerPixels) {
+    const auto geometry = compute_tray_popup_chrome_geometry(
+        0,
+        0,
+        280,
+        320,
+        16);
+
+    EXPECT_FALSE(tray_popup_point_in_rounded_surface(geometry, 0, 0, 12));
+    EXPECT_FALSE(tray_popup_point_in_rounded_surface(geometry, 16, 16, 12));
+    EXPECT_FALSE(tray_popup_point_in_rounded_surface(geometry, 17, 17, 12));
+    EXPECT_TRUE(tray_popup_point_in_rounded_surface(geometry, 28, 16, 12));
+    EXPECT_TRUE(tray_popup_point_in_rounded_surface(geometry, 156, 176, 12));
+    EXPECT_TRUE(tray_popup_point_in_rounded_surface(geometry, 28, 335, 12));
+    EXPECT_FALSE(tray_popup_point_in_rounded_surface(geometry, 296, 176, 12));
+}
+
 } // namespace
 } // namespace acecode::desktop

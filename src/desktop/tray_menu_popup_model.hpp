@@ -10,7 +10,9 @@
 #include "tray_menu_layout.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -25,6 +27,82 @@ struct TrayPopupPosition {
     int x = 0;
     int y = 0;
 };
+
+struct TrayPopupChromeGeometry {
+    int window_x = 0;
+    int window_y = 0;
+    int window_width = 0;
+    int window_height = 0;
+    int surface_left = 0;
+    int surface_top = 0;
+    int surface_width = 0;
+    int surface_height = 0;
+};
+
+inline TrayPopupChromeGeometry compute_tray_popup_chrome_geometry(
+    int surface_x,
+    int surface_y,
+    int surface_width,
+    int surface_height,
+    int chrome_inset) {
+    const int inset = std::max(0, chrome_inset);
+    const int width = std::max(0, surface_width);
+    const int height = std::max(0, surface_height);
+    return {
+        surface_x - inset,
+        surface_y - inset,
+        width + inset * 2,
+        height + inset * 2,
+        inset,
+        inset,
+        width,
+        height,
+    };
+}
+
+inline double tray_popup_rounded_rect_distance(
+    double x,
+    double y,
+    int width,
+    int height,
+    int radius) {
+    if (width <= 0 || height <= 0) {
+        return std::numeric_limits<double>::infinity();
+    }
+    const double half_width = static_cast<double>(width) / 2.0;
+    const double half_height = static_cast<double>(height) / 2.0;
+    const double clamped_radius = std::clamp(
+        static_cast<double>(std::max(0, radius)),
+        0.0,
+        std::min(half_width, half_height));
+    const double qx = std::abs(x - half_width) -
+        (half_width - clamped_radius);
+    const double qy = std::abs(y - half_height) -
+        (half_height - clamped_radius);
+    const double outside = std::hypot(std::max(qx, 0.0), std::max(qy, 0.0));
+    const double inside = std::min(std::max(qx, qy), 0.0);
+    return outside + inside - clamped_radius;
+}
+
+inline bool tray_popup_point_in_rounded_surface(
+    const TrayPopupChromeGeometry& geometry,
+    int window_x,
+    int window_y,
+    int corner_radius) {
+    const int local_x = window_x - geometry.surface_left;
+    const int local_y = window_y - geometry.surface_top;
+    if (local_x < 0 || local_y < 0 ||
+        local_x >= geometry.surface_width ||
+        local_y >= geometry.surface_height) {
+        return false;
+    }
+    return tray_popup_rounded_rect_distance(
+               static_cast<double>(local_x) + 0.5,
+               static_cast<double>(local_y) + 0.5,
+               geometry.surface_width,
+               geometry.surface_height,
+               corner_radius) <= 0.0;
+}
 
 inline TrayPopupPosition compute_tray_popup_position(
     int anchor_x,
