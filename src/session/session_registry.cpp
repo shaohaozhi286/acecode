@@ -159,12 +159,11 @@ SessionModelState state_from_profile(const AppConfig& cfg,
     state.name = profile.name;
     state.provider = profile.provider;
     state.model = profile.model;
-    state.context_window = resolve_model_profile_context_window_nonblocking(
-        cfg, profile, cfg.context_window);
     // model id 与监控快照的 modelPoolName 精确命中时,用 0.8 * maxWindowTokens
-    // 作为有效上下文窗口(驱动占用% 与自动压缩)。未命中时保留默认值。
+    // 作为有效上下文窗口(驱动占用% 与自动压缩)。手动 override 优先。
     int eff = model_pool_status_service().effective_context_window_for(state.model);
-    if (eff > 0) state.context_window = eff;
+    state.context_window = resolve_runtime_model_profile_context_window_nonblocking(
+        cfg, profile, cfg.context_window, eff);
     return state;
 }
 
@@ -1134,6 +1133,33 @@ bool SessionRegistry::model_profile_used_by_busy_session(const std::string& mode
         if (entry->loop->is_busy()) return true;
     }
     return false;
+}
+
+std::size_t SessionRegistry::sync_model_context_window(
+    const std::string& model_name,
+    const ModelProfile& profile) {
+    if (model_name.empty() || profile.name != model_name || !deps_.config) {
+        return 0;
+    }
+
+    const int context_window = state_from_profile(*deps_.config, profile).context_window;
+    if (context_window <= 0) return 0;
+
+    std::size_t updated = 0;
+    std::lock_guard<std::mutex> lk(mu_);
+    for (auto& [id, entry] : entries_) {
+        (void)id;
+        if (!entry || entry->model_state.name != model_name) continue;
+        entry->model_state.context_window = context_window;
+        if (entry->loop) entry->loop->set_context_window(context_window);
+        ++updated;
+    }
+    if (updated > 0) {
+        LOG_INFO("[session_registry] synchronized context_window=" +
+                 std::to_string(context_window) + " for model='" + model_name +
+                 "' active_sessions=" + std::to_string(updated));
+    }
+    return updated;
 }
 
 std::optional<PermissionMode>

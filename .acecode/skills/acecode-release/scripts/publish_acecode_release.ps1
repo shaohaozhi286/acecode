@@ -10,6 +10,7 @@ param(
     [string]$Target = 'windows-x64',
     [string[]]$StageFiles = @(),
     [string]$CommitMessage = '',
+    [string]$UpgradeTip = '',
 
     [switch]$NoCommit,
     [switch]$NoTag,
@@ -21,6 +22,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $NoPublish) {
+    if ([string]::IsNullOrWhiteSpace($UpgradeTip)) {
+        throw 'Publishing to aupdate requires a non-empty -UpgradeTip.'
+    }
+    $UpgradeTip = $UpgradeTip.Trim()
+}
 
 function Invoke-Native {
     param(
@@ -40,6 +48,11 @@ function Write-Utf8NoBom {
     )
     $encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Text, $encoding)
+}
+
+function Read-Utf8Text {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
 }
 
 function Normalize-RepoPath {
@@ -123,12 +136,13 @@ function Update-Manifest {
         [Parameter(Mandatory = $true)][string]$TargetName,
         [Parameter(Mandatory = $true)][string]$FileName,
         [Parameter(Mandatory = $true)][string]$Sha256,
-        [Parameter(Mandatory = $true)][UInt64]$Size
+        [Parameter(Mandatory = $true)][UInt64]$Size,
+        [Parameter(Mandatory = $true)][string]$UpgradeTip
     )
 
     $oldReleases = @()
     if (Test-Path -LiteralPath $ManifestPath) {
-        $oldManifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+        $oldManifest = (Read-Utf8Text $ManifestPath) | ConvertFrom-Json
         if ($oldManifest.releases) {
             foreach ($release in $oldManifest.releases) {
                 if ($release.version -ne $NewVersion) {
@@ -141,7 +155,7 @@ function Update-Manifest {
     $newRelease = [ordered]@{
         version = $NewVersion
         published_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        notes = "ACECode v$NewVersion self-upgrade package."
+        notes = $UpgradeTip
         packages = @(
             [ordered]@{
                 target = $TargetName
@@ -166,18 +180,29 @@ function Verify-HttpPackage {
         [Parameter(Mandatory = $true)][string]$VersionToVerify,
         [Parameter(Mandatory = $true)][string]$PackageName,
         [Parameter(Mandatory = $true)][UInt64]$ExpectedSize,
-        [Parameter(Mandatory = $true)][string]$ExpectedSha
+        [Parameter(Mandatory = $true)][string]$ExpectedSha,
+        [Parameter(Mandatory = $true)][string]$ExpectedUpgradeTip
     )
 
     $base = $BaseUrl.TrimEnd('/') + '/'
-    $manifestResponse = Invoke-WebRequest -Uri ($base + 'aceupdate.json') -UseBasicParsing -TimeoutSec 15
-    $manifest = $manifestResponse.Content | ConvertFrom-Json
-    if ($manifest.latest -ne $VersionToVerify) {
-        throw "HTTP manifest latest is '$($manifest.latest)', expected '$VersionToVerify'."
-    }
-
+    $manifestTmp = Join-Path $env:TEMP ("acecode-release-manifest-" + [guid]::NewGuid().ToString('N') + '.json')
     $tmp = Join-Path $env:TEMP ("acecode-release-verify-" + [guid]::NewGuid().ToString('N') + '.zip')
     try {
+        Invoke-WebRequest -Uri ($base + 'aceupdate.json') -UseBasicParsing -TimeoutSec 15 -OutFile $manifestTmp
+        $manifest = (Read-Utf8Text $manifestTmp) | ConvertFrom-Json
+        if ($manifest.latest -ne $VersionToVerify) {
+            throw "HTTP manifest latest is '$($manifest.latest)', expected '$VersionToVerify'."
+        }
+        $release = @($manifest.releases) |
+            Where-Object { $_.version -eq $VersionToVerify } |
+            Select-Object -First 1
+        if ($null -eq $release) {
+            throw "HTTP manifest release '$VersionToVerify' is missing."
+        }
+        if (([string]$release.notes) -cne $ExpectedUpgradeTip) {
+            throw "HTTP manifest upgrade tip does not match the published -UpgradeTip."
+        }
+
         Invoke-WebRequest -Uri ($base + $PackageName) -UseBasicParsing -TimeoutSec 60 -Headers @{ Accept = 'application/zip' } -OutFile $tmp
         $actualSize = [UInt64](Get-Item -LiteralPath $tmp).Length
         $actualSha = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -188,6 +213,7 @@ function Verify-HttpPackage {
             throw "HTTP package sha256 mismatch: got $actualSha, expected $ExpectedSha."
         }
     } finally {
+        Remove-Item -LiteralPath $manifestTmp -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
 }
@@ -368,10 +394,10 @@ if (-not $NoPublish) {
 
     $size = [UInt64](Get-Item -LiteralPath $zipPath).Length
     $sha = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Update-Manifest -ManifestPath $manifestPath -NewVersion $Version -TargetName $Target -FileName "$pkgName.zip" -Sha256 $sha -Size $size
+    Update-Manifest -ManifestPath $manifestPath -NewVersion $Version -TargetName $Target -FileName "$pkgName.zip" -Sha256 $sha -Size $size -UpgradeTip $UpgradeTip
 
     if ($RemoteBaseUrl) {
-        Verify-HttpPackage -BaseUrl $RemoteBaseUrl -VersionToVerify $Version -PackageName "$pkgName.zip" -ExpectedSize $size -ExpectedSha $sha
+        Verify-HttpPackage -BaseUrl $RemoteBaseUrl -VersionToVerify $Version -PackageName "$pkgName.zip" -ExpectedSize $size -ExpectedSha $sha -ExpectedUpgradeTip $UpgradeTip
     }
 
     Write-Host "Package: $zipPath"

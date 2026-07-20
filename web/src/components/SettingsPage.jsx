@@ -130,6 +130,7 @@ export function SettingsPage({
   onClose,
   health,
   activeSessionId = '',
+  onModelProfileUpdated,
   onPermissionModeChanged,
   onDesktopNotificationsChanged,
   onReplayGuidedTour,
@@ -253,7 +254,9 @@ export function SettingsPage({
           {activeNavKey === 'skills' && <SectionSkills />}
           {activeNavKey === 'mcp' && <SectionMCP />}
           {activeNavKey === 'connectors' && <SectionConnectors />}
-          {activeNavKey === 'models' && <SectionModel />}
+          {activeNavKey === 'models' && (
+            <SectionModel onModelProfileUpdated={onModelProfileUpdated} />
+          )}
           {activeNavKey === 'tools' && <SectionTools />}
           {activeNavKey === 'hooks' && <SectionHooks />}
           {activeNavKey === 'archived' && <SectionArchived />}
@@ -3061,7 +3064,7 @@ function CapabilityBadges({ capabilities = [], compact = false }) {
   );
 }
 
-function SectionModel() {
+function SectionModel({ onModelProfileUpdated }) {
   const [models, setModels] = useState([]);
   const [defaultName, setDefaultName] = useState('');
   const [loading, setLoading] = useState(true);
@@ -3428,7 +3431,8 @@ function SectionModel() {
 
     setBusy(`submit:${name}`);
     try {
-      await api.updateModel(name, payloads[0]);
+      const updated = await api.updateModel(name, payloads[0]);
+      onModelProfileUpdated?.(updated);
       toast({ kind: 'ok', text: '模型已更新' });
       collapseModel(name, { discardDraft: true });
       await refresh();

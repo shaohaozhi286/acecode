@@ -162,3 +162,25 @@ TEST(ModelContextResolver, ProfileContextWindowOverrideWins) {
                   cfg, profile, 128000),
               64000);
 }
+
+// 场景:model pool 已发现同 model 的窗口时,用户在 saved model 上填写的
+// 手动值仍然是最终 runtime 预算;清空手动值后才采用 pool 窗口。
+TEST(ModelContextResolver, RuntimeProfileOverrideWinsOverModelPoolWindow) {
+    acecode::AppConfig cfg;
+    cfg.context_window = 128000;
+
+    acecode::ModelProfile profile;
+    profile.name = "manual";
+    profile.provider = "copilot";
+    profile.model = "pool-model";
+    profile.context_window = 64000;
+
+    EXPECT_EQ(acecode::resolve_runtime_model_profile_context_window_nonblocking(
+                  cfg, profile, cfg.context_window, 120000),
+              64000);
+
+    profile.context_window.reset();
+    EXPECT_EQ(acecode::resolve_runtime_model_profile_context_window_nonblocking(
+                  cfg, profile, cfg.context_window, 120000),
+              120000);
+}

@@ -469,7 +469,11 @@ std::string update_manifest_for(const std::string& version) {
       "schema_version": 1,
       "latest": ")" + version + R"(",
       "releases": [
-        {"version": ")" + version + R"(", "packages": [
+        {
+          "version": ")" + version + R"(",
+          "published_at": "2026-07-20T08:00:00Z",
+          "notes": "Desktop release tip.",
+          "packages": [
           {"target": ")" + acecode::upgrade::current_target() + R"(", "file": "acecode.zip", "sha256": ")" + std::string(64, 'a') + R"("}
         ]}
       ]
@@ -4050,6 +4054,12 @@ TEST(WebServerHttp, GetUpdateStatusReportsAvailableVersion) {
     EXPECT_EQ(j["update_available"], true);
     EXPECT_EQ(j["latest_version"], "9.9.9");
     EXPECT_EQ(j["package_file"], "acecode.zip");
+    ASSERT_TRUE(j["releases"].is_array());
+    ASSERT_EQ(j["releases"].size(), 1u);
+    EXPECT_EQ(j["releases"][0]["version"], "9.9.9");
+    EXPECT_EQ(j["releases"][0]["published_at"], "2026-07-20T08:00:00Z");
+    EXPECT_EQ(j["releases"][0]["notes"], "Desktop release tip.");
+    EXPECT_FALSE(j["releases"][0].contains("packages"));
 }
 
 // 场景:POST 创建可轮询 GUI 升级任务,成功后保留重启提示与 latest-job 状态。
@@ -4404,6 +4414,49 @@ TEST(WebServerHttp, PutModelsUpdatesLegacyReadonlyProfile) {
     ASSERT_EQ(fx.cfg.saved_models.size(), 1u);
     EXPECT_EQ(fx.cfg.saved_models[0].model, "gpt-5");
     EXPECT_FALSE(fx.cfg.saved_models[0].readonly);
+}
+
+// 场景:PUT 在不改 saved model name 时修改 context_window,daemon 立即同步
+// 引用该 name 的 active session model state 与 AgentLoop runtime 预算;
+// 随后的非法更新失败且不再改动 session。
+TEST(WebServerHttp, PutModelsSynchronizesActiveSessionContextWindow) {
+    WebServerFixture fx;
+    fx.cfg.saved_models[0].context_window = 64000;
+
+    acecode::SessionOptions opts;
+    opts.model_name = "fixture-copilot";
+    const std::string id = fx.registry->create(opts);
+    auto entry = fx.registry->acquire(id);
+    ASSERT_TRUE(entry);
+    ASSERT_TRUE(entry->loop);
+    EXPECT_EQ(entry->loop->context_window(), 64000);
+
+    json update = {
+        {"name", "fixture-copilot"},
+        {"provider", "copilot"},
+        {"model", "gpt-4o"},
+        {"context_window", 96000},
+    };
+    auto r = cpr::Put(cpr::Url{fx.url("/api/models/fixture-copilot")},
+                      cpr::Header{{"Content-Type", "application/json"}},
+                      cpr::Body{update.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+
+    auto state = cpr::Get(cpr::Url{fx.url("/api/sessions/" + id + "/model")});
+    ASSERT_EQ(state.status_code, 200) << state.text;
+    EXPECT_EQ(json::parse(state.text)["context_window"], 96000);
+    EXPECT_EQ(entry->loop->context_window(), 96000);
+
+    update["context_window"] = -1;
+    auto rejected = cpr::Put(cpr::Url{fx.url("/api/models/fixture-copilot")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{update.dump()});
+    ASSERT_EQ(rejected.status_code, 400) << rejected.text;
+
+    auto unchanged = fx.registry->current_model_state(id);
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(unchanged->context_window, 96000);
+    EXPECT_EQ(entry->loop->context_window(), 96000);
 }
 
 // 场景:POST /api/models/probe 只接受 OpenAI-compatible 探测参数。这里走

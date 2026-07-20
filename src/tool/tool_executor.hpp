@@ -89,6 +89,11 @@ struct ToolContext {
     // is available. Shell tools expose this as ACECODE_TMPDIR.
     std::string scratch_dir;
 
+    // Whether file_path is inside the workspace-managed temporary root. The
+    // root is derived from scratch_dir (its parent), so callers never duplicate
+    // the `.acecode/tmp` path contract.
+    bool is_workspace_scratch_path(const std::string& file_path) const;
+
     // Optional async channel for AskUserQuestion. Daemon path injects an impl
     // backed by AskUserQuestionPrompter; TUI path keeps it null and registers
     // the TUI-flavored AskUserQuestion factory which talks to TuiState directly.
@@ -145,6 +150,14 @@ struct ToolContext {
     // next model request.
     ToolExecutor* tool_executor = nullptr;
 };
+
+// UI-only metadata contract: a successful structured file change under the
+// workspace scratch root must not contribute to the per-turn "modified files"
+// summary. The tool row and its diff remain available.
+inline constexpr const char* kExcludeFromTurnChangeSummaryMetadata =
+    "exclude_from_turn_change_summary";
+
+void mark_workspace_scratch_change(ToolResult& result, const ToolContext& ctx);
 
 // Origin of a registered tool. MCP tools are grouped separately in the system
 // prompt so the LLM can distinguish internal versus external capabilities.

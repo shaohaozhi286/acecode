@@ -1,6 +1,7 @@
 #include "notifications_backend.hpp"
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if (!defined(_WIN32) && !defined(__APPLE__)) || \
+    defined(ACECODE_NOTIFICATION_BACKEND_STUB)
 
 namespace acecode::desktop::notification_backend {
 

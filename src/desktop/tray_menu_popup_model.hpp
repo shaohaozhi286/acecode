@@ -55,6 +55,38 @@ inline int compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
         (96LL * monitor_scale_percent + 50) / 100);
 }
 
+// Inverse of the scale-percent → DPI helper, used only for diagnostics when
+// the authoritative value is an effective DPI from GetDpiForMonitor.
+inline int compute_tray_popup_monitor_scale_percent_from_dpi(int dpi) {
+    if (dpi <= 0) return 100;
+    return static_cast<int>((static_cast<long long>(dpi) * 100 + 48) / 96);
+}
+
+// Merge DPI samples for the tray popup target monitor.
+//
+// - `dpi_from_get_dpi_for_monitor` is queried while per-monitor-aware
+//   (MDT_EFFECTIVE_DPI). Trust it when it reports a non-100% scale.
+// - `dpi_from_scale_factor_unaware` is GetScaleFactorForMonitor converted to
+//   DPI while the thread is temporarily UNAWARE. That API is only reliable
+//   in the unaware context; when aware it often under/over reports.
+// - Prefer the per-monitor effective DPI when it is already > 96. When it is
+//   stuck at 96 but the unaware scale factor reports a higher scale, use the
+//   scale-factor DPI so high-DPI trays do not lay out a 13px-at-96 font that
+//   then looks oversized relative to the rest of the desktop shell.
+inline int resolve_tray_popup_target_monitor_dpi(
+    int dpi_from_get_dpi_for_monitor,
+    int dpi_from_scale_factor_unaware) {
+    const int from_monitor =
+        dpi_from_get_dpi_for_monitor > 0 ? dpi_from_get_dpi_for_monitor : 0;
+    const int from_scale =
+        dpi_from_scale_factor_unaware > 0 ? dpi_from_scale_factor_unaware : 0;
+    if (from_monitor > 96) return from_monitor;
+    if (from_scale > 96) return from_scale;
+    if (from_monitor > 0) return from_monitor;
+    if (from_scale > 0) return from_scale;
+    return 96;
+}
+
 inline int compute_tray_popup_layout_dpi(
     int target_monitor_dpi,
     int system_dpi,

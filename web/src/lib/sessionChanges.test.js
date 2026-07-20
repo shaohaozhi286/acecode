@@ -131,6 +131,57 @@ run('collectTurnChangeSetsFromItems 将工具变更归到前一个用户消息',
   assert.equal(sets[1].groups[0].file, 'b.js');
 });
 
+run('collectTurnChangeSetsFromItems 从本轮文件摘要排除工作区临时文件', () => {
+  const scratchHunk = { old_start: 0, old_count: 0, new_start: 1, new_count: 3, lines: [] };
+  const sourceHunk = { old_start: 1, old_count: 1, new_start: 1, new_count: 2, lines: [] };
+  const sets = collectTurnChangeSetsFromItems([
+    { kind: 'msg', id: 1, messageId: 'u1', role: 'user', content: 'change files' },
+    {
+      kind: 'tool',
+      id: 2,
+      tool: {
+        summary: { object: 'N:/repo/.acecode/tmp/session-1/helper.py', metrics: [{ label: '+', value: '3' }] },
+        hunks: [scratchHunk],
+        metadata: { exclude_from_turn_change_summary: true },
+      },
+    },
+    {
+      kind: 'tool',
+      id: 3,
+      tool: {
+        summary: { object: 'N:/repo/src/main.cpp', metrics: [{ label: '+', value: '2' }, { label: '-', value: '1' }] },
+        hunks: [sourceHunk],
+      },
+    },
+  ]);
+
+  assert.equal(sets.length, 1);
+  assert.deepEqual(sets[0].groups.map((group) => group.file), ['N:/repo/src/main.cpp']);
+  assert.deepEqual(sets[0].summary, {
+    fileCount: 1,
+    totalAdditions: 2,
+    totalDeletions: 1,
+    hasChanges: true,
+  });
+});
+
+run('collectTurnChangeSetsFromItems 本轮仅修改临时文件时不生成摘要', () => {
+  const sets = collectTurnChangeSetsFromItems([
+    { kind: 'msg', id: 1, messageId: 'u1', role: 'user', content: 'write helper' },
+    {
+      kind: 'tool',
+      id: 2,
+      tool: {
+        summary: { object: 'N:/repo/.acecode/tmp/session-1/helper.ps1', metrics: [{ label: '+', value: '1' }] },
+        hunks: [{ old_start: 0, old_count: 0, new_start: 1, new_count: 1, lines: [] }],
+        metadata: { exclude_from_turn_change_summary: true },
+      },
+    },
+  ]);
+
+  assert.deepEqual(sets, []);
+});
+
 run('change signatures 对同一组变更保持稳定', () => {
   const groups = aggregateHunksFromMessages([
     { file: 'a.js', additions: 2, deletions: 1, hunks: [{ old_start: 1, old_count: 1, new_start: 1, new_count: 2, lines: [] }] },

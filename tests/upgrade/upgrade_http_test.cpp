@@ -62,7 +62,11 @@ std::string manifest_for(const std::string& version,
       "schema_version": 1,
       "latest": ")" + version + R"(",
       "releases": [
-        {"version": ")" + version + R"(", "packages": [
+        {
+          "version": ")" + version + R"(",
+          "published_at": "2026-07-20T08:00:00Z",
+          "notes": "New update history.",
+          "packages": [
           {"target": ")" + target + R"(", "file": ")" + file + R"(", "sha256": ")" + sha + R"("}
         ]}
       ]
@@ -218,15 +222,27 @@ TEST(UpgradeHttp, UpdateCheckReportsAvailableWithoutDownloadingPackage) {
     EXPECT_TRUE(result.update_available());
     EXPECT_EQ(result.latest_version, "9.9.9");
     EXPECT_EQ(result.package_file, "acecode.zip");
+    ASSERT_EQ(result.releases.size(), 1u);
+    EXPECT_EQ(result.releases[0].version, "9.9.9");
+    EXPECT_EQ(result.releases[0].published_at, "2026-07-20T08:00:00Z");
+    EXPECT_EQ(result.releases[0].notes, "New update history.");
     EXPECT_FALSE(package_requested);
 }
 
 TEST(UpgradeHttp, UpdateCheckReportsUpToDate) {
     LocalHttpServer server([](httplib::Server& s) {
         s.Get("/aceupdate.json", [](const httplib::Request&, httplib::Response& res) {
-            res.set_content(manifest_for("0.1.2", acecode::upgrade::current_target(),
-                                         "acecode.zip", std::string(64, 'a')),
-                            "application/json");
+            res.set_content(R"({
+              "schema_version": 1,
+              "latest": "0.1.2",
+              "releases": [
+                {"version": "0.1.2", "packages": [
+                  {"target": ")" + acecode::upgrade::current_target() +
+                  R"(", "file": "acecode.zip", "sha256": ")" +
+                  std::string(64, 'a') + R"("}
+                ]}
+              ]
+            })", "application/json");
         });
     });
 
@@ -235,6 +251,10 @@ TEST(UpgradeHttp, UpdateCheckReportsUpToDate) {
 
     EXPECT_EQ(result.status, acecode::upgrade::UpdateCheckStatus::UpToDate);
     EXPECT_FALSE(result.update_available());
+    ASSERT_EQ(result.releases.size(), 1u);
+    EXPECT_EQ(result.releases[0].version, "0.1.2");
+    EXPECT_TRUE(result.releases[0].published_at.empty());
+    EXPECT_TRUE(result.releases[0].notes.empty());
 }
 
 TEST(UpgradeHttp, UpdateCheckRejectsInvalidConfigBeforeNetwork) {

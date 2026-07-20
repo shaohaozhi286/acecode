@@ -243,6 +243,61 @@ body {
   user-select: none;
 }
 
+.ace-conversation-turn-page-button {
+  appearance: none;
+  position: absolute;
+  left: 3px;
+  z-index: 2;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--ace-fg-2);
+  background: rgba(var(--ace-surface-rgb), 0.72);
+  cursor: pointer;
+  outline: none;
+  transition:
+    top 280ms cubic-bezier(.22, 1, .36, 1),
+    color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 240ms cubic-bezier(.34, 1.56, .64, 1);
+}
+
+.ace-conversation-turn-page-button > svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ace-conversation-turn-page-button:hover:not(:disabled) {
+  color: var(--ace-accent);
+  background: rgba(var(--ace-accent-rgb), 0.1);
+  transform: scale(1.08);
+}
+
+.ace-conversation-turn-page-button:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.ace-conversation-turn-page-button:focus-visible {
+  color: var(--ace-accent);
+  box-shadow: 0 0 0 2px rgba(var(--ace-accent-rgb), 0.22);
+}
+
+.ace-conversation-turn-page-button:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
 .ace-conversation-turn-scrubber-hit {
   --ace-conversation-turn-marker-shift-y: 0px;
   appearance: none;
@@ -261,6 +316,8 @@ body {
   background: transparent;
   cursor: pointer;
   outline: none;
+  will-change: top;
+  transition: top 280ms cubic-bezier(.22, 1, .36, 1);
 }
 
 .ace-conversation-turn-scrubber-dot {

@@ -2,7 +2,9 @@
 // 覆盖 Claude Code 风格工具行 ` ● ToolName(args)` 的三块纯逻辑:
 //   1. pascal_case_tool_name —— snake_case → PascalCase 工具名转换;
 //   2. parse_tool_row —— 从 legacy content / display_override 拆名字和参数;
-//   3. compute_tool_call_dots —— tool_call ↔ tool_result 的 FIFO 配对指示灯。
+//   3. compute_tool_call_dots / compute_tool_result_names —— tool_call ↔
+//      tool_result 的 FIFO 配对;
+//   4. task_complete 识别与 Markdown summary 原文提取。
 
 #include "tui/tool_row_format.hpp"
 
@@ -159,6 +161,86 @@ TEST(ToolRowFormatTest, ResultFailedBySummaryMetrics) {
     auto timeout = make_msg("tool_result", "output");
     timeout.summary = ToolSummary{"Ran", "ls", {{"timeout", "true"}}, "$"};
     EXPECT_TRUE(tool_result_row_failed(timeout));
+}
+
+// ---- task_complete presentation ----
+
+// 场景:并行工具批次先出现全部 call，再按原始顺序出现 result。
+// 期望:结果工具名按 FIFO 配对；task_complete 只命中自己的结果，不会把
+// 前一个普通工具结果误认成完成摘要。
+TEST(ToolRowFormatTest, ResultNamesPairParallelBatchFifo) {
+    std::vector<TuiState::Message> conv;
+    conv.push_back(make_msg(
+        "tool_call", "[Tool: file_read] {\"file_path\":\"a.cpp\"}"));
+    conv.push_back(make_msg(
+        "tool_call", "[Tool: task_complete] {\"summary\":\"done\"}"));
+    conv.push_back(make_msg("tool_result", "contents"));
+    conv.push_back(make_msg("tool_result", "- **Done**\n- Tests pass"));
+
+    const auto names = compute_tool_result_names(conv);
+    ASSERT_EQ(names.size(), 4u);
+    EXPECT_EQ(names[2], "file_read");
+    EXPECT_EQ(names[3], "task_complete");
+    EXPECT_FALSE(is_task_complete_result(conv[2], names[2]));
+    EXPECT_TRUE(is_task_complete_result(conv[3], names[3]));
+}
+
+// 场景:上一轮留下孤儿 call，下一轮有普通 result。
+// 期望:user 边界清空 FIFO，旧 task_complete 绝不能污染下一轮配对。
+TEST(ToolRowFormatTest, ResultNamesClearAtConversationBoundary) {
+    std::vector<TuiState::Message> conv;
+    conv.push_back(make_msg(
+        "tool_call", "[Tool: task_complete] {\"summary\":\"old\"}"));
+    conv.push_back(make_msg("user", "继续"));
+    conv.push_back(make_msg("tool_call", "[Tool: bash] {}"));
+    conv.push_back(make_msg("tool_result", "ok"));
+
+    const auto names = compute_tool_result_names(conv);
+    ASSERT_EQ(names.size(), 4u);
+    EXPECT_EQ(names[3], "bash");
+    EXPECT_FALSE(is_task_complete_result(conv[3], names[3]));
+}
+
+// 场景:恢复后的历史片段只剩 tool_result，配对 call 已被 compact 截掉，
+// 但持久化 ToolSummary 仍是 task_complete 的 complete · task 形状。
+// 期望:元数据 fallback 仍识别为完成摘要；普通 complete 之外的 summary
+// 即使碰巧带 summary metric 也不误判。
+TEST(ToolRowFormatTest, TaskCompleteRecognizesPersistedSummaryShape) {
+    auto complete = make_msg("tool_result", "done");
+    complete.summary = ToolSummary{
+        "complete", "task", {{"summary", "- fixed\n- tested"}}, "D"};
+    EXPECT_TRUE(is_task_complete_result(complete));
+
+    auto ordinary = make_msg("tool_result", "generated report");
+    ordinary.summary = ToolSummary{
+        "Generated", "report", {{"summary", "two pages"}}, "G"};
+    EXPECT_FALSE(is_task_complete_result(ordinary));
+}
+
+// 场景:ToolSummary 的 summary metric 含多段 Markdown。
+// 期望:原文逐字返回（含换行和 fenced code），不走单行 summary 清洗；
+// 旧数据缺 metric 时依次回退非占位 object 和 ToolResult.output。
+TEST(ToolRowFormatTest, TaskCompleteMarkdownPrefersRawSummaryMetric) {
+    auto current = make_msg("tool_result", "output fallback");
+    const std::string markdown =
+        "## 完成\n\n- **修复**折叠\n\n```cpp\nreturn 0;\n```";
+    current.summary = ToolSummary{
+        "complete", "task", {{"summary", markdown}}, "D"};
+    EXPECT_EQ(task_complete_summary_markdown(current), markdown);
+
+    auto object_fallback = make_msg("tool_result", "output fallback");
+    object_fallback.summary = ToolSummary{
+        "complete", "*Legacy* summary", {}, "D"};
+    EXPECT_EQ(
+        task_complete_summary_markdown(object_fallback),
+        "*Legacy* summary");
+
+    auto output_fallback = make_msg("tool_result", "- output fallback");
+    output_fallback.summary = ToolSummary{
+        "complete", "task", {}, "D"};
+    EXPECT_EQ(
+        task_complete_summary_markdown(output_fallback),
+        "- output fallback");
 }
 
 // ---- compute_tool_call_dots ----

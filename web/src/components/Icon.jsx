@@ -67,6 +67,7 @@ const ICONS = {
   warning: 'StatusWarning',
   wordWrap: 'WordWrap',
   world: 'World',
+  workspaceMenu: 'WorkspaceMenu',
   worktree: 'Worktree',
   error: 'StatusError',
 };

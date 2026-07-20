@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import {
+  MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
   RUNNING_ANSWER_PREVIEW,
   activeConversationTurnIndex,
   activatedConversationTurnIndex,
   buildConversationTurnPreviews,
+  centeredConversationTurnWindowStart,
   conversationTurnMarkerDisplacement,
   conversationTurnMarkerLayout,
+  conversationTurnPageControlTop,
   conversationTurnPreviewTop,
+  conversationTurnSteppedWindowStart,
+  conversationTurnWindow,
+  conversationTurnWindowStartContainingIndex,
   nearestConversationTurnIndex,
   shouldShowConversationTurnScrubber,
 } from './conversationTurnScrubber.js';
@@ -47,6 +53,52 @@ run('turn scrubber appears only from the fifth user question', () => {
   const fiveTurns = Array.from({ length: 5 }, (_, index) => ({ itemId: String(index) }));
   assert.equal(shouldShowConversationTurnScrubber(fourTurns), false);
   assert.equal(shouldShowConversationTurnScrubber(fiveTurns), true);
+});
+
+run('turn window shows at most twenty markers and paginates only beyond the cap', () => {
+  assert.equal(MAX_CONVERSATION_TURN_SCRUBBER_MARKERS, 20);
+  assert.deepEqual(
+    conversationTurnWindow(20, 7),
+    {
+      start: 0,
+      end: 20,
+      visibleCount: 20,
+      hasPrevious: false,
+      hasNext: false,
+      paginated: false,
+    },
+  );
+  assert.deepEqual(
+    conversationTurnWindow(21, 0),
+    {
+      start: 0,
+      end: 20,
+      visibleCount: 20,
+      hasPrevious: false,
+      hasNext: true,
+      paginated: true,
+    },
+  );
+});
+
+run('turn window arrows move exactly one turn and clamp at both boundaries', () => {
+  assert.equal(conversationTurnSteppedWindowStart(0, 1, 40), 1);
+  assert.equal(conversationTurnSteppedWindowStart(10, -1, 40), 9);
+  assert.equal(conversationTurnSteppedWindowStart(0, -1, 40), 0);
+  assert.equal(conversationTurnSteppedWindowStart(20, 1, 40), 20);
+});
+
+run('upper and lower selections recenter near the middle with edge clamping', () => {
+  assert.equal(centeredConversationTurnWindowStart(23, 60), 14);
+  assert.equal(centeredConversationTurnWindowStart(36, 60), 27);
+  assert.equal(centeredConversationTurnWindowStart(1, 60), 0);
+  assert.equal(centeredConversationTurnWindowStart(58, 60), 40);
+});
+
+run('active containment keeps an in-window turn and recenters an escaped turn', () => {
+  assert.equal(conversationTurnWindowStartContainingIndex(20, 39, 60), 20);
+  assert.equal(conversationTurnWindowStartContainingIndex(20, 41, 60), 32);
+  assert.equal(conversationTurnWindowStartContainingIndex(20, 2, 60), 0);
 });
 
 run('turn projection ignores non-user rows and keeps attachment-only questions jumpable', () => {
@@ -102,6 +154,51 @@ run('marker layout keeps equal ordering gaps and compresses into short rails', (
     [12, 18, 24, 30, 36],
   );
   assert.ok(dense.every((marker) => marker.zoneHeight > 0));
+});
+
+run('paging arrows stay immediately outside the marker stack endpoints', () => {
+  const spacious = conversationTurnMarkerLayout(
+    20,
+    520,
+    { edgePadding: 34 },
+  );
+  assert.equal(spacious[0].centerY, 89);
+  assert.equal(spacious[spacious.length - 1].centerY, 431);
+  assert.equal(
+    conversationTurnPageControlTop(spacious[0].centerY, -1, 520),
+    59,
+  );
+  assert.equal(
+    conversationTurnPageControlTop(
+      spacious[spacious.length - 1].centerY,
+      1,
+      520,
+    ),
+    441,
+  );
+
+  const compressed = conversationTurnMarkerLayout(
+    20,
+    68,
+    { edgePadding: 34 },
+  );
+  assert.equal(
+    conversationTurnPageControlTop(compressed[0].centerY, -1, 68),
+    4,
+  );
+  assert.equal(
+    conversationTurnPageControlTop(
+      compressed[compressed.length - 1].centerY,
+      1,
+      68,
+    ),
+    44,
+  );
+});
+
+run('paging arrow positions clamp inside the rail', () => {
+  assert.equal(conversationTurnPageControlTop(5, -1, 100), 0);
+  assert.equal(conversationTurnPageControlTop(95, 1, 100), 80);
 });
 
 run('nearest hit resolves a marker only inside the allowed distance', () => {

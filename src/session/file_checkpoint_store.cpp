@@ -14,6 +14,13 @@
 #include <iterator>
 #include <sstream>
 
+#ifdef __MINGW32__
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace acecode {
@@ -49,11 +56,24 @@ bool write_copy_with_dirs(const fs::path& from, const fs::path& to, std::string&
     std::error_code ec;
     fs::create_directories(to.parent_path(), ec);
     ec.clear();
+#ifdef __MINGW32__
+    // libstdc++ 14's Windows copy_file implementation can report
+    // ERROR_FILE_EXISTS even with overwrite_existing. Use the native API for
+    // the restore path, where replacing an existing file is the common case.
+    if (!::CopyFileW(from.c_str(), to.c_str(), FALSE)) {
+        error = std::error_code(
+                    static_cast<int>(::GetLastError()),
+                    std::system_category())
+                    .message();
+        return false;
+    }
+#else
     fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
     if (ec) {
         error = ec.message();
         return false;
     }
+#endif
     ec.clear();
     auto perms = fs::status(from, ec).permissions();
     if (!ec) {

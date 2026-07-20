@@ -43,9 +43,21 @@ namespace {
 // 直接调用 CreatePseudoConsole 会让二进制在 < 1809 上加载失败,必须走
 // GetProcAddress。三个函数一起解析,缺一即视为不可用。
 
-typedef HRESULT(WINAPI* CreatePseudoConsoleFn)(COORD, HANDLE, HANDLE, DWORD, HPCON*);
-typedef HRESULT(WINAPI* ResizePseudoConsoleFn)(HPCON, COORD);
-typedef void(WINAPI* ClosePseudoConsoleFn)(HPCON);
+// Older Windows SDK and MinGW header targets hide the ConPTY declarations.
+// The public HPCON ABI is a void pointer, and pseudo-console is attribute 22.
+using PseudoConsoleHandle = void*;
+#ifdef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+constexpr DWORD_PTR kPseudoConsoleAttribute =
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE;
+#else
+constexpr DWORD_PTR kPseudoConsoleAttribute =
+    ProcThreadAttributeValue(22, FALSE, TRUE, FALSE);
+#endif
+
+typedef HRESULT(WINAPI* CreatePseudoConsoleFn)(
+    COORD, HANDLE, HANDLE, DWORD, PseudoConsoleHandle*);
+typedef HRESULT(WINAPI* ResizePseudoConsoleFn)(PseudoConsoleHandle, COORD);
+typedef void(WINAPI* ClosePseudoConsoleFn)(PseudoConsoleHandle);
 
 struct ConPtyApi {
     CreatePseudoConsoleFn create = nullptr;
@@ -285,7 +297,7 @@ public:
         if (!attr_list_ ||
             !InitializeProcThreadAttributeList(attr_list_, 1, 0, &attr_size) ||
             !UpdateProcThreadAttribute(attr_list_, 0,
-                                       PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                                       kPseudoConsoleAttribute,
                                        hpc_, sizeof(hpc_), nullptr, nullptr)) {
             error = last_error_text("InitializeProcThreadAttributeList");
             return false;
@@ -351,7 +363,7 @@ protected:
     }
 
 private:
-    HPCON hpc_ = nullptr;
+    PseudoConsoleHandle hpc_ = nullptr;
     std::mutex hpc_mu_;
     LPPROC_THREAD_ATTRIBUTE_LIST attr_list_ = nullptr;
     std::thread waiter_;

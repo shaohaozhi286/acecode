@@ -83,6 +83,14 @@ json update_check_to_json(const acecode::upgrade::UpdateCheckResult& result) {
         {"target", result.target},
         {"manifest_url", result.manifest_url},
     };
+    out["releases"] = json::array();
+    for (const auto& release : result.releases) {
+        out["releases"].push_back({
+            {"version", release.version},
+            {"published_at", release.published_at},
+            {"notes", release.notes},
+        });
+    }
     if (!result.package_file.empty()) out["package_file"] = result.package_file;
     if (!result.package_url.empty()) out["package_url"] = result.package_url;
     if (result.package_size) out["package_size"] = *result.package_size;

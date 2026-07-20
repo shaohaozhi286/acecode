@@ -14,6 +14,7 @@
 #include "tool/tool_executor.hpp"
 #include "tool/diff_utils.hpp"
 #include "provider/llm_provider.hpp"
+#include "tui/tool_row_format.hpp"
 #include "tui_state.hpp"
 
 #include <nlohmann/json.hpp>
@@ -204,6 +205,44 @@ TEST(SessionReplay, ToolMessageWithSummaryMetadata) {
     EXPECT_EQ(out[0].summary->verb, "Edited");
     EXPECT_EQ(out[0].summary->object, "src/foo.cpp");
     EXPECT_FALSE(out[0].hunks.has_value());
+}
+
+// canonical assistant(task_complete) + tool result 恢复后仍须保留精确工具身份，
+// 并从持久化 summary metric 取回 Markdown 原文，供 TUI 永久展开渲染。
+TEST(SessionReplay, TaskCompleteRestoresMarkdownPresentationIdentity) {
+    const std::string markdown =
+        "## Done\n\n- **Changed** TUI\n- Ran `tests`";
+
+    ChatMessage call;
+    call.role = "assistant";
+    call.tool_calls = one_tool_call(
+        "done-1", "task_complete",
+        R"({"summary":"## Done\n\n- **Changed** TUI\n- Ran `tests`"})");
+
+    ChatMessage result;
+    result.role = "tool";
+    result.tool_call_id = "done-1";
+    result.content = markdown;
+    ToolSummary summary;
+    summary.verb = "complete";
+    summary.object = "task";
+    summary.icon = "D";
+    summary.metrics = {{"summary", markdown}};
+    result.metadata["tool_summary"] = encode_tool_summary(summary);
+
+    ToolExecutor tools;
+    auto out = replay_session_messages({call, result}, tools);
+
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0].role, "tool_call");
+    EXPECT_EQ(out[1].role, "tool_result");
+    const auto names = acecode::tui::compute_tool_result_names(out);
+    ASSERT_EQ(names.size(), 2u);
+    EXPECT_EQ(names[1], "task_complete");
+    EXPECT_TRUE(acecode::tui::is_task_complete_result(out[1], names[1]));
+    EXPECT_EQ(
+        acecode::tui::task_complete_summary_markdown(out[1]),
+        markdown);
 }
 
 // metadata.tool_hunks 存在 → hunks 字段被还原。

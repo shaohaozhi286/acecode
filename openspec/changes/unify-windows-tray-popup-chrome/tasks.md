@@ -47,3 +47,10 @@
 - [x] 8.2 Enter a per-monitor thread DPI context before reading the tray anchor and keep it through custom popup creation, restoring the previous context afterward.
 - [x] 8.3 Fall back to the effective thread coordinate-space DPI when per-monitor mode is unavailable, and log target, layout, owner, and popup DPI contexts for machine-to-machine diagnosis.
 - [x] 8.4 Build the affected Windows targets, run focused tests, validate OpenSpec strictly, and inspect the final diff without including unrelated worktree changes.
+
+## 9. Effective Monitor DPI Source Correction
+
+- [x] 9.1 Prefer `GetDpiForMonitor(MDT_EFFECTIVE_DPI)` for the target monitor after the per-monitor thread context is active; keep `GetScaleFactorForMonitor` only as a last-resort fallback.
+- [x] 9.2 Add a pure effective-DPI → scale-percent helper for diagnostics and regressions (96→100, 120→125, 144→150, 134→140).
+- [x] 9.3 Document why DPI-aware callers must not treat `GetScaleFactorForMonitor` as authoritative (enum snaps / inflated factors on 100% Win10 displays).
+- [x] 9.4 Build `acecode_unit_tests` / `acecode_desktop_support` and run focused tray popup tests (22/22). Full `acecode-desktop.exe` link needs a closed running instance; cross-machine 100% display check remains manual.

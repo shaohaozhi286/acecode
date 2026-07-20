@@ -872,6 +872,22 @@ function WorkspaceGroup({
     return () => window.removeEventListener(DESKTOP_CONTEXT_ACTION_EVENT, handler);
   }, [expanded, onActivate, onImportOpencode, onNewSession, onRemove, onToggle, ws]);
 
+  const openWorkspaceContextMenu = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof window === 'undefined') return;
+
+    const button = event.currentTarget;
+    const rect = button.getBoundingClientRect();
+    button.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: Math.min(window.innerWidth - 8, rect.right - 4),
+      clientY: Math.min(window.innerHeight - 8, rect.bottom + 4),
+    }));
+  }, []);
+
   const commit = async () => {
     setEditing(false);
     const name = draft.trim();
@@ -924,29 +940,24 @@ function WorkspaceGroup({
             <SidebarDisclosure expanded={expanded} />
           </span>
         )}
-        <span className="flex items-center justify-end gap-1 shrink-0">
+        <span data-sidebar-workspace-actions="true" className="flex items-center justify-end gap-1 shrink-0">
+          {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读任务" />}
           <button
+            data-sidebar-workspace-menu="true"
+            type="button"
+            onClick={openWorkspaceContextMenu}
+            className="ace-sidebar-workspace-action w-6 h-6 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition"
+            title="工作区菜单"
+            aria-label="工作区菜单"
+          ><VsIcon name="workspaceMenu" size={16} /></button>
+          <button
+            data-sidebar-workspace-new-task="true"
             type="button"
             onClick={(e) => { e.stopPropagation(); onNewSession(ws); }}
             className="ace-sidebar-workspace-action w-6 h-6 rounded hover:bg-surface-hi flex items-center justify-center shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition"
             title="在此工作区新建任务"
             aria-label="在此工作区新建任务"
           ><VsIcon name="newSession" size={16} /></button>
-          {hasUnread && <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ok shadow-[0_0_4px_var(--ace-ok)]" title="有未读任务" />}
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); setEditing(true); }}
-            className="w-6 h-6 rounded text-fg-mute hover:text-fg hover:bg-surface-hi opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
-            title="重命名"
-          ><VsIcon name="edit" size={16} /></button>
-          {onRemove && (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onRemove(ws); }}
-              className="w-6 h-6 rounded text-fg-mute hover:text-danger hover:bg-danger-bg opacity-0 group-hover:opacity-100 flex items-center justify-center shrink-0 transition"
-              title="从桌面工作区列表移除"
-            ><VsIcon name="close" size={16} /></button>
-          )}
         </span>
       </div>
       {expanded && (

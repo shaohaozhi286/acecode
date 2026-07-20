@@ -1,5 +1,7 @@
 import { formatBytes } from '../lib/format.js';
 import {
+  formatUpdatePublishedDate,
+  normalizeUpdateReleases,
   updateDialogMode,
   updateJobIsActive,
   updateJobPhaseLabel,
@@ -28,33 +30,46 @@ export function UpdateDialog({
 }) {
   if (!open) return null;
 
-  const mode = updateDialogMode(job);
+  const mode = updateDialogMode(job, updateStatus);
   const active = updateJobIsActive(job) || starting || restarting;
   const currentVersion = job?.current_version || updateStatus?.current_version;
-  const targetVersion = job?.target_version || updateStatus?.latest_version;
+  const targetVersion = mode === 'up_to_date'
+    ? currentVersion
+    : job?.target_version || updateStatus?.latest_version;
   const packageSize = job?.bytes_total ?? updateStatus?.package_size;
+  const releaseHistory = normalizeUpdateReleases(updateStatus?.releases);
   const progress = updateJobProgress(job);
   const phaseLabel = starting && !job ? '正在启动升级任务' : updateJobPhaseLabel(job);
   const restartMessage = updateRestartMessage(job);
+  const title = mode === 'success'
+    ? '升级安装完成'
+    : mode === 'failure'
+      ? '升级失败'
+      : mode === 'up_to_date'
+        ? '已是最新版本'
+        : 'ACECode 升级';
+  const subtitle = mode === 'confirm'
+    ? '升级期间可以继续查看当前页面，请勿重复启动升级。'
+    : mode === 'up_to_date'
+      ? '当前安装的 ACECode 已是最新版本。'
+      : phaseLabel;
 
   return (
-    <Modal onClose={onClose} width={500} dismissOnBackdrop={!active}>
+    <Modal onClose={onClose} width={560} dismissOnBackdrop={!active}>
       <div className="px-5 py-4 border-b border-border">
-        <div className="text-[15px] font-semibold text-fg">
-          {mode === 'success' ? '升级安装完成' : mode === 'failure' ? '升级失败' : 'ACECode 升级'}
-        </div>
+        <div className="text-[15px] font-semibold text-fg">{title}</div>
         <div className="mt-1 text-[12px] text-fg-mute">
-          {mode === 'confirm'
-            ? '升级期间可以继续查看当前页面，请勿重复启动升级。'
-            : phaseLabel}
+          {subtitle}
         </div>
       </div>
 
-      <div className="px-5 py-5">
+      <div className="max-h-[calc(100vh-10rem)] overflow-y-auto px-5 py-5">
         <div className="grid grid-cols-[88px_1fr] gap-y-2 text-[12px]">
           <span className="text-fg-mute">当前版本</span>
           <span className="text-fg font-medium tabular-nums">{versionText(currentVersion)}</span>
-          <span className="text-fg-mute">目标版本</span>
+          <span className="text-fg-mute">
+            {mode === 'up_to_date' ? '最新版本' : '目标版本'}
+          </span>
           <span className="text-fg font-medium tabular-nums">{versionText(targetVersion)}</span>
           {Number(packageSize) > 0 && (
             <>
@@ -63,6 +78,55 @@ export function UpdateDialog({
             </>
           )}
         </div>
+
+        {mode === 'up_to_date' && (
+          <div className="mt-5 rounded-lg border border-ok bg-surface-alt px-4 py-3 text-[12px] leading-5 text-fg">
+            当前已是最新版本，无需升级。
+          </div>
+        )}
+
+        {releaseHistory.length > 0 && (
+          <section className="mt-5" aria-label="版本更新记录">
+            <div className="text-[14px] font-semibold text-fg">版本更新记录</div>
+            <div className="mt-1 text-[11px] text-fg-mute">
+              来自升级服务的历次版本说明
+            </div>
+            <div className="mt-3 max-h-64 overflow-y-auto rounded-lg border border-border bg-surface-alt">
+              {releaseHistory.map((release, index) => {
+                const publishedDate = formatUpdatePublishedDate(release.published_at);
+                const latest = release.version === updateStatus?.latest_version;
+                return (
+                  <article
+                    key={`${release.version}-${index}`}
+                    className={[
+                      'px-3.5 py-3',
+                      index > 0 ? 'border-t border-border' : '',
+                    ].join(' ')}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[12px] font-semibold text-fg tabular-nums">
+                        {versionText(release.version)}
+                      </span>
+                      {latest && (
+                        <span className="rounded bg-accent-bg px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                          最新
+                        </span>
+                      )}
+                      {publishedDate && (
+                        <span className="ml-auto text-[10px] text-fg-mute tabular-nums">
+                          {publishedDate}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-fg-2">
+                      {release.notes}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {(mode === 'running' || starting) && (
           <div className="mt-5">
@@ -125,6 +189,15 @@ export function UpdateDialog({
               {starting ? '正在启动…' : '立即升级'}
             </button>
           </>
+        )}
+        {mode === 'up_to_date' && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md bg-accent px-4 py-1.5 text-[12px] font-medium text-white hover:opacity-90"
+          >
+            关闭
+          </button>
         )}
         {mode === 'running' && (
           <button

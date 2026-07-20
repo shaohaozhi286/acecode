@@ -12,6 +12,7 @@
 #include "web/handlers/files_handler.hpp"
 #include "utils/encoding.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>

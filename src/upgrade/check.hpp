@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace acecode::upgrade {
 
@@ -17,6 +18,12 @@ enum class UpdateCheckStatus {
     ManifestInvalid,
 };
 
+struct UpdateReleaseSummary {
+    std::string version;
+    std::string published_at;
+    std::string notes;
+};
+
 struct UpdateCheckResult {
     UpdateCheckStatus status = UpdateCheckStatus::ManifestUnavailable;
     std::string current_version;
@@ -26,6 +33,7 @@ struct UpdateCheckResult {
     std::string package_file;
     std::string package_url;
     std::optional<std::uintmax_t> package_size;
+    std::vector<UpdateReleaseSummary> releases;
     long http_status = 0;
     std::string error;
 

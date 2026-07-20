@@ -136,7 +136,6 @@
 #include "tui/path_reference_input.hpp"
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
-#include "tui/non_selectable.hpp"
 #include "tui/thinking_animation.hpp"
 #include "tui/thinking_heartbeat.hpp"
 #include "tui/tool_progress.hpp"
@@ -144,8 +143,8 @@
 #include "tui/tool_row_format.hpp"
 #include "tui/tool_row_presentation.hpp"
 #include "tui/theme_palette.hpp"
+#include "tui/tui_helpers.hpp"
 #include "utils/terminal_theme_detect.hpp"
-#include "tui/sidebar_model.hpp"
 #include "tui/subagent_host.hpp"
 #include "tool/spawn_subagent_tool.hpp"
 #include "tui/todo_checklist_view.hpp"
@@ -258,27 +257,6 @@ static std::string collapse_sidebar_title_whitespace(std::string_view text) {
     return out;
 }
 
-static std::string first_user_message_title(const acecode::TuiState& state) {
-    std::string explicit_title =
-        collapse_sidebar_title_whitespace(state.current_session_title);
-    if (!explicit_title.empty()) return explicit_title;
-    for (const auto& msg : state.conversation) {
-        if (msg.role == "user") {
-            std::string title = collapse_sidebar_title_whitespace(msg.content);
-            if (!title.empty()) {
-                return title;
-            }
-        }
-    }
-    return std::string("New session");
-}
-
-static void trim_ascii_space_suffix(std::string& text) {
-    while (!text.empty() && text.back() == ' ') {
-        text.pop_back();
-    }
-}
-
 static std::string truncate_cells_prefix(std::string_view text, int max_cells) {
     if (max_cells <= 0) {
         return {};
@@ -347,63 +325,6 @@ static std::string truncate_cells_middle_ascii(std::string_view text, int max_ce
     return out;
 }
 
-static Element sidebar_section_header(const std::string& label, int count) {
-    return hbox({
-        text(label) | color(tui::theme().ui.text_muted) | dim,
-        text(" " + std::to_string(count)) | color(tui::theme().ui.text_dim) | dim,
-    });
-}
-
-static std::string sidebar_change_stats_text(
-    const acecode::tui::SidebarFileChange& change) {
-    std::string out;
-    if (change.additions > 0) {
-        out += "+" + std::to_string(change.additions);
-    }
-    if (change.deletions > 0) {
-        if (!out.empty()) {
-            out += " ";
-        }
-        out += "-" + std::to_string(change.deletions);
-    }
-    return out.empty() ? std::string("0") : out;
-}
-
-static Element render_sidebar_change_row(
-    const acecode::tui::SidebarFileChange& change,
-    int content_width) {
-    const std::string stats_text = sidebar_change_stats_text(change);
-    const int file_width =
-        std::max(1, content_width - 2 - static_cast<int>(stats_text.size()) - 1);
-    Elements stats_parts;
-    if (change.additions > 0) {
-        stats_parts.push_back(
-            text("+" + std::to_string(change.additions)) |
-            color(tui::theme().semantic.success));
-    }
-    if (change.deletions > 0) {
-        if (!stats_parts.empty()) {
-            stats_parts.push_back(text(" "));
-        }
-        stats_parts.push_back(
-            text("-" + std::to_string(change.deletions)) |
-            color(tui::theme().semantic.error));
-    }
-    if (stats_parts.empty()) {
-        stats_parts.push_back(text("0") | color(tui::theme().ui.text_dim) | dim);
-    }
-
-    return hbox({
-        text("  ") | color(tui::theme().ui.text_dim),
-        text(truncate_cells_middle_ascii(
-                 change.display_file.empty() ? change.file : change.display_file,
-                 file_width)) |
-            color(tui::theme().ui.text_muted),
-        filler(),
-        hbox(std::move(stats_parts)),
-    });
-}
-
 static std::string mcp_state_label(McpServerState state) {
     switch (state) {
         case McpServerState::Starting:  return "starting";
@@ -414,14 +335,6 @@ static std::string mcp_state_label(McpServerState state) {
         case McpServerState::TimedOut:  return "timed_out";
     }
     return "unknown";
-}
-
-static Color mcp_sidebar_state_color(const std::string& state) {
-    if (state == "connected") return tui::theme().semantic.success;
-    if (state == "starting") return Color::White;
-    if (state == "failed" || state == "timed_out") return tui::theme().semantic.error;
-    if (state == "cancelled") return tui::theme().semantic.warning;
-    return tui::theme().ui.text_dim;
 }
 
 static bool mcp_sidebar_has_loading(
@@ -472,17 +385,6 @@ static Element render_white_shimmer_text(const std::string& label,
     return hbox(std::move(parts));
 }
 
-static std::string format_tool_count(size_t tool_count) {
-    return std::to_string(tool_count) + (tool_count == 1 ? " tool" : " tools");
-}
-
-static std::string uppercase_ascii(std::string text) {
-    for (char& c : text) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
-    return text;
-}
-
 static std::vector<acecode::TuiState::McpSidebarServer>
 build_mcp_sidebar_servers(const McpManager& manager) {
     auto server_infos = manager.list_servers();
@@ -504,70 +406,6 @@ static void set_mcp_sidebar_servers_locked(
     acecode::TuiState& state,
     std::vector<acecode::TuiState::McpSidebarServer> servers) {
     state.mcp_sidebar_servers = std::move(servers);
-}
-
-static Element render_mcp_sidebar_section(
-    const std::vector<acecode::TuiState::McpSidebarServer>& servers,
-    int content_width,
-    int anim_tick) {
-    if (servers.empty()) {
-        return emptyElement();
-    }
-
-    Elements rows;
-    rows.push_back(text("MCP") | bold | color(tui::theme().ui.text_primary));
-
-    constexpr std::size_t kMaxServers = 8;
-    std::size_t shown_servers = 0;
-
-    for (const auto& server : servers) {
-        if (shown_servers >= kMaxServers) {
-            break;
-        }
-        ++shown_servers;
-
-        const Color state_color = mcp_sidebar_state_color(server.state);
-        const bool server_loading = server.state == "starting";
-        const bool server_connected = server.state == "connected";
-        const bool server_failed =
-            server.state == "failed" || server.state == "timed_out";
-        const std::string bullet = "\xE2\x80\xA2"; // bullet
-
-        Element status;
-        if (server_loading) {
-            status = render_white_shimmer_text("Loading", anim_tick);
-        } else if (server_connected) {
-            status = text("Connected (" + format_tool_count(server.tool_count) + ")") |
-                     color(tui::theme().ui.text_muted);
-        } else if (server_failed && !server.error.empty()) {
-            status = hbox({
-                text(uppercase_ascii(server.transport) + " error: ") |
-                    color(tui::theme().semantic.error),
-                paragraph(server.error) |
-                    color(tui::theme().ui.text_muted) | dim | flex,
-            });
-        } else {
-            status = text(server.state) | color(state_color) | dim;
-        }
-
-        const int name_width = std::max(1, content_width / 2);
-        rows.push_back(hbox({
-            text("  " + bullet + " ") | color(state_color),
-            text(truncate_cells_middle_ascii(server.name, name_width)) |
-                bold | color(tui::theme().ui.text_primary),
-            text(" "),
-            status | flex,
-        }));
-    }
-
-    if (servers.size() > shown_servers) {
-        rows.push_back(
-            text("  +" + std::to_string(servers.size() - shown_servers) +
-                 " more servers") |
-            color(tui::theme().ui.text_dim) | dim);
-    }
-
-    return vbox(std::move(rows));
 }
 
 static Element queued_badge() {
@@ -731,167 +569,6 @@ static Element render_pending_attachment_block(const acecode::TuiState& state,
         text(truncate_cells_middle_ascii(hint, std::max(12, available_width - 2))) |
         dim | color(tui::theme().ui.text_dim));
     return vbox(std::move(rows));
-}
-
-static std::vector<std::string> sidebar_title_lines(const std::string& title,
-                                                    int max_width) {
-    max_width = std::max(1, max_width);
-    const auto glyphs = ftxui::Utf8ToGlyphs(title);
-    std::vector<std::string> lines;
-    std::size_t index = 0;
-
-    for (int line_index = 0; line_index < 2 && index < glyphs.size(); ++line_index) {
-        std::string line;
-        int width = 0;
-        while (index < glyphs.size()) {
-            const auto& glyph = glyphs[index];
-            const int glyph_width = std::max(0, ftxui::string_width(glyph));
-            if (width > 0 && width + glyph_width > max_width) {
-                break;
-            }
-            if (width == 0 && glyph_width > max_width) {
-                line += glyph;
-                ++index;
-                break;
-            }
-            line += glyph;
-            width += glyph_width;
-            ++index;
-        }
-        trim_ascii_space_suffix(line);
-        lines.push_back(std::move(line));
-        while (index < glyphs.size() && glyphs[index] == " ") {
-            ++index;
-        }
-    }
-
-    if (lines.empty()) {
-        lines.push_back("New session");
-    }
-    if (index < glyphs.size()) {
-        if (lines.size() == 1) {
-            lines.push_back("");
-        }
-        const int body_width = std::max(0, max_width - 3);
-        lines[1] = truncate_cells_prefix(lines[1], body_width);
-        trim_ascii_space_suffix(lines[1]);
-        lines[1] += "...";
-    }
-    return lines;
-}
-
-static Element render_regular_sidebar(const acecode::TuiState& state,
-                                      const std::string& version_str,
-                                      const std::string& cwd_display,
-                                      int sidebar_width,
-                                      int anim_tick) {
-    const int content_width = std::max(1, sidebar_width - 2);
-    Elements top_rows;
-    for (const auto& line : sidebar_title_lines(first_user_message_title(state),
-                                                content_width)) {
-        top_rows.push_back(text(line) | bold | color(tui::theme().ui.text_primary));
-    }
-
-    Element mcp_section = render_mcp_sidebar_section(
-        state.mcp_sidebar_servers, content_width, anim_tick);
-    if (!state.mcp_sidebar_servers.empty()) {
-        top_rows.push_back(text(""));
-        top_rows.push_back(std::move(mcp_section));
-    }
-
-    const auto file_changes =
-        acecode::tui::collect_sidebar_file_changes(state.conversation,
-                                                   cwd_display);
-    top_rows.push_back(text(""));
-    top_rows.push_back(sidebar_section_header(
-        "Files Changed", static_cast<int>(file_changes.size())));
-
-    constexpr std::size_t kMaxSidebarFiles = 10;
-    const std::size_t shown_files =
-        std::min(kMaxSidebarFiles, file_changes.size());
-    for (std::size_t i = 0; i < shown_files; ++i) {
-        top_rows.push_back(
-            render_sidebar_change_row(file_changes[i], content_width));
-    }
-    if (file_changes.size() > shown_files) {
-        top_rows.push_back(
-            text("  +" + std::to_string(file_changes.size() - shown_files) +
-                 " more") |
-            color(tui::theme().ui.text_dim) | dim);
-    }
-
-    Elements bottom_rows;
-    if (!state.todos.empty()) {
-        bottom_rows.push_back(
-            acecode::tui::render_todo_checklist_block(state.todos,
-                                                      content_width));
-        bottom_rows.push_back(text(""));
-    }
-    const bool show_bash_task =
-        state.tool_running && state.tool_progress.tool_name == "bash";
-    const auto& subagents = state.subagent_tasks;
-    if (show_bash_task || !subagents.empty()) {
-        const int task_count =
-            (show_bash_task ? 1 : 0) + static_cast<int>(subagents.size());
-        bottom_rows.push_back(sidebar_section_header("Background Tasks", task_count));
-        if (show_bash_task) {
-            std::string command = state.tool_progress.command_preview.empty()
-                ? std::string("bash")
-                : state.tool_progress.command_preview;
-            bottom_rows.push_back(
-                text("  " + truncate_cells_middle_ascii(command,
-                                                        std::max(1, content_width - 2))) |
-                color(tui::theme().ui.text_muted));
-        }
-        // 子代理(spawn_subagent)运行中任务:● 标题(auto-title 未生成前
-        // 显示 prompt 摘要)+ 耗时。本轮结束由 SubagentHost 即时移除。
-        const auto now = std::chrono::steady_clock::now();
-        for (const auto& task : subagents) {
-            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
-                now - task.started).count();
-            const std::string elapsed =
-                secs < 60 ? std::to_string(secs) + "s"
-                          : std::to_string(secs / 60) + "m" +
-                            std::to_string(secs % 60) + "s";
-            const std::string label =
-                task.title.empty() ? task.prompt : task.title;
-            const int label_width =
-                std::max(1, content_width - 4 - static_cast<int>(elapsed.size()));
-            bottom_rows.push_back(hbox({
-                text("  ") ,
-                text("\xE2\x97\x8F ") | color(tui::theme().semantic.success),
-                text(acecode::tui::truncate_end(label, label_width)) |
-                    color(tui::theme().ui.text_muted) | flex,
-                text(" " + elapsed) | dim | color(tui::theme().ui.text_dim),
-            }));
-        }
-        bottom_rows.push_back(text(""));
-    }
-    bottom_rows.push_back(paragraph(version_str) | color(tui::theme().ui.text_muted) | dim);
-    if (!state.update_notice.empty()) {
-        bottom_rows.push_back(paragraph(state.update_notice) |
-                              color(tui::theme().semantic.warning));
-    }
-    if (!state.status_line.empty()) {
-        bottom_rows.push_back(paragraph(state.status_line) |
-                              color(status_line_color(state.status_line)));
-    }
-    if (!cwd_display.empty()) {
-        bottom_rows.push_back(paragraph(cwd_display) | color(tui::theme().ui.accent_alt) | dim);
-    }
-
-    const bool is_light = tui::theme().name == "light";
-    Element sidebar = hbox({
-        text(" "),
-        vbox({
-            vbox(std::move(top_rows)),
-            filler(),
-            vbox(std::move(bottom_rows)),
-        }) | flex,
-        text(" "),
-    }) | size(WIDTH, EQUAL, sidebar_width) |
-       bgcolor(is_light ? Color::RGB(240, 240, 242) : Color::RGB(18, 18, 20));
-    return acecode::tui::non_selectable(std::move(sidebar));
 }
 
 static Element render_tool_result_lines_preserving_breaks(
@@ -3750,6 +3427,24 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             | acecode::tui::reflect_unclipped(message_layout_boxes[index])
             | reflect(message_boxes[index]);
     };
+    auto render_message_markdown =
+        [&](const std::string& content, Color fallback_color) -> Element {
+        try {
+            acecode::markdown::FormatOptions md_opts;
+            const int fallback_width = terminal_width -
+                (show_regular_sidebar ? kRegularSidebarWidthCols + 9 : 6);
+            md_opts.terminal_width =
+                std::max(20, (current_message_width > 0
+                    ? current_message_width
+                    : fallback_width) - 6);
+            md_opts.syntax_highlight = true;
+            md_opts.hyperlinks = true;
+            md_opts.strip_xml = true;
+            return acecode::markdown::format_markdown(content, md_opts);
+        } catch (...) {
+            return paragraph(content) | color(fallback_color);
+        }
+    };
     const size_t render_first =
         static_cast<size_t>(std::max(0, render_window.first_message));
     const size_t render_last = std::min(
@@ -3760,8 +3455,17 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     // O(n) 纯角色字符串扫描,逐帧重算即可,不值得做增量缓存。
     const auto tool_dots =
         acecode::tui::compute_tool_call_dots(state.conversation);
+    const auto tool_result_names =
+        acecode::tui::compute_tool_result_names(state.conversation);
     for (size_t i = render_first; i < render_last; ++i) {
         const auto& msg = state.conversation[i];
+        const std::string paired_tool_name =
+            i < tool_result_names.size()
+            ? tool_result_names[i]
+            : std::string();
+        const bool task_complete_result =
+            acecode::tui::is_task_complete_result(
+                msg, paired_tool_name);
         bool focused_message = static_cast<int>(i) == state.chat_focus_index;
         Decorator focus_decorator = nothing;
 
@@ -3782,23 +3486,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 tracked_message(i, line | focus_decorator));
         } else if (msg.role == "assistant") {
             // Render with Markdown formatting
-            Element md_content;
-            try {
-                acecode::markdown::FormatOptions md_opts;
-                const int fallback_width = terminal_width -
-                    (show_regular_sidebar ? kRegularSidebarWidthCols + 9 : 6);
-                md_opts.terminal_width =
-                    std::max(20, (current_message_width > 0
-                        ? current_message_width
-                        : fallback_width) - 6);
-                md_opts.syntax_highlight = true;
-                md_opts.hyperlinks = true;
-                md_opts.strip_xml = true;
-                md_content = acecode::markdown::format_markdown(msg.content, md_opts);
-            } catch (...) {
-                // Fallback: raw paragraph if markdown parsing fails
-                md_content = paragraph(msg.content) | color(tui::theme().semantic.success);
-            }
+            Element md_content = render_message_markdown(
+                msg.content, tui::theme().semantic.success);
             auto line = hbox({
                 text(" * ") | bold | color(tui::theme().semantic.success),
                 md_content | flex,
@@ -3863,6 +3552,24 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             auto line = hbox({
                 text("  \xE2\x94\x94 ") | color(tui::theme().ui.text_dim), // "└"
                 render_tool_result_lines_preserving_breaks(msg.content) | flex,
+            });
+            if (focused_message) {
+                line = line | focus;
+            }
+            message_elements.push_back(
+                tracked_message(i, line | focus_decorator));
+        } else if (task_complete_result) {
+            // task_complete 的 summary 是面向用户的最终完成消息，不属于
+            // 普通工具输出。始终以 Markdown 全文呈现，Ctrl+E / Ctrl+O
+            // 都不得把它切回单行 summary 或 raw-output fold。
+            const std::string summary_markdown =
+                acecode::tui::task_complete_summary_markdown(msg);
+            auto line = hbox({
+                text("  \xE2\x94\x94 ") |
+                    color(tui::theme().ui.text_dim), // "└"
+                render_message_markdown(
+                    summary_markdown,
+                    tui::theme().ui.text_primary) | flex,
             });
             if (focused_message) {
                 line = line | focus;
@@ -4841,7 +4548,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     }
 
     if (show_regular_sidebar) {
-        Element sidebar = render_regular_sidebar(
+        Element sidebar = acecode::tui::render_regular_sidebar(
             state,
             version_str,
             cwd_display,
@@ -8199,8 +7906,19 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             if (state.chat_focus_index >= 0 &&
                 state.chat_focus_index < static_cast<int>(state.conversation.size())) {
                 auto& msg = state.conversation[state.chat_focus_index];
+                const auto tool_result_names =
+                    acecode::tui::compute_tool_result_names(
+                        state.conversation);
+                const std::string paired_tool_name =
+                    state.chat_focus_index <
+                        static_cast<int>(tool_result_names.size())
+                    ? tool_result_names[
+                        static_cast<std::size_t>(state.chat_focus_index)]
+                    : std::string();
                 if (msg.role == "tool_result" &&
-                    (msg.summary.has_value() || msg.hunks.has_value())) {
+                    (msg.summary.has_value() || msg.hunks.has_value()) &&
+                    !acecode::tui::is_task_complete_result(
+                        msg, paired_tool_name)) {
                     msg.expanded = !msg.expanded;
                     invalidate_chat_line_measure_at(state.chat_focus_index);
                     screen.PostEvent(Event::Custom);

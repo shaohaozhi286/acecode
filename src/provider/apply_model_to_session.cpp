@@ -24,12 +24,11 @@ SessionModelState state_from_profile(const AppConfig& cfg,
     state.name = profile.name;
     state.provider = profile.provider;
     state.model = profile.model;
-    state.context_window = resolve_model_profile_context_window_nonblocking(
-        cfg, profile, cfg.context_window);
     // model id 与监控快照的 modelPoolName 精确命中时,用 0.8 * maxWindowTokens
-    // 作为有效上下文窗口。未命中或尚无数据时 eff==0,保留默认解析值。
+    // 作为有效上下文窗口。手动 override 优先;未命中时保留默认解析值。
     int eff = model_pool_status_service().effective_context_window_for(state.model);
-    if (eff > 0) state.context_window = eff;
+    state.context_window = resolve_runtime_model_profile_context_window_nonblocking(
+        cfg, profile, cfg.context_window, eff);
     return state;
 }
 

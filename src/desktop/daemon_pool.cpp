@@ -115,6 +115,14 @@ ExistingDaemonProbeResult inspect_existing_daemon(
         snapshot.desktop_managed->pid == *snapshot.pid &&
         snapshot.desktop_managed->guid == *snapshot.guid &&
         snapshot.desktop_managed->kind == kDesktopManagedRuntimeKind;
+    const bool recorded_pid_alive =
+        acecode::daemon::is_pid_alive(*snapshot.pid);
+    const auto process_identity = recorded_pid_alive
+        ? acecode::daemon::inspect_daemon_process_identity(*snapshot.pid)
+        : acecode::daemon::DaemonProcessIdentity::Unknown;
+    const auto process_start_time = recorded_pid_alive
+        ? acecode::daemon::process_start_time_ms(*snapshot.pid)
+        : std::optional<std::int64_t>{};
 
     acecode::daemon::RuntimeValidationOptions options;
     options.heartbeat_timeout_ms =
@@ -124,14 +132,31 @@ ExistingDaemonProbeResult inspect_existing_daemon(
         acecode::daemon::validate_runtime_snapshot_for_reuse(snapshot, options);
 
     if (!reuse.reusable) {
-        if (has_generation && !acecode::daemon::is_pid_alive(*snapshot.pid)) {
+        if (has_generation && !recorded_pid_alive) {
             acecode::daemon::cleanup_runtime_files_if_owned(
                 *snapshot.pid, *snapshot.guid, req.run_dir, true);
             result.reason = reuse.reason;
             return result;
         }
         if (manifest_matches &&
-            acecode::daemon::process_is_acecode_daemon(*snapshot.pid)) {
+            acecode::daemon::runtime_pid_reuse_is_proven(
+                snapshot, process_identity, process_start_time)) {
+            if (acecode::daemon::cleanup_runtime_files_if_owned(
+                    *snapshot.pid, *snapshot.guid, req.run_dir, true)) {
+                LOG_INFO(
+                    "[daemon_pool] removed stale managed runtime after PID reuse pid=" +
+                    std::to_string(*snapshot.pid));
+                result.reason =
+                    "removed stale Desktop-managed runtime after PID reuse";
+                return result;
+            }
+            result.action = ExistingDaemonAction::Unsafe;
+            result.reason =
+                "runtime generation changed while discarding reused PID state";
+            return result;
+        }
+        if (manifest_matches &&
+            process_identity == acecode::daemon::DaemonProcessIdentity::Match) {
             result.action = ExistingDaemonAction::Replace;
             result.pid = *snapshot.pid;
             result.guid = *snapshot.guid;

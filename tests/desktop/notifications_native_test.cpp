@@ -148,7 +148,7 @@ TEST(NativeNotifications, AuthorizationStateResetsToUnavailableOnShutdown) {
 }
 
 TEST(NativeNotifications, OptInDeliversWindowsToastAndActivatesWindow) {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(ACECODE_NOTIFICATION_BACKEND_STUB)
     const char* enabled = std::getenv("ACECODE_RUN_NOTIFICATION_SMOKE");
     if (!enabled || std::string(enabled) != "1") {
         GTEST_SKIP() << "set ACECODE_RUN_NOTIFICATION_SMOKE=1 for the Windows runtime smoke";
@@ -174,7 +174,7 @@ TEST(NativeNotifications, OptInDeliversWindowsToastAndActivatesWindow) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     acecode::desktop::shutdown_notifications();
 #else
-    GTEST_SKIP() << "WinToast runtime smoke is Windows-only";
+    GTEST_SKIP() << "WinToast runtime smoke requires a Windows SDK build";
 #endif
 }
 

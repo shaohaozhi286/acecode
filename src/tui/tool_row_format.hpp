@@ -46,4 +46,21 @@ bool tool_result_row_failed(const TuiState::Message& msg);
 std::vector<ToolCallDot> compute_tool_call_dots(
     const std::vector<TuiState::Message>& conversation);
 
+// 与 compute_tool_call_dots 使用相同的 FIFO / 批次边界规则，把真实工具名
+// 标到配对的 tool_result 下标上。非 result 或没有配对 call 的位置为空串。
+// 供 task_complete 等需要按工具身份选择专用结果视图的渲染逻辑使用。
+std::vector<std::string> compute_tool_result_names(
+    const std::vector<TuiState::Message>& conversation);
+
+// 判断一条 tool_result 是否是 task_complete。优先接受 FIFO 配对得到的
+// `task_complete` / `complete` 工具名；配对 call 已被历史截断时，兼容持久化
+// 的 `complete · task` ToolSummary 形状。
+bool is_task_complete_result(const TuiState::Message& msg,
+                             const std::string& paired_tool_name = {});
+
+// 取 task_complete 应交给 Markdown formatter 的原文：优先 summary metric，
+// 其次非占位 object，再回退 ToolResult.output(content)。保留原始 Markdown
+// 空白和标记，不做单行清洗或截断。
+std::string task_complete_summary_markdown(const TuiState::Message& msg);
+
 }} // namespace acecode::tui

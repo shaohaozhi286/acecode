@@ -6,11 +6,14 @@
 #include <gtest/gtest.h>
 
 #include "daemon/platform.hpp"
+#include "daemon/runtime_files.hpp"
 #include "desktop/daemon_pool.hpp"
 #include "desktop/daemon_supervisor.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -27,6 +30,36 @@ using acecode::desktop::SpawnRequest;
 using acecode::desktop::SpawnResult;
 
 namespace {
+
+namespace fs = std::filesystem;
+
+class TempRunDir {
+public:
+    explicit TempRunDir(const std::string& name) {
+        const auto nonce =
+            std::chrono::steady_clock::now().time_since_epoch().count();
+        path_ = fs::temp_directory_path() /
+            (name + "_" +
+             std::to_string(acecode::daemon::current_pid()) + "_" +
+             std::to_string(nonce));
+        fs::create_directories(path_);
+    }
+
+    ~TempRunDir() {
+        std::error_code ec;
+        fs::remove_all(path_, ec);
+    }
+
+    const fs::path& path() const { return path_; }
+
+private:
+    fs::path path_;
+};
+
+void write_runtime_text(const fs::path& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary);
+    out << text;
+}
 
 // MockSupervisor: spawn / wait_until_ready 行为可配置;stop 计数。线程安全。
 class MockSupervisor : public IDaemonSupervisor {
@@ -483,6 +516,48 @@ TEST(DaemonPool, UnsafeExistingRuntimeFailsClosedWithoutSpawn) {
     EXPECT_NE(result.error.find("identity mismatch"), std::string::npos);
     EXPECT_EQ(state->attach_calls.load(), 0);
     EXPECT_EQ(state->spawn_calls.load(), 0);
+}
+
+TEST(DaemonPool, ReusedPidRuntimeIsDiscardedWithoutSignalingProcess) {
+    auto state = std::make_shared<MockSupervisor::SharedState>();
+    DaemonPool pool;
+    pool.set_supervisor_factory_for_test([&] {
+        return std::unique_ptr<IDaemonSupervisor>(new MockSupervisor(state));
+    });
+
+    TempRunDir run_dir("acecode_reused_pid_runtime");
+    const std::int64_t pid = acecode::daemon::current_pid();
+    const std::string guid = "reused-pid-guid";
+    write_runtime_text(run_dir.path() / "daemon.pid", std::to_string(pid));
+    write_runtime_text(run_dir.path() / "daemon.port", "43210");
+    write_runtime_text(run_dir.path() / "daemon.guid", guid);
+    write_runtime_text(run_dir.path() / "token", "stale-token");
+    write_runtime_text(
+        run_dir.path() / "heartbeat",
+        "{\"guid\":\"" + guid + "\",\"pid\":" + std::to_string(pid) +
+            ",\"timestamp_ms\":" +
+            std::to_string(acecode::daemon::now_unix_ms() - 60000) + "}");
+    write_runtime_text(
+        run_dir.path() / "desktop-managed.json",
+        "{\"pid\":" + std::to_string(pid) + ",\"guid\":\"" + guid +
+            "\",\"kind\":\"acecode-desktop\",\"protocol_version\":1,"
+            "\"acecode_version\":\"test\"}");
+
+    auto req = make_request("__shared_daemon__");
+    req.desktop_managed = true;
+    req.run_dir = run_dir.path().string();
+    auto result = pool.activate(req);
+
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(state->attach_calls.load(), 0);
+    EXPECT_EQ(state->stop_calls.load(), 0);
+    EXPECT_EQ(state->spawn_calls.load(), 1);
+    EXPECT_FALSE(fs::exists(run_dir.path() / "daemon.pid"));
+    EXPECT_FALSE(fs::exists(run_dir.path() / "daemon.port"));
+    EXPECT_FALSE(fs::exists(run_dir.path() / "daemon.guid"));
+    EXPECT_FALSE(fs::exists(run_dir.path() / "token"));
+    EXPECT_FALSE(fs::exists(run_dir.path() / "heartbeat"));
+    EXPECT_FALSE(fs::exists(run_dir.path() / "desktop-managed.json"));
 }
 
 TEST(DaemonPool, PolicyAwareShutdownReleasesWhenKeepAliveEnabled) {

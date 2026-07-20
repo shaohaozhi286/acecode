@@ -2,6 +2,7 @@ import { compactOneLinePreview } from './compactMessagePreview.js';
 import { completionSummaryMarkdown } from './taskCompleteSummary.js';
 
 export const MIN_CONVERSATION_TURN_SCRUBBER_TURNS = 5;
+export const MAX_CONVERSATION_TURN_SCRUBBER_MARKERS = 20;
 export const RUNNING_ANSWER_PREVIEW = '正在回答...';
 
 const EMPTY_ANSWER_PREVIEW = '暂无回答';
@@ -101,6 +102,100 @@ export function shouldShowConversationTurnScrubber(
   return Array.isArray(turns) && turns.length >= Math.max(1, Number(minimumTurns) || 1);
 }
 
+export function conversationTurnWindow(
+  totalTurns,
+  requestedStart = 0,
+  windowSize = MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+) {
+  const total = Math.max(0, Math.floor(Number(totalTurns) || 0));
+  const size = Math.max(1, Math.floor(Number(windowSize) || 0));
+  const visibleCount = Math.min(total, size);
+  const maximumStart = Math.max(0, total - visibleCount);
+  const numericStart = Number(requestedStart);
+  const start = Math.min(
+    maximumStart,
+    Math.max(0, Math.floor(Number.isFinite(numericStart) ? numericStart : 0)),
+  );
+  const end = start + visibleCount;
+  return {
+    start,
+    end,
+    visibleCount,
+    hasPrevious: start > 0,
+    hasNext: end < total,
+    paginated: total > size,
+  };
+}
+
+export function conversationTurnSteppedWindowStart(
+  currentStart,
+  direction,
+  totalTurns,
+  windowSize = MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+) {
+  const current = conversationTurnWindow(
+    totalTurns,
+    currentStart,
+    windowSize,
+  );
+  const numericDirection = Number(direction);
+  const step = Number.isFinite(numericDirection)
+    ? Math.sign(numericDirection)
+    : 0;
+  return conversationTurnWindow(
+    totalTurns,
+    current.start + step,
+    windowSize,
+  ).start;
+}
+
+export function centeredConversationTurnWindowStart(
+  turnIndex,
+  totalTurns,
+  windowSize = MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+) {
+  const total = Math.max(0, Math.floor(Number(totalTurns) || 0));
+  const index = Math.floor(Number(turnIndex));
+  if (!Number.isFinite(index) || index < 0 || index >= total) return 0;
+
+  const visibleCount = Math.min(
+    total,
+    Math.max(1, Math.floor(Number(windowSize) || 0)),
+  );
+  const middleOffset = Math.floor((visibleCount - 1) / 2);
+  return conversationTurnWindow(
+    total,
+    index - middleOffset,
+    windowSize,
+  ).start;
+}
+
+export function conversationTurnWindowStartContainingIndex(
+  currentStart,
+  turnIndex,
+  totalTurns,
+  windowSize = MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+) {
+  const current = conversationTurnWindow(
+    totalTurns,
+    currentStart,
+    windowSize,
+  );
+  const index = Math.floor(Number(turnIndex));
+  if (
+    Number.isFinite(index)
+    && index >= current.start
+    && index < current.end
+  ) {
+    return current.start;
+  }
+  return centeredConversationTurnWindowStart(
+    index,
+    totalTurns,
+    windowSize,
+  );
+}
+
 export function conversationTurnMarkerLayout(
   count,
   availableHeight,
@@ -159,6 +254,40 @@ export function conversationTurnMarkerLayout(
       zoneHeight: Math.max(1, zoneBottom - zoneTop),
     };
   });
+}
+
+export function conversationTurnPageControlTop(
+  markerCenterY,
+  direction,
+  availableHeight,
+  {
+    controlSize = 20,
+    centerOffset = 20,
+  } = {},
+) {
+  const height = Math.max(0, Number(availableHeight) || 0);
+  const markerCenter = Number(markerCenterY);
+  const directionValue = Number(direction);
+  if (
+    height === 0
+    || !Number.isFinite(markerCenter)
+    || !Number.isFinite(directionValue)
+    || directionValue === 0
+  ) {
+    return 0;
+  }
+
+  const size = Math.min(
+    height,
+    Math.max(0, Number(controlSize) || 0),
+  );
+  const offset = Math.max(0, Number(centerOffset) || 0);
+  const controlCenter = markerCenter
+    + (directionValue < 0 ? -offset : offset);
+  return Math.min(
+    Math.max(0, controlCenter - size / 2),
+    Math.max(0, height - size),
+  );
 }
 
 export function nearestConversationTurnIndex(

@@ -109,6 +109,52 @@ TEST(DaemonRuntimeFiles, ValidationRejectsNonDaemonProcessIdentity) {
     EXPECT_NE(check.reason.find("acecode daemon process"), std::string::npos);
 }
 
+TEST(DaemonRuntimeFiles, ProcessInspectionExposesMismatchAndStartTime) {
+    const auto pid = acecode::daemon::current_pid();
+    EXPECT_EQ(
+        acecode::daemon::inspect_daemon_process_identity(pid),
+        acecode::daemon::DaemonProcessIdentity::Mismatch);
+
+    const auto start_time = acecode::daemon::process_start_time_ms(pid);
+    ASSERT_TRUE(start_time.has_value());
+    EXPECT_GT(*start_time, 0);
+    EXPECT_LE(*start_time, acecode::daemon::now_unix_ms() + 2000);
+}
+
+TEST(DaemonRuntimeFiles, PidReuseIsProvenByExecutableMismatch) {
+    const auto snapshot = fresh_snapshot();
+    EXPECT_TRUE(acecode::daemon::runtime_pid_reuse_is_proven(
+        snapshot,
+        acecode::daemon::DaemonProcessIdentity::Mismatch,
+        std::nullopt));
+}
+
+TEST(DaemonRuntimeFiles, PidReuseIsProvenForNewerSameNameGeneration) {
+    const auto snapshot = fresh_snapshot();
+    ASSERT_TRUE(snapshot.heartbeat.has_value());
+    EXPECT_TRUE(acecode::daemon::runtime_pid_reuse_is_proven(
+        snapshot,
+        acecode::daemon::DaemonProcessIdentity::Match,
+        snapshot.heartbeat->timestamp_ms + 3000));
+}
+
+TEST(DaemonRuntimeFiles, PidReuseRemainsUnprovenWhenIdentityIsAmbiguous) {
+    const auto snapshot = fresh_snapshot();
+    EXPECT_FALSE(acecode::daemon::runtime_pid_reuse_is_proven(
+        snapshot,
+        acecode::daemon::DaemonProcessIdentity::Unknown,
+        std::nullopt));
+}
+
+TEST(DaemonRuntimeFiles, PidReuseAllowsProcessClockResolutionTolerance) {
+    const auto snapshot = fresh_snapshot();
+    ASSERT_TRUE(snapshot.heartbeat.has_value());
+    EXPECT_FALSE(acecode::daemon::runtime_pid_reuse_is_proven(
+        snapshot,
+        acecode::daemon::DaemonProcessIdentity::Match,
+        snapshot.heartbeat->timestamp_ms + 1500));
+}
+
 TEST(DaemonRuntimeFiles, ReadsSnapshotFromExplicitRunDir) {
     fs::path dir = unique_temp_dir("acecode_runtime_snapshot");
     write_text(dir / "daemon.pid", std::to_string(acecode::daemon::current_pid()));

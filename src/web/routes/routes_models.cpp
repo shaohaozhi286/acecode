@@ -399,6 +399,9 @@ void WebServer::Impl::register_models() {
                 return json_err(500, "INVARIANT_BROKEN",
                                 "post-update entry not found in saved_models");
             }
+            if (deps.session_registry && updated->name == url_name) {
+                deps.session_registry->sync_model_context_window(url_name, *updated);
+            }
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = profile_to_safe_json(*updated).dump();

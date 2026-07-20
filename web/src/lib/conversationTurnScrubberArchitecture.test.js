@@ -27,6 +27,55 @@ run('conversation turn rail is gated at five projected user turns', () => {
   assert.match(chatView, /\{showConversationTurnScrubber && \(/);
 });
 
+run('long turn rails use a twenty-marker window with one-step paging and recentering', () => {
+  const helper = source('lib/conversationTurnScrubber.js');
+  const component = source('components/ConversationTurnScrubber.jsx');
+  const styles = source('styles/globals.css');
+  assert.match(helper, /MAX_CONVERSATION_TURN_SCRUBBER_MARKERS = 20/);
+  assert.match(helper, /export function conversationTurnWindow\(/);
+  assert.match(helper, /export function conversationTurnSteppedWindowStart\(/);
+  assert.match(helper, /export function centeredConversationTurnWindowStart\(/);
+  assert.match(helper, /export function conversationTurnPageControlTop\(/);
+  assert.match(
+    helper,
+    /export function conversationTurnWindowStartContainingIndex\(/,
+  );
+  assert.match(
+    component,
+    /conversationTurnMarkerLayout\(\s*visibleWindow\.visibleCount,/,
+  );
+  assert.match(
+    component,
+    /index: visibleWindow\.start \+ marker\.index/,
+  );
+  assert.match(
+    component,
+    /setWindowStart\(centeredConversationTurnWindowStart\(/,
+  );
+  assert.match(component, /data-conversation-turn-page-control="previous"/);
+  assert.match(component, /data-conversation-turn-page-control="next"/);
+  assert.match(component, /style=\{\{ top: previousPageTop \}\}/);
+  assert.match(component, /style=\{\{ top: nextPageTop \}\}/);
+  assert.match(component, /onClick=\{\(\) => stepWindow\(-1\)\}/);
+  assert.match(component, /onClick=\{\(\) => stepWindow\(1\)\}/);
+  assert.doesNotMatch(
+    styles,
+    /data-conversation-turn-page-control="previous"[\s\S]*?top:\s*0/,
+  );
+  assert.doesNotMatch(
+    styles,
+    /data-conversation-turn-page-control="next"[\s\S]*?bottom:\s*0/,
+  );
+  assert.match(
+    styles,
+    /\.ace-conversation-turn-page-button \{[\s\S]*?top 280ms cubic-bezier\(\.22, 1, \.36, 1\)/,
+  );
+  assert.match(
+    styles,
+    /\.ace-conversation-turn-scrubber-hit \{[\s\S]*?transition: top 280ms cubic-bezier\(\.22, 1, \.36, 1\)/,
+  );
+});
+
 run('conversation turn rail loads lazily with an empty failure-safe fallback', () => {
   const chatView = source('components/ChatView.jsx');
   assert.match(
@@ -94,7 +143,10 @@ run('scrubber markers keep hover-only previews with axis-aligned spring displace
   const component = source('components/ConversationTurnScrubber.jsx');
   const styles = source('styles/globals.css');
   assert.match(component, /onPointerMove=\{selectFromPointer\}/);
-  assert.match(component, /const previewIndex = hoveredIndex;/);
+  assert.match(
+    component,
+    /const previewIndex = indexIsVisible\(hoveredIndex\) \? hoveredIndex : -1;/,
+  );
   assert.match(
     component,
     /focusedIndex >= 0 \? focusedIndex : activeIndex/,

@@ -36,6 +36,16 @@ An existing process is eligible for destructive replacement only after its PID, 
 
 Alternative considered: infer ownership only from `daemon.pid`. Rejected because PID reuse and user-started daemons make PID-only killing unsafe.
 
+PID reuse recovery distinguishes a proven different process generation from an
+identity that is merely unreadable. Desktop inspects the recorded PID with a
+tri-state executable check and, where supported, the live process start time.
+An executable mismatch or a process start time later than the recorded
+heartbeat proves that the old daemon has exited and its PID was reused.
+Desktop then removes only the matching PID/GUID runtime generation, never
+attaches to or signals the reused PID, and proceeds with a normal spawn. If
+executable identity and process start time are both inconclusive, startup
+continues to fail closed.
+
 ### 2. Startup is connect-first, with protocol compatibility
 
 `DaemonPool::activate()` inspects the runtime bundle before allocating a port. It verifies the live health response against the runtime PID/GUID/port and accepts an existing daemon when it declares the current Desktop protocol. ACECode application versions may differ when the protocol matches.
@@ -78,6 +88,7 @@ Both permission and AskUserQuestion prompters expose snapshots of unresolved req
 ## Risks / Trade-offs
 
 - **[Legacy process classification could be too broad]** → Limit it to the reserved Desktop runtime directory plus matching executable, runtime identity, health PID/GUID, and expected Desktop launch characteristics; remove the legacy path after migration is no longer needed.
+- **[A stopped daemon PID can be reused by an unrelated process]** → Treat executable mismatch or a live process start time after the recorded heartbeat as proof of PID reuse; generation-safely remove only the stale runtime bundle and never signal the reused PID. Keep unreadable or inconclusive identity fail-closed.
 - **[A daemon can exit while a new Desktop is launching]** → Write the new owner record immediately after acquiring the single-instance lock and use an instance ID plus a short handoff window before coupled POSIX termination.
 - **[Attached POSIX processes are not waitable children]** → Use liveness polling after TERM and escalate to the verified process group only after a grace period.
 - **[Config may change while Desktop is open]** → Reload the latest config inside the native setter, change only the Desktop preference, atomically save, and update the in-memory exit policy after persistence succeeds.

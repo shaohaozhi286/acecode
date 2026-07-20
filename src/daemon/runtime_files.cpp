@@ -147,31 +147,52 @@ std::optional<DesktopOwnerRecord> read_desktop_owner_record_path(
     }
 }
 
-enum class ProcessIdentity {
-    Match,
-    Mismatch,
-    Unknown,
-};
-
 #ifdef _WIN32
-ProcessIdentity daemon_process_identity(std::int64_t pid) {
+DaemonProcessIdentity inspect_daemon_process_identity_impl(std::int64_t pid) {
     HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
                              FALSE,
                              static_cast<DWORD>(pid));
-    if (!h) return ProcessIdentity::Unknown;
+    if (!h) return DaemonProcessIdentity::Unknown;
 
     std::vector<wchar_t> buffer(32768);
     DWORD size = static_cast<DWORD>(buffer.size());
     BOOL ok = ::QueryFullProcessImageNameW(h, 0, buffer.data(), &size);
     ::CloseHandle(h);
-    if (!ok || size == 0) return ProcessIdentity::Unknown;
+    if (!ok || size == 0) return DaemonProcessIdentity::Unknown;
 
     fs::path image(std::wstring(buffer.data(), size));
     std::wstring name = image.filename().wstring();
     std::transform(name.begin(), name.end(), name.begin(),
                    [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
-    if (name == L"acecode.exe") return ProcessIdentity::Match;
-    return ProcessIdentity::Mismatch;
+    if (name == L"acecode.exe" || name == L"acecode-daemon.exe") {
+        return DaemonProcessIdentity::Match;
+    }
+    return DaemonProcessIdentity::Mismatch;
+}
+
+std::optional<std::int64_t> process_start_time_ms_impl(std::int64_t pid) {
+    if (pid <= 0) return std::nullopt;
+    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                             FALSE,
+                             static_cast<DWORD>(pid));
+    if (!h) return std::nullopt;
+
+    FILETIME creation{};
+    FILETIME exit{};
+    FILETIME kernel{};
+    FILETIME user{};
+    const BOOL ok = ::GetProcessTimes(h, &creation, &exit, &kernel, &user);
+    ::CloseHandle(h);
+    if (!ok) return std::nullopt;
+
+    ULARGE_INTEGER ticks{};
+    ticks.LowPart = creation.dwLowDateTime;
+    ticks.HighPart = creation.dwHighDateTime;
+    constexpr unsigned long long kWindowsToUnixEpoch100ns =
+        116444736000000000ULL;
+    if (ticks.QuadPart < kWindowsToUnixEpoch100ns) return std::nullopt;
+    return static_cast<std::int64_t>(
+        (ticks.QuadPart - kWindowsToUnixEpoch100ns) / 10000ULL);
 }
 
 struct WsaInit {
@@ -183,30 +204,99 @@ struct WsaInit {
 
 WsaInit g_wsa_init;
 #else
-ProcessIdentity daemon_process_identity(std::int64_t pid) {
-    if (pid <= 0) return ProcessIdentity::Unknown;
+DaemonProcessIdentity inspect_daemon_process_identity_impl(std::int64_t pid) {
+    if (pid <= 0) return DaemonProcessIdentity::Unknown;
     fs::path image;
 #ifdef __APPLE__
     std::vector<char> buffer(PROC_PIDPATHINFO_MAXSIZE);
     const int length = ::proc_pidpath(
         static_cast<int>(pid), buffer.data(), static_cast<uint32_t>(buffer.size()));
-    if (length <= 0) return ProcessIdentity::Unknown;
+    if (length <= 0) return DaemonProcessIdentity::Unknown;
     image = fs::path(std::string(buffer.data(), static_cast<std::size_t>(length)));
 #elif defined(__linux__)
     std::vector<char> buffer(4096);
     const std::string proc_path = "/proc/" + std::to_string(pid) + "/exe";
     const ssize_t length = ::readlink(proc_path.c_str(), buffer.data(), buffer.size() - 1);
-    if (length <= 0) return ProcessIdentity::Unknown;
+    if (length <= 0) return DaemonProcessIdentity::Unknown;
     buffer[static_cast<std::size_t>(length)] = '\0';
     image = fs::path(std::string(buffer.data(), static_cast<std::size_t>(length)));
 #else
-    return ProcessIdentity::Unknown;
+    return DaemonProcessIdentity::Unknown;
 #endif
     std::string name = image.filename().string();
     std::transform(name.begin(), name.end(), name.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    if (name == "acecode" || name == "acecode.exe") return ProcessIdentity::Match;
-    return ProcessIdentity::Mismatch;
+#ifdef __linux__
+    const std::string deleted_suffix = " (deleted)";
+    if (name.size() >= deleted_suffix.size() &&
+        name.compare(
+            name.size() - deleted_suffix.size(),
+            deleted_suffix.size(),
+            deleted_suffix) == 0) {
+        name.erase(name.size() - deleted_suffix.size());
+    }
+#endif
+    if (name == "acecode" || name == "acecode.exe" ||
+        name == "acecode-daemon" || name == "acecode-daemon.exe") {
+        return DaemonProcessIdentity::Match;
+    }
+    return DaemonProcessIdentity::Mismatch;
+}
+
+std::optional<std::int64_t> process_start_time_ms_impl(std::int64_t pid) {
+    if (pid <= 0) return std::nullopt;
+#ifdef __APPLE__
+    proc_bsdinfo info{};
+    const int size = ::proc_pidinfo(
+        static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (size != static_cast<int>(sizeof(info)) || info.pbi_start_tvsec == 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::int64_t>(info.pbi_start_tvsec) * 1000 +
+           static_cast<std::int64_t>(info.pbi_start_tvusec) / 1000;
+#elif defined(__linux__)
+    std::ifstream stat_file("/proc/" + std::to_string(pid) + "/stat");
+    std::string stat_line;
+    if (!std::getline(stat_file, stat_line)) return std::nullopt;
+    const std::size_t command_end = stat_line.rfind(')');
+    if (command_end == std::string::npos || command_end + 2 >= stat_line.size()) {
+        return std::nullopt;
+    }
+
+    std::istringstream fields(stat_line.substr(command_end + 2));
+    std::string value;
+    unsigned long long start_ticks = 0;
+    for (int field_number = 3; field_number <= 22; ++field_number) {
+        if (!(fields >> value)) return std::nullopt;
+        if (field_number == 22) {
+            try {
+                start_ticks = std::stoull(value);
+            } catch (...) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    std::ifstream proc_stat("/proc/stat");
+    std::string key;
+    std::int64_t boot_time_seconds = 0;
+    while (proc_stat >> key) {
+        if (key == "btime") {
+            if (!(proc_stat >> boot_time_seconds)) return std::nullopt;
+            break;
+        }
+        std::string rest;
+        std::getline(proc_stat, rest);
+    }
+    const long ticks_per_second = ::sysconf(_SC_CLK_TCK);
+    if (boot_time_seconds <= 0 || ticks_per_second <= 0) return std::nullopt;
+    return boot_time_seconds * 1000 +
+           static_cast<std::int64_t>(
+               (start_ticks * 1000ULL) /
+               static_cast<unsigned long long>(ticks_per_second));
+#else
+    return std::nullopt;
+#endif
 }
 #endif
 
@@ -215,6 +305,33 @@ std::string port_desc(int port) {
 }
 
 } // namespace
+
+DaemonProcessIdentity inspect_daemon_process_identity(std::int64_t pid) {
+    return inspect_daemon_process_identity_impl(pid);
+}
+
+std::optional<std::int64_t> process_start_time_ms(std::int64_t pid) {
+    return process_start_time_ms_impl(pid);
+}
+
+bool runtime_pid_reuse_is_proven(
+    const RuntimeSnapshot& snapshot,
+    DaemonProcessIdentity process_identity,
+    const std::optional<std::int64_t>& live_process_start_time_ms,
+    std::int64_t timestamp_tolerance_ms) {
+    if (process_identity == DaemonProcessIdentity::Mismatch) return true;
+    if (!snapshot.pid.has_value() || !snapshot.heartbeat.has_value() ||
+        snapshot.heartbeat->pid != *snapshot.pid ||
+        snapshot.heartbeat->timestamp_ms <= 0 ||
+        !live_process_start_time_ms.has_value() ||
+        *live_process_start_time_ms <= 0) {
+        return false;
+    }
+    const std::int64_t tolerance =
+        std::max<std::int64_t>(0, timestamp_tolerance_ms);
+    return *live_process_start_time_ms >
+           snapshot.heartbeat->timestamp_ms + tolerance;
+}
 
 std::string ensure_run_dir() {
     return ensure_run_dir_for(std::string());
@@ -365,12 +482,13 @@ RuntimeReuseCheck validate_runtime_snapshot_for_reuse(
         return check;
     }
     if (options.require_process_identity) {
-        ProcessIdentity identity = daemon_process_identity(*snapshot.pid);
-        if (identity == ProcessIdentity::Mismatch) {
+        DaemonProcessIdentity identity =
+            inspect_daemon_process_identity(*snapshot.pid);
+        if (identity == DaemonProcessIdentity::Mismatch) {
             check.reason = "recorded pid is not an acecode daemon process";
             return check;
         }
-        if (identity == ProcessIdentity::Unknown) {
+        if (identity == DaemonProcessIdentity::Unknown) {
             check.reason = "recorded process executable identity is unavailable";
             return check;
         }
@@ -443,7 +561,8 @@ bool probe_loopback_port(int port) {
 }
 
 bool process_is_acecode_daemon(std::int64_t pid) {
-    return daemon_process_identity(pid) == ProcessIdentity::Match;
+    return inspect_daemon_process_identity(pid) ==
+           DaemonProcessIdentity::Match;
 }
 
 void cleanup_runtime_files() {

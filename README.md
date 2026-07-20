@@ -45,6 +45,7 @@ Set `<triplet>` to one of the supported vcpkg triplets:
 | Linux x64 | `x64-linux` |
 | Linux arm64 | `arm64-linux` |
 | Windows x64 | `x64-windows-static` |
+| Windows x64 (WinLibs/MinGW) | `x64-mingw-static` |
 | macOS x64 | `x64-osx` |
 | macOS arm64 | `arm64-osx` |
 
@@ -86,6 +87,27 @@ For a Debug build:
 cmake --preset linux-x64-debug
 cmake --build --preset linux-x64-debug
 ```
+
+For a self-contained Windows GCC/Ninja/GDB environment, extract a WinLibs
+distribution and point `ACECODE_WINLIBS_ROOT` at its `mingw64` directory. The
+preset pins every build tool instead of relying on whichever compiler happens
+to be on `PATH`:
+
+```powershell
+$env:ACECODE_WINLIBS_ROOT = 'C:\tools\winlibs\mingw64'
+$env:VCPKG_ROOT = 'C:\vcpkg'
+$env:PATH = "$env:ACECODE_WINLIBS_ROOT\bin;$env:PATH"
+
+& "$env:ACECODE_WINLIBS_ROOT\bin\cmake.exe" --preset windows-x64-winlibs-debug
+& "$env:ACECODE_WINLIBS_ROOT\bin\cmake.exe" --build --preset windows-x64-winlibs-debug
+& "$env:ACECODE_WINLIBS_ROOT\bin\gdb.exe" build/windows-x64-winlibs-debug/acecode.exe
+```
+
+The preset also exports `compile_commands.json`, uses the MinGW vcpkg target
+and host triplets, and limits builds to eight jobs for reliable use in a
+lightweight environment. WinToast is unavailable
+without the Windows SDK, so this MinGW-only build uses the notification stub;
+the normal Windows presets retain native WinToast notifications.
 
 Equivalent manual configuration:
 

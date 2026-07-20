@@ -219,7 +219,12 @@ public:
     // 只应在工具执行线程(turn 内)或会话未运行时调用。
     void set_cwd(const std::string& new_cwd);
 
-    void set_context_window(int cw) { context_window_ = cw; }
+    void set_context_window(int cw) {
+        context_window_.store(cw, std::memory_order_relaxed);
+    }
+    int context_window() const {
+        return context_window_.load(std::memory_order_relaxed);
+    }
     void set_no_model_config_prompt(std::string prompt) {
         no_model_config_prompt_ = std::move(prompt);
     }
@@ -482,7 +487,7 @@ private:
     std::string cwd_;
     PermissionManager& permissions_;
     PathValidator path_validator_;
-    int context_window_ = 128000;
+    std::atomic<int> context_window_{128000};
     std::string no_model_config_prompt_;
     // agent_loop termination policy. Fresh defaults come from AgentLoopConfig
     // until set_agent_loop_config is called from main.cpp.

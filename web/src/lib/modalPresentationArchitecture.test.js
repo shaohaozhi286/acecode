@@ -60,3 +60,14 @@ run('archived deletion and close-preview confirmations share Modal', () => {
   assert.match(chatView, /<Modal onClose=\{\(\) => setPreviewCloseConfirm\(null\)\}/);
   assert.match(chatView, />关闭预览面板</);
 });
+
+run('update dialog keeps release history bounded and renders notes as plain text', () => {
+  const updateDialog = source('components/UpdateDialog.jsx');
+
+  assert.match(updateDialog, /updateDialogMode\(job, updateStatus\)/);
+  assert.match(updateDialog, /aria-label="版本更新记录"/);
+  assert.match(updateDialog, /max-h-64 overflow-y-auto/);
+  assert.match(updateDialog, /whitespace-pre-wrap break-words/);
+  assert.match(updateDialog, /mode === 'up_to_date'/);
+  assert.doesNotMatch(updateDialog, /dangerouslySetInnerHTML/);
+});

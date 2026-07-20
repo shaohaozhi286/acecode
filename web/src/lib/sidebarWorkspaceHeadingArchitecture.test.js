@@ -59,3 +59,41 @@ test('workspace collapse-all keeps disclosure-only reopen session lists compact'
   const toggleSource = sidebar.slice(toggleStart, toggleEnd);
   assert.doesNotMatch(toggleSource, /workspaceCollapseAllRef\.current\s*=\s*false/);
 });
+
+test('workspace rows expose a shared menu button followed by the new-task shortcut', () => {
+  const sidebar = source('components/Sidebar.jsx');
+  const icons = source('components/Icon.jsx');
+  const workspaceMenuSvg = source('../public/vs-icons/WorkspaceMenu.svg');
+  const iconGenerator = source('../../scripts/regenerate_web_icons.mjs');
+  const groupStart = sidebar.indexOf('function WorkspaceGroup({');
+  const groupEnd = sidebar.indexOf('\nfunction NoWorkspaceSessionGroup(', groupStart);
+  assert.ok(groupStart >= 0 && groupEnd > groupStart);
+
+  const workspaceGroup = sidebar.slice(groupStart, groupEnd);
+  const actionsStart = workspaceGroup.indexOf('data-sidebar-workspace-actions="true"');
+  const actionsEnd = workspaceGroup.indexOf('\n        </span>\n      </div>', actionsStart);
+  assert.ok(actionsStart >= 0 && actionsEnd > actionsStart);
+
+  const actions = workspaceGroup.slice(actionsStart, actionsEnd);
+  const menuIndex = actions.indexOf('data-sidebar-workspace-menu="true"');
+  const newTaskIndex = actions.indexOf('data-sidebar-workspace-new-task="true"');
+  assert.ok(menuIndex >= 0 && newTaskIndex > menuIndex);
+  assert.equal((actions.match(/<button\b/g) || []).length, 2);
+  assert.match(actions, /onClick=\{openWorkspaceContextMenu\}/);
+  assert.match(actions, /<VsIcon name="workspaceMenu" size=\{16\}/);
+  assert.match(actions, /<VsIcon name="newSession" size=\{16\}/);
+  assert.doesNotMatch(actions, /<VsIcon name="(?:edit|close)"/);
+
+  assert.match(icons, /workspaceMenu: 'WorkspaceMenu'/);
+  assert.match(workspaceMenuSvg, /viewBox="0 0 16 16"/);
+  assert.match(workspaceMenuSvg, /transform="matrix\(1 0 0 1 2 7\)"/);
+  assert.match(workspaceMenuSvg, /d="M0 1[^"]*M5 1[^"]*M10 1/);
+  assert.doesNotMatch(workspaceMenuSvg, /<(?:rect|polygon)\b|rotate\(/);
+  assert.match(iconGenerator, /WorkspaceMenu: 'MoreThree'/);
+  assert.match(iconGenerator, /WorkspaceMenu: `<svg[^`]*M0 1[^`]*M5 1[^`]*M10 1/);
+
+  assert.match(
+    workspaceGroup,
+    /const openWorkspaceContextMenu = useCallback\(\(event\) => \{[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*dispatchEvent\(new MouseEvent\('contextmenu',[\s\S]*bubbles: true,[\s\S]*cancelable: true,/,
+  );
+});

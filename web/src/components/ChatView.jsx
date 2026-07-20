@@ -525,7 +525,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, previewPanelAutoFit = false, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, previewPanelAutoFit = false, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -1350,7 +1350,7 @@ export function ChatView({ sessionRef, sessionId, onSessionPromoted, onHomeWorks
       });
 
     return () => { cancelled = true; };
-  }, [api, ref?.context_window, ref?.deleted, ref?.model, ref?.modelDeleted, ref?.model_deleted, ref?.model_name, ref?.model_preset, ref?.provider, ref?.workspaceHash, sid]);
+  }, [api, modelProfileRevision, ref?.context_window, ref?.deleted, ref?.model, ref?.modelDeleted, ref?.model_deleted, ref?.model_name, ref?.model_preset, ref?.provider, ref?.workspaceHash, sid]);
 
   const refreshSessionModels = useCallback(async () => {
     if (modelRefreshing) return;

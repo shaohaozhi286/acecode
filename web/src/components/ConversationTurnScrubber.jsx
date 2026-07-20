@@ -8,9 +8,15 @@ import {
   useState,
 } from 'react';
 import {
+  MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+  centeredConversationTurnWindowStart,
   conversationTurnMarkerDisplacement,
   conversationTurnMarkerLayout,
+  conversationTurnPageControlTop,
   conversationTurnPreviewTop,
+  conversationTurnSteppedWindowStart,
+  conversationTurnWindow,
+  conversationTurnWindowStartContainingIndex,
   nearestConversationTurnIndex,
 } from '../lib/conversationTurnScrubber.js';
 
@@ -26,11 +32,19 @@ export function ConversationTurnScrubber({
   const previewRef = useRef(null);
   const dismissTimerRef = useRef(0);
   const pointerFocusIndexRef = useRef(-1);
+  const turnsIdentityRef = useRef('');
   const previewId = useId();
   const [railHeight, setRailHeight] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState(-1);
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const [previewHeight, setPreviewHeight] = useState(PREVIEW_ESTIMATED_HEIGHT);
+  const [windowStart, setWindowStart] = useState(() => (
+    centeredConversationTurnWindowStart(
+      activeIndex,
+      turns.length,
+      MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+    )
+  ));
 
   const clearDismissTimer = useCallback(() => {
     if (!dismissTimerRef.current) return;
@@ -69,16 +83,79 @@ export function ConversationTurnScrubber({
 
   useEffect(() => () => clearDismissTimer(), [clearDismissTimer]);
 
-  const markerLayout = useMemo(
-    () => conversationTurnMarkerLayout(turns.length, railHeight),
-    [railHeight, turns.length],
+  const turnsIdentity = `${turns[0]?.itemId || ''}:${turns[turns.length - 1]?.itemId || ''}:${turns.length}`;
+
+  useEffect(() => {
+    const identityChanged = turnsIdentityRef.current !== turnsIdentity;
+    turnsIdentityRef.current = turnsIdentity;
+    setWindowStart((currentStart) => (
+      identityChanged
+        ? centeredConversationTurnWindowStart(
+          activeIndex,
+          turns.length,
+          MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+        )
+        : conversationTurnWindowStartContainingIndex(
+          currentStart,
+          activeIndex,
+          turns.length,
+          MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+        )
+    ));
+  }, [activeIndex, turns.length, turnsIdentity]);
+
+  const visibleWindow = useMemo(
+    () => conversationTurnWindow(
+      turns.length,
+      windowStart,
+      MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+    ),
+    [turns.length, windowStart],
   );
-  const previewIndex = hoveredIndex;
-  const expandedIndex = hoveredIndex >= 0
+  const markerLayout = useMemo(
+    () => conversationTurnMarkerLayout(
+      visibleWindow.visibleCount,
+      railHeight,
+      { edgePadding: visibleWindow.paginated ? 34 : 12 },
+    ).map((marker) => ({
+      ...marker,
+      index: visibleWindow.start + marker.index,
+    })),
+    [
+      railHeight,
+      visibleWindow.paginated,
+      visibleWindow.start,
+      visibleWindow.visibleCount,
+    ],
+  );
+  const previousPageTop = markerLayout.length > 0
+    ? conversationTurnPageControlTop(
+      markerLayout[0].centerY,
+      -1,
+      railHeight,
+    )
+    : 0;
+  const nextPageTop = markerLayout.length > 0
+    ? conversationTurnPageControlTop(
+      markerLayout[markerLayout.length - 1].centerY,
+      1,
+      railHeight,
+    )
+    : 0;
+  const indexIsVisible = useCallback((index) => (
+    index >= visibleWindow.start && index < visibleWindow.end
+  ), [visibleWindow.end, visibleWindow.start]);
+  const previewIndex = indexIsVisible(hoveredIndex) ? hoveredIndex : -1;
+  const expandedCandidate = hoveredIndex >= 0
     ? hoveredIndex
     : (focusedIndex >= 0 ? focusedIndex : activeIndex);
+  const expandedIndex = indexIsVisible(expandedCandidate)
+    ? expandedCandidate
+    : -1;
   const previewTurn = previewIndex >= 0 ? turns[previewIndex] : null;
-  const previewMarker = previewIndex >= 0 ? markerLayout[previewIndex] : null;
+  const previewMarker = previewIndex >= 0
+    ? markerLayout.find((marker) => marker.index === previewIndex)
+    : null;
 
   useLayoutEffect(() => {
     if (!previewTurn || !previewRef.current) return;
@@ -94,6 +171,10 @@ export function ConversationTurnScrubber({
     const rail = railRef.current;
     if (!rail || markerLayout.length === 0) return;
     clearDismissTimer();
+    if (event.target?.closest?.('[data-conversation-turn-page-control]')) {
+      setHoveredIndex(-1);
+      return;
+    }
 
     const rect = rail.getBoundingClientRect();
     const y = event.clientY - rect.top;
@@ -109,8 +190,27 @@ export function ConversationTurnScrubber({
 
   const jumpToTurn = useCallback((turn, index) => {
     if (!turn) return;
+    setWindowStart(centeredConversationTurnWindowStart(
+      index,
+      turns.length,
+      MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+    ));
     onJump?.(turn, index);
-  }, [onJump]);
+  }, [onJump, turns.length]);
+
+  const stepWindow = useCallback((direction) => {
+    clearDismissTimer();
+    setHoveredIndex(-1);
+    setFocusedIndex(-1);
+    setWindowStart((currentStart) => (
+      conversationTurnSteppedWindowStart(
+        currentStart,
+        direction,
+        turns.length,
+        MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
+      )
+    ));
+  }, [clearDismissTimer, turns.length]);
 
   const previewTop = previewMarker
     ? conversationTurnPreviewTop(
@@ -125,10 +225,33 @@ export function ConversationTurnScrubber({
       ref={railRef}
       className="ace-conversation-turn-scrubber"
       data-conversation-turn-scrubber="true"
+      data-window-start={visibleWindow.start}
+      data-window-end={visibleWindow.end}
+      data-window-size={visibleWindow.visibleCount}
       aria-label="对话问题轨道"
       onPointerMove={selectFromPointer}
       onPointerLeave={dismissPreviewSoon}
     >
+      {visibleWindow.paginated && markerLayout.length > 0 && (
+        <button
+          type="button"
+          className="ace-conversation-turn-page-button"
+          data-conversation-turn-page-control="previous"
+          style={{ top: previousPageTop }}
+          aria-label="向上查看更早的问题"
+          disabled={!visibleWindow.hasPrevious}
+          onPointerEnter={() => {
+            clearDismissTimer();
+            setHoveredIndex(-1);
+          }}
+          onClick={() => stepWindow(-1)}
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="m5 12 5-5 5 5" />
+          </svg>
+        </button>
+      )}
+
       {markerLayout.map((marker) => {
         const turn = turns[marker.index];
         const previewed = previewIndex === marker.index;
@@ -137,7 +260,7 @@ export function ConversationTurnScrubber({
         const displacement = conversationTurnMarkerDisplacement(
           marker.index,
           expandedIndex,
-          markerLayout.length,
+          turns.length,
         );
         return (
           <button
@@ -189,6 +312,26 @@ export function ConversationTurnScrubber({
           </button>
         );
       })}
+
+      {visibleWindow.paginated && markerLayout.length > 0 && (
+        <button
+          type="button"
+          className="ace-conversation-turn-page-button"
+          data-conversation-turn-page-control="next"
+          style={{ top: nextPageTop }}
+          aria-label="向下查看更晚的问题"
+          disabled={!visibleWindow.hasNext}
+          onPointerEnter={() => {
+            clearDismissTimer();
+            setHoveredIndex(-1);
+          }}
+          onClick={() => stepWindow(1)}
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="m5 8 5 5 5-5" />
+          </svg>
+        </button>
+      )}
 
       {previewTurn && previewMarker && (
         <div

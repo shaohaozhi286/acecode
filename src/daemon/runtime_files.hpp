@@ -54,6 +54,12 @@ struct RuntimeReuseCheck {
     std::string reason;
 };
 
+enum class DaemonProcessIdentity {
+    Match,
+    Mismatch,
+    Unknown,
+};
+
 // 创建 ~/.acecode/run/ 目录(若已存在则忽略)。返回目录绝对路径。
 std::string ensure_run_dir();
 
@@ -101,9 +107,27 @@ RuntimeReuseCheck validate_runtime_files_for_reuse(
 // still served by a live daemon.
 bool probe_loopback_port(int port);
 
-// Best-effort executable identity check used before Desktop signals a PID.
-// Unknown/unreadable identities return false; destructive callers must fail
-// closed instead of trusting pid files alone.
+// Best-effort process-generation checks used before Desktop attaches to or
+// signals a recorded PID. Executable identity is tri-state so a proven
+// mismatch (safe stale-state cleanup) stays distinct from an unreadable
+// identity (fail closed). Process start time is Unix epoch milliseconds when
+// the platform can expose it.
+DaemonProcessIdentity inspect_daemon_process_identity(std::int64_t pid);
+std::optional<std::int64_t> process_start_time_ms(std::int64_t pid);
+
+// A mismatch proves that the recorded daemon PID now names another
+// executable. A process start later than the matching recorded heartbeat also
+// proves PID reuse, including reuse by another executable with the same name.
+// The timestamp tolerance avoids false positives from coarse platform clocks.
+bool runtime_pid_reuse_is_proven(
+    const RuntimeSnapshot& snapshot,
+    DaemonProcessIdentity process_identity,
+    const std::optional<std::int64_t>& live_process_start_time_ms,
+    std::int64_t timestamp_tolerance_ms = 2000);
+
+// Compatibility helper for existing destructive callers. Unknown/unreadable
+// identities return false; callers that need to distinguish mismatch from
+// unknown must use inspect_daemon_process_identity().
 bool process_is_acecode_daemon(std::int64_t pid);
 
 // daemon stop / 优雅退出时调用: 删 pid/port/heartbeat/token,保留 guid

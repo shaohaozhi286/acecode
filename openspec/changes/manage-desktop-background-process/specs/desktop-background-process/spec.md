@@ -26,6 +26,10 @@ Desktop MUST stop and replace an incompatible process only after verifying that 
 - **WHEN** runtime files do not prove that the recorded PID is the expected Desktop-managed ACECode process
 - **THEN** Desktop does not signal that PID and reports activation failure
 
+#### Scenario: Recorded PID was reused by another process generation
+- **WHEN** a Desktop-managed runtime bundle still records a stopped daemon PID and executable identity or process start time proves that the PID now belongs to another process generation
+- **THEN** Desktop removes only the matching stale runtime generation, does not attach to or signal the reused PID, and starts a new managed daemon
+
 #### Scenario: Standalone CLI daemon exists
 - **WHEN** a standalone CLI daemon is running in its normal runtime location
 - **THEN** Desktop neither connects to it nor stops or garbage-collects it

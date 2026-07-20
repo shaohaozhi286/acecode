@@ -160,6 +160,11 @@ public:
     // provider shared_ptr snapshot it already captured.
     std::optional<SessionModelState> current_model_state(const std::string& id) const;
     bool model_profile_used_by_busy_session(const std::string& model_name) const;
+    // Recompute and publish only the context budget for active sessions that
+    // still reference model_name. Stable-name edits only: a renamed profile is
+    // intentionally not treated as the same reference.
+    std::size_t sync_model_context_window(const std::string& model_name,
+                                          const ModelProfile& profile);
     bool switch_model(const std::string& id,
                       const ModelProfile& profile,
                       SessionModelState* out = nullptr,

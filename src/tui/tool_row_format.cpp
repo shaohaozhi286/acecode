@@ -1,5 +1,7 @@
 #include "tui/tool_row_format.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <deque>
 
 namespace acecode { namespace tui {
@@ -7,6 +9,32 @@ namespace acecode { namespace tui {
 namespace {
 
 constexpr const char* kLegacyPrefix = "[Tool: ";
+
+std::string trim_ascii_whitespace(std::string value) {
+    auto is_space = [](unsigned char c) {
+        return std::isspace(c) != 0;
+    };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(),
+        [is_space](unsigned char c) { return !is_space(c); }));
+    value.erase(std::find_if(value.rbegin(), value.rend(),
+        [is_space](unsigned char c) { return !is_space(c); }).base(),
+        value.end());
+    return value;
+}
+
+std::string ascii_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+    return value;
+}
+
+bool has_non_whitespace(const std::string& value) {
+    return std::any_of(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c) == 0;
+    });
+}
 
 } // namespace
 
@@ -110,6 +138,72 @@ std::vector<ToolCallDot> compute_tool_call_dots(
         }
     }
     return dots;
+}
+
+std::vector<std::string> compute_tool_result_names(
+    const std::vector<TuiState::Message>& conversation) {
+    std::vector<std::string> names(conversation.size());
+    std::deque<std::string> unmatched_calls;
+    for (size_t i = 0; i < conversation.size(); ++i) {
+        const auto& msg = conversation[i];
+        if (msg.role == "tool_call") {
+            unmatched_calls.push_back(
+                parse_tool_row(msg.content, msg.display_override).name);
+        } else if (msg.role == "tool_result") {
+            if (!unmatched_calls.empty()) {
+                names[i] = std::move(unmatched_calls.front());
+                unmatched_calls.pop_front();
+            }
+        } else {
+            unmatched_calls.clear();
+        }
+    }
+    return names;
+}
+
+bool is_task_complete_result(const TuiState::Message& msg,
+                             const std::string& paired_tool_name) {
+    if (msg.role != "tool_result") return false;
+
+    const std::string normalized_name =
+        ascii_lower(trim_ascii_whitespace(paired_tool_name));
+    if (normalized_name == "task_complete" || normalized_name == "complete") {
+        return true;
+    }
+
+    if (!msg.summary.has_value()) return false;
+    const auto& summary = *msg.summary;
+    const std::string verb =
+        ascii_lower(trim_ascii_whitespace(summary.verb));
+    const std::string object =
+        ascii_lower(trim_ascii_whitespace(summary.object));
+    if (verb != "complete") return false;
+    if (object == "task") return true;
+    return std::any_of(summary.metrics.begin(), summary.metrics.end(),
+        [](const auto& metric) {
+            return ascii_lower(trim_ascii_whitespace(metric.first)) ==
+                "summary";
+        });
+}
+
+std::string task_complete_summary_markdown(const TuiState::Message& msg) {
+    if (msg.summary.has_value()) {
+        for (const auto& metric : msg.summary->metrics) {
+            if (ascii_lower(trim_ascii_whitespace(metric.first)) == "summary" &&
+                has_non_whitespace(metric.second)) {
+                return metric.second;
+            }
+        }
+
+        const auto& object = msg.summary->object;
+        if (has_non_whitespace(object) &&
+            ascii_lower(trim_ascii_whitespace(object)) != "task") {
+            return object;
+        }
+    }
+
+    if (has_non_whitespace(msg.content)) return msg.content;
+    return "Completed";
 }
 
 }} // namespace acecode::tui

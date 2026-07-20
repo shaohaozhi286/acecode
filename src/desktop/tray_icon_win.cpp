@@ -162,7 +162,9 @@ constexpr wchar_t kTrayPopupWndClass[] = L"ACECodeDesktopTrayPopupWindow";
 constexpr UINT kTrayPopupDismissMessage = WM_APP + 0x351;
 constexpr int kTrayPopupWidthDip = 280;
 constexpr int kTrayPopupRowHeightHalfDip = 55;
-constexpr int kTrayPopupFontHeightDip = 13;
+// Match Windows menu metrics (~9pt Segoe UI = 12 device px at 96 DPI).
+// 13 made the custom tray menu read heavier than shell menus at 100%.
+constexpr int kTrayPopupFontHeightDip = 12;
 constexpr int kTrayPopupChromeInsetDip = 16;
 constexpr int kTrayPopupShadowBlurDip = 12;
 constexpr int kTrayPopupShadowOffsetYDip = 2;
@@ -384,6 +386,10 @@ struct Win32TrayPopupController {
     int main_more_index = -1;
     bool keyboard_in_submenu = false;
     bool closing = false;
+    // While true, ignore WA_INACTIVE dismiss. UpdateLayeredWindow makes the
+    // layered HWND visible; a subsequent SetForegroundWindow(owner) would
+    // otherwise deactivate it and post-dismiss the menu before it is usable.
+    bool suppress_deactivate_dismiss = false;
 };
 
 std::unique_ptr<Win32TrayPopupController> g_tray_popup;
@@ -417,23 +423,86 @@ int windows_text_scale_percent() {
     return normalize_tray_popup_text_scale_percent(static_cast<int>(value));
 }
 
-int point_target_monitor_dpi(POINT pt, int& monitor_scale_percent) {
-    monitor_scale_percent = 100;
-    HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+int query_monitor_effective_dpi(HMONITOR monitor) {
+    if (HMODULE shcore = ::LoadLibraryW(L"Shcore.dll")) {
+        using GetDpiForMonitorFn =
+            HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+        auto get_dpi = reinterpret_cast<GetDpiForMonitorFn>(
+            ::GetProcAddress(shcore, "GetDpiForMonitor"));
+        UINT dpi_x = 0;
+        UINT dpi_y = 0;
+        constexpr int kMdtEffectiveDpi = 0;
+        if (get_dpi &&
+            SUCCEEDED(get_dpi(monitor, kMdtEffectiveDpi, &dpi_x, &dpi_y)) &&
+            dpi_x > 0) {
+            ::FreeLibrary(shcore);
+            return static_cast<int>(dpi_x);
+        }
+        ::FreeLibrary(shcore);
+    }
+    return 0;
+}
+
+int query_monitor_scale_factor_dpi_unaware(HMONITOR monitor) {
+    // GetScaleFactorForMonitor is only trustworthy while the calling thread is
+    // DPI-unaware. Query under a temporary unaware context, then restore.
+    const auto& api = tray_popup_dpi_api();
+    HANDLE previous = nullptr;
+    if (api.set_thread_context) {
+        constexpr INT_PTR kUnaware = -1; // DPI_AWARENESS_CONTEXT_UNAWARE
+        previous = api.set_thread_context(reinterpret_cast<HANDLE>(kUnaware));
+    }
+
+    int dpi = 0;
     if (HMODULE shcore = ::LoadLibraryW(L"Shcore.dll")) {
         using GetScaleFactorForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int*);
         auto get_scale_factor = reinterpret_cast<GetScaleFactorForMonitorFn>(
             ::GetProcAddress(shcore, "GetScaleFactorForMonitor"));
+        int scale_percent = 100;
         if (get_scale_factor &&
-            SUCCEEDED(get_scale_factor(monitor, &monitor_scale_percent))) {
-            ::FreeLibrary(shcore);
-            return compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
-                monitor_scale_percent);
+            SUCCEEDED(get_scale_factor(monitor, &scale_percent))) {
+            dpi = compute_tray_popup_geometry_dpi_from_monitor_scale_percent(
+                scale_percent);
         }
         ::FreeLibrary(shcore);
     }
+
+    if (api.set_thread_context) {
+        if (previous) {
+            api.set_thread_context(previous);
+        } else {
+            // Best-effort restore to per-monitor-v2 when the previous context
+            // handle was not reported.
+            constexpr INT_PTR kPerMonitorAwareV2 = -4;
+            api.set_thread_context(
+                reinterpret_cast<HANDLE>(kPerMonitorAwareV2));
+        }
+    }
+    return dpi;
+}
+
+int point_target_monitor_dpi(POINT pt, int& monitor_scale_percent) {
+    // Resolve the target monitor's DPI from two sources and merge them. A bare
+    // GetDpiForMonitor call while per-monitor-aware is preferred when it
+    // reports a real scale, but some sessions report 96 for every monitor even
+    // though the shell is clearly scaled — in that case the unaware
+    // GetScaleFactorForMonitor sample recovers the configured scale.
     monitor_scale_percent = 100;
-    return 96;
+    HMONITOR monitor = ::MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    const int from_get_dpi = query_monitor_effective_dpi(monitor);
+    const int from_scale_unaware =
+        query_monitor_scale_factor_dpi_unaware(monitor);
+    const int resolved = resolve_tray_popup_target_monitor_dpi(
+        from_get_dpi,
+        from_scale_unaware);
+    monitor_scale_percent =
+        compute_tray_popup_monitor_scale_percent_from_dpi(resolved);
+    LOG_INFO(
+        "[desktop] tray popup monitor DPI samples: get_dpi=" +
+        std::to_string(from_get_dpi) +
+        ", scale_unaware=" + std::to_string(from_scale_unaware) +
+        ", resolved=" + std::to_string(resolved));
+    return resolved;
 }
 
 HFONT create_popup_font(int font_height_px) {
@@ -1001,6 +1070,10 @@ bool create_popup_hwnd(Win32TrayPopupWindow& state,
     const auto chrome = popup_chrome_geometry(state, x, y);
     const DWORD ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
         (no_activate ? WS_EX_NOACTIVATE : 0);
+    // Create hidden. UpdateLayeredWindow (called from paint) makes layered
+    // windows visible, so the first paint must happen only after the caller
+    // has finished focus/show sequencing; painting here used to race with
+    // SetForegroundWindow(owner) and self-dismiss via WA_INACTIVE.
     state.hwnd = ::CreateWindowExW(
         ex_style,
         kTrayPopupWndClass,
@@ -1016,14 +1089,18 @@ bool create_popup_hwnd(Win32TrayPopupWindow& state,
         &state);
     if (!state.hwnd) return false;
     suppress_system_popup_chrome(state);
-    if (!paint_tray_popup(state)) {
-        HWND failed = state.hwnd;
-        state.hwnd = nullptr;
+    return true;
+}
+
+bool paint_or_destroy_popup(Win32TrayPopupWindow& state) {
+    if (paint_tray_popup(state)) return true;
+    HWND failed = state.hwnd;
+    state.hwnd = nullptr;
+    if (failed) {
         ::SetWindowLongPtrW(failed, GWLP_USERDATA, 0);
         ::DestroyWindow(failed);
-        return false;
     }
-    return true;
+    return false;
 }
 
 void destroy_popup_window(std::unique_ptr<Win32TrayPopupWindow>& state) {
@@ -1159,7 +1236,12 @@ bool open_tray_submenu(Win32TrayPopupWindow& main_window,
         submenu_chrome.window_width,
         submenu_chrome.window_height,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
-    ::UpdateWindow(g_tray_popup->submenu_window->hwnd);
+    if (!paint_or_destroy_popup(*g_tray_popup->submenu_window)) {
+        destroy_popup_window(g_tray_popup->submenu_window);
+        g_tray_popup->main_more_index = -1;
+        g_tray_popup->keyboard_in_submenu = false;
+        return false;
+    }
     if (for_keyboard) {
         move_popup_selection(*g_tray_popup->submenu_window, 1);
     }
@@ -1250,6 +1332,9 @@ LRESULT CALLBACK tray_popup_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
             return state->is_submenu ? MA_NOACTIVATE : MA_ACTIVATE;
         case WM_ACTIVATE:
             if (!state->is_submenu && LOWORD(wparam) == WA_INACTIVE) {
+                if (g_tray_popup && g_tray_popup->suppress_deactivate_dismiss) {
+                    return 0;
+                }
                 HWND next = reinterpret_cast<HWND>(lparam);
                 HWND submenu = g_tray_popup && g_tray_popup->submenu_window
                     ? g_tray_popup->submenu_window->hwnd
@@ -1402,12 +1487,45 @@ bool show_custom_tray_popup(HWND owner,
         return false;
     }
     controller->main_window = std::move(main_window);
+    controller->suppress_deactivate_dismiss = true;
     g_tray_popup = std::move(controller);
+
+    const auto main_chrome = popup_chrome_geometry(
+        *g_tray_popup->main_window, x, y);
+    // Position first without activating, then paint. UpdateLayeredWindow is
+    // what actually presents the pixels; do not steal focus to the owner tray
+    // HWND in between or WA_INACTIVE will dismiss the menu immediately.
+    ::SetWindowPos(
+        g_tray_popup->main_window->hwnd,
+        HWND_TOPMOST,
+        main_chrome.window_x,
+        main_chrome.window_y,
+        main_chrome.window_width,
+        main_chrome.window_height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (!paint_or_destroy_popup(*g_tray_popup->main_window)) {
+        LOG_WARN(
+            "[desktop] tray popup DPI: request " +
+            std::string(requested_dpi_context) +
+            ", thread " + tray_popup_dpi_awareness_name(thread_awareness) +
+            ", target scale " + std::to_string(monitor_scale_percent) +
+            "%, target DPI " + std::to_string(target_monitor_dpi) +
+            ", system DPI " + std::to_string(system_dpi) +
+            ", layout DPI " + std::to_string(layout_dpi) +
+            "; popup paint failed");
+        close_tray_popup();
+        return false;
+    }
+
+    ::SetForegroundWindow(g_tray_popup->main_window->hwnd);
+    ::SetFocus(g_tray_popup->main_window->hwnd);
+    g_tray_popup->suppress_deactivate_dismiss = false;
+
     const TrayPopupDpiAwareness owner_awareness =
         window_dpi_awareness(owner);
     const TrayPopupDpiAwareness popup_awareness =
         window_dpi_awareness(g_tray_popup->main_window->hwnd);
-    LOG_DEBUG(
+    LOG_INFO(
         "[desktop] tray popup DPI: request " +
         std::string(requested_dpi_context) +
         ", thread " + tray_popup_dpi_awareness_name(thread_awareness) +
@@ -1422,21 +1540,6 @@ bool show_custom_tray_popup(HWND owner,
         ", text scale " + std::to_string(metrics.text_scale_percent) +
         "%, font " + std::to_string(metrics.font_height) +
         "px, surface width " + std::to_string(metrics.width) + "px");
-
-    ::SetForegroundWindow(owner);
-    const auto main_chrome = popup_chrome_geometry(
-        *g_tray_popup->main_window, x, y);
-    ::SetWindowPos(
-        g_tray_popup->main_window->hwnd,
-        HWND_TOPMOST,
-        main_chrome.window_x,
-        main_chrome.window_y,
-        main_chrome.window_width,
-        main_chrome.window_height,
-        SWP_SHOWWINDOW);
-    ::SetForegroundWindow(g_tray_popup->main_window->hwnd);
-    ::SetFocus(g_tray_popup->main_window->hwnd);
-    ::UpdateWindow(g_tray_popup->main_window->hwnd);
     return true;
 }
 
@@ -1551,6 +1654,10 @@ void show_context_menu(HWND hwnd) {
     TrayMenuLayout layout = compute_menu_layout(snapshot_payload());
     POINT pt{};
     ::GetCursorPos(&pt);
+    LOG_INFO(
+        "[desktop] tray: context menu at (" + std::to_string(pt.x) + "," +
+        std::to_string(pt.y) + "), entries=" +
+        std::to_string(layout.entries.size()));
     if (!show_custom_tray_popup(
             hwnd,
             layout,

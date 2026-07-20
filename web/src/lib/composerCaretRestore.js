@@ -16,6 +16,26 @@ function clampOffset(value, max) {
 }
 
 const DESKTOP_WINDOW_FOCUS_EVENT = 'acecode:desktop-window-focus';
+const TERMINAL_FOCUS_REGION_SELECTOR = '[data-ace-focus-region="terminal"]';
+
+function meaningfulFocusElement(element, documentRef) {
+  if (!element) return null;
+  if (element === documentRef?.body || element === documentRef?.documentElement) return null;
+  return element;
+}
+
+function liveTerminalFocusRegion(element) {
+  if (!element || typeof element.closest !== 'function') return null;
+  let region = null;
+  try {
+    region = element.closest(TERMINAL_FOCUS_REGION_SELECTOR);
+  } catch {
+    return null;
+  }
+  if (!region || region.isConnected === false) return null;
+  if (region.getAttribute?.('data-collapsed') === 'true') return null;
+  return region;
+}
 
 function readTextareaSelection(textareaElement) {
   if (!textareaElement) return null;
@@ -113,21 +133,32 @@ export function bindDesktopComposerAutoFocus({
 } = {}) {
   if (!enabled || typeof onFocus !== 'function' || !win || !documentRef) return () => {};
 
+  let lastFocusedElement = meaningfulFocusElement(documentRef.activeElement, documentRef);
+  const rememberFocusOwner = (event) => {
+    const element = meaningfulFocusElement(event?.target || documentRef.activeElement, documentRef);
+    if (element) lastFocusedElement = element;
+  };
+  const currentFocusOwner = () => (
+    meaningfulFocusElement(documentRef.activeElement, documentRef) || lastFocusedElement
+  );
   const focusIfCurrentWindow = () => {
     if (documentRef.visibilityState === 'hidden') return;
     const blockingSurface = documentRef.querySelector?.('[role="dialog"], .ace-global-find');
     if (blockingSurface) return;
+    if (liveTerminalFocusRegion(currentFocusOwner())) return;
     onFocus();
   };
   const onVisibilityChange = () => {
     if (documentRef.visibilityState === 'visible') focusIfCurrentWindow();
   };
 
+  documentRef.addEventListener('focusin', rememberFocusOwner);
   win.addEventListener('focus', focusIfCurrentWindow);
   win.addEventListener('pageshow', focusIfCurrentWindow);
   win.addEventListener(DESKTOP_WINDOW_FOCUS_EVENT, focusIfCurrentWindow);
   documentRef.addEventListener('visibilitychange', onVisibilityChange);
   return () => {
+    documentRef.removeEventListener('focusin', rememberFocusOwner);
     win.removeEventListener('focus', focusIfCurrentWindow);
     win.removeEventListener('pageshow', focusIfCurrentWindow);
     win.removeEventListener(DESKTOP_WINDOW_FOCUS_EVENT, focusIfCurrentWindow);

@@ -80,20 +80,39 @@ std::string format_desktop_about_content(const DesktopAboutInfo& info) {
 bool show_desktop_about_dialog(void* parent_window,
                                const DesktopAboutInfo& info) {
 #ifdef _WIN32
+    using TaskDialogFn = HRESULT(WINAPI*)(
+        HWND,
+        HINSTANCE,
+        PCWSTR,
+        PCWSTR,
+        PCWSTR,
+        TASKDIALOG_COMMON_BUTTON_FLAGS,
+        PCWSTR,
+        int*);
+
     const std::wstring title = L"关于 ACECode";
     const std::wstring main_instruction = L"ACECode";
     const std::wstring content = acecode::utf8_to_wide(
         format_desktop_about_content(info));
     int button = 0;
-    const HRESULT result = ::TaskDialog(
-        static_cast<HWND>(parent_window),
-        nullptr,
-        title.c_str(),
-        main_instruction.c_str(),
-        content.c_str(),
-        TDCBF_OK_BUTTON,
-        TD_INFORMATION_ICON,
-        &button);
+    HRESULT result = E_NOTIMPL;
+    HMODULE common_controls = ::LoadLibraryW(L"comctl32.dll");
+    if (common_controls) {
+        auto task_dialog = reinterpret_cast<TaskDialogFn>(
+            ::GetProcAddress(common_controls, "TaskDialog"));
+        if (task_dialog) {
+            result = task_dialog(
+                static_cast<HWND>(parent_window),
+                nullptr,
+                title.c_str(),
+                main_instruction.c_str(),
+                content.c_str(),
+                TDCBF_OK_BUTTON,
+                TD_INFORMATION_ICON,
+                &button);
+        }
+        ::FreeLibrary(common_controls);
+    }
     if (SUCCEEDED(result)) return true;
     return ::MessageBoxW(
                static_cast<HWND>(parent_window),

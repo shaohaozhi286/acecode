@@ -122,7 +122,7 @@ std::string collapse_sidebar_title_whitespace(std::string_view text) {
     return out;
 }
 
-std::string first_user_message_title(const TuiState& state) {
+static std::string first_user_message_title(const TuiState& state) {
     std::string explicit_title =
         collapse_sidebar_title_whitespace(state.current_session_title);
     if (!explicit_title.empty()) return explicit_title;
@@ -237,7 +237,7 @@ std::string repeat_utf8_glyph(const char* glyph, int count) {
 
 // ---- Sidebar rendering ----
 
-Element sidebar_section_header(const std::string& label, int count) {
+static Element sidebar_section_header(const std::string& label, int count) {
     return hbox({
         text(label) | color(theme().ui.text_muted) | dim,
         text(" " + std::to_string(count)) | color(theme().ui.text_dim) | dim,
@@ -259,17 +259,7 @@ static std::string sidebar_change_stats_text(
     return out.empty() ? std::string("0") : out;
 }
 
-Element render_sidebar_change_row(
-    const TuiState::McpSidebarServer& /*change_placeholder*/,
-    int /*content_width*/) {
-    // NOTE: The actual implementation uses SidebarFileChange, not McpSidebarServer.
-    // This signature was declared incorrectly in the header. The real implementation
-    // is called from render_regular_sidebar which uses SidebarFileChange directly.
-    return emptyElement();
-}
-
-// The actual implementation used internally:
-static Element render_sidebar_change_row_impl(
+static Element render_sidebar_change_row(
     const SidebarFileChange& change,
     int content_width) {
     const std::string stats_text = sidebar_change_stats_text(change);
@@ -397,7 +387,7 @@ void set_mcp_sidebar_servers_locked(
     state.mcp_sidebar_servers = std::move(servers);
 }
 
-Element render_mcp_sidebar_section(
+static Element render_mcp_sidebar_section(
     const std::vector<TuiState::McpSidebarServer>& servers,
     int content_width,
     int anim_tick) {
@@ -604,7 +594,9 @@ Element render_pending_attachment_block(const TuiState& state, int available_wid
     return vbox(std::move(rows));
 }
 
-std::vector<std::string> sidebar_title_lines(const std::string& title, int max_width) {
+static std::vector<std::string> sidebar_title_lines(
+    const std::string& title,
+    int max_width) {
     max_width = std::max(1, max_width);
     const auto glyphs = Utf8ToGlyphs(title);
     std::vector<std::string> lines;
@@ -699,7 +691,7 @@ Element render_regular_sidebar(const TuiState& state,
         std::min(kMaxSidebarFiles, file_changes.size());
     for (std::size_t i = 0; i < shown_files; ++i) {
         top_rows.push_back(
-            render_sidebar_change_row_impl(file_changes[i], content_width));
+            render_sidebar_change_row(file_changes[i], content_width));
     }
     if (file_changes.size() > shown_files) {
         top_rows.push_back(
@@ -716,15 +708,46 @@ Element render_regular_sidebar(const TuiState& state,
     }
     const bool show_bash_task =
         state.tool_running && state.tool_progress.tool_name == "bash";
-    if (show_bash_task) {
-        bottom_rows.push_back(sidebar_section_header("Background Tasks", 1));
-        std::string command = state.tool_progress.command_preview.empty()
-            ? std::string("bash")
-            : state.tool_progress.command_preview;
+    const auto& subagents = state.subagent_tasks;
+    if (show_bash_task || !subagents.empty()) {
+        const int task_count =
+            (show_bash_task ? 1 : 0) + static_cast<int>(subagents.size());
         bottom_rows.push_back(
-            text("  " + truncate_cells_middle_ascii(command,
-                                                    std::max(1, content_width - 2))) |
-            color(theme().ui.text_muted));
+            sidebar_section_header("Background Tasks", task_count));
+        if (show_bash_task) {
+            std::string command = state.tool_progress.command_preview.empty()
+                ? std::string("bash")
+                : state.tool_progress.command_preview;
+            bottom_rows.push_back(
+                text("  " + truncate_cells_middle_ascii(
+                                 command, std::max(1, content_width - 2))) |
+                color(theme().ui.text_muted));
+        }
+
+        // spawn_subagent 运行中任务:标题为空时退到 prompt 摘要,并持续显示耗时。
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& task : subagents) {
+            const auto secs =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    now - task.started)
+                    .count();
+            const std::string elapsed =
+                secs < 60 ? std::to_string(secs) + "s"
+                          : std::to_string(secs / 60) + "m" +
+                                std::to_string(secs % 60) + "s";
+            const std::string label =
+                task.title.empty() ? task.prompt : task.title;
+            const int label_width =
+                std::max(1, content_width - 4 -
+                                static_cast<int>(elapsed.size()));
+            bottom_rows.push_back(hbox({
+                text("  "),
+                text("\xE2\x97\x8F ") | color(theme().semantic.success),
+                text(truncate_end(label, label_width)) |
+                    color(theme().ui.text_muted) | flex,
+                text(" " + elapsed) | dim | color(theme().ui.text_dim),
+            }));
+        }
         bottom_rows.push_back(text(""));
     }
     bottom_rows.push_back(paragraph(version_str) | color(theme().ui.text_muted) | dim);

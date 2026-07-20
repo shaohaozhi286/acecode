@@ -19,6 +19,14 @@ include(CTest)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MinGW uses COFF's small section table by default. Large generated or test
+# translation units need the GNU assembler equivalent of MSVC's /bigobj.
+if(MINGW)
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:CXX>:-Wa$<COMMA>-mbig-obj>"
+    )
+endif()
+
 # MSVC: static runtime (MT/MTd), UTF-8, PDB in Release
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -110,8 +118,10 @@ find_package(ftxui CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
-if(WIN32)
+set(ACECODE_HAS_WINTOAST OFF)
+if(WIN32 AND NOT MINGW)
     find_package(unofficial-wintoast CONFIG REQUIRED)
+    set(ACECODE_HAS_WINTOAST ON)
 endif()
 
 # Crow is the HTTP/WebSocket server used by `acecode daemon`. Wired up as
@@ -275,16 +285,29 @@ if(APPLE)
         "-framework UserNotifications"
     )
 elseif(WIN32)
-    target_sources(acecode_native_bridge_support PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
-    )
     # advapi32: restrictive ACL writes in utils/atomic_file.hpp.
     # ws2_32: daemon/runtime_files.cpp port probes.
     # ole32/shell32/user32: native folder picker and clipboard integration.
     target_link_libraries(acecode_native_bridge_support PUBLIC
         advapi32 ws2_32 ole32 shell32 user32
-        unofficial::wintoast::wintoast
     )
+    if(ACECODE_HAS_WINTOAST)
+        target_sources(acecode_native_bridge_support PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/desktop/notifications_win.cpp
+        )
+        target_link_libraries(acecode_native_bridge_support PUBLIC
+            unofficial::wintoast::wintoast
+        )
+    else()
+        # WinToast requires Windows SDK WRL headers, which are intentionally
+        # absent from self-contained MinGW/WinLibs toolchains.
+        target_sources(acecode_native_bridge_support PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/desktop/notifications_stub.cpp
+        )
+        target_compile_definitions(acecode_native_bridge_support PUBLIC
+            ACECODE_NOTIFICATION_BACKEND_STUB=1
+        )
+    endif()
 else()
     target_sources(acecode_native_bridge_support PRIVATE
         ${CMAKE_SOURCE_DIR}/src/desktop/notifications_stub.cpp
@@ -362,8 +385,9 @@ if(Crow_FOUND)
 endif()
 if(WIN32)
     # ws2_32: src/desktop/daemon_supervisor.cpp 用 winsock 探测端口连通性。
+    # mswsock: standalone Asio IOCP uses AcceptEx/GetAcceptExSockaddrs.
     # ole32/shell32/user32: src/desktop/folder_picker_win.cpp 的 COM + IFileOpenDialog + owner/foreground handling。
-    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp ws2_32 ole32 shell32 user32)
+    target_link_libraries(acecode_testable PUBLIC bcrypt advapi32 winhttp ws2_32 mswsock ole32 shell32 user32)
     # winpty 客户端库(< 1809 的 PTY 兜底,cmake/acecode_winpty.cmake)。
     target_link_libraries(acecode_testable PUBLIC winpty_static)
 endif()
@@ -388,6 +412,11 @@ target_link_libraries(acecode PRIVATE
     ftxui::dom
     ftxui::component
 )
+if(WIN32)
+    # main.cpp and tui/ime_windows.cpp use the Windows IME API. MSVC also
+    # accepts #pragma comment(lib), while MinGW requires the explicit target.
+    target_link_libraries(acecode PRIVATE imm32)
+endif()
 target_compile_definitions(acecode PRIVATE
     $<$<BOOL:${ACECODE_TUI_INPUT_TRACE}>:ACECODE_TUI_INPUT_TRACE=1>
 )

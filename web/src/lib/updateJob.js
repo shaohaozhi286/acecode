@@ -43,6 +43,32 @@ export function updateRestartMessage(job) {
   return '升级已安装。请完全退出并重新启动 ACECode；当前窗口仍在运行旧版本。';
 }
 
+export function normalizeUpdateReleases(releases) {
+  if (!Array.isArray(releases)) return [];
+  const normalized = [];
+  for (const release of releases) {
+    if (!release || typeof release !== 'object') continue;
+    const version = typeof release.version === 'string' ? release.version.trim() : '';
+    const notes = typeof release.notes === 'string' ? release.notes.trim() : '';
+    if (!version || !notes) continue;
+    normalized.push({
+      version,
+      published_at: typeof release.published_at === 'string'
+        ? release.published_at.trim()
+        : '',
+      notes,
+    });
+  }
+  return normalized;
+}
+
+export function formatUpdatePublishedDate(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  const isoDate = text.match(/^(\d{4}-\d{2}-\d{2})(?:T|$)/);
+  return isoDate ? isoDate[1] : text;
+}
+
 export function desktopUpdateRestartAvailable(
   win = typeof window !== 'undefined' ? window : undefined,
 ) {
@@ -68,8 +94,10 @@ export async function requestDesktopUpdateRestart(
   return result;
 }
 
-export function updateDialogMode(job) {
-  if (!job) return 'confirm';
+export function updateDialogMode(job, updateStatus = null) {
+  if (!job) {
+    return updateStatus?.status === 'up_to_date' ? 'up_to_date' : 'confirm';
+  }
   if (updateJobIsActive(job)) return 'running';
   if (job.state === 'succeeded') return 'success';
   if (job.state === 'failed') return 'failure';

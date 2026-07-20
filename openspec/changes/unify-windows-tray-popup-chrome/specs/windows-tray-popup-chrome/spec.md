@@ -37,9 +37,14 @@ The Windows tray popup SHALL convert chrome design constants from DIP into its e
 - **AND** SHALL leave the target-monitor scaling to Windows exactly once
 
 #### Scenario: Monitor scale query fails
-- **WHEN** the target monitor scale factor cannot be read
+- **WHEN** the target monitor effective DPI and scale factor cannot be read
 - **THEN** popup geometry SHALL fall back to 96 DPI
 - **AND** SHALL NOT reuse a process-awareness-dependent system DPI
+
+#### Scenario: Per-monitor popup reads effective monitor DPI
+- **WHEN** the popup thread is per-monitor-aware and the target display effective DPI is available
+- **THEN** the popup SHALL use `GetDpiForMonitor(MDT_EFFECTIVE_DPI)` (or equivalent) as the target monitor DPI
+- **AND** SHALL NOT prefer `GetScaleFactorForMonitor` while DPI-aware, because that API can return a coarse or incorrect scale enum
 
 ### Requirement: Tray popup font composes layout DPI and text size exactly once
 The Windows tray popup SHALL calculate its font height from the unscaled design font, the effective popup coordinate-space DPI, and the Windows text-size percentage, applying each ACECode-owned scale exactly once.

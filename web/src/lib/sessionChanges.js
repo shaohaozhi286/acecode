@@ -119,6 +119,11 @@ function hunkMessageFromToolItem(item) {
   };
 }
 
+function excludesTurnChangeSummary(item) {
+  return item?.kind === 'tool'
+    && item.tool?.metadata?.exclude_from_turn_change_summary === true;
+}
+
 /**
  * 从 ChatView 的 transcript items 中抽取可参与 diff 汇总的 tool hunks。
  * @param {Array<{kind?:string, tool?:{hunks?:Array<object>}}>} items
@@ -298,7 +303,12 @@ export function collectTurnChangeSetsFromItems(items) {
       continue;
     }
 
-    const hunkMessage = hunkMessageFromToolItem(item);
+    // 临时文件的工具行与 diff 仍保留，只从每轮「已修改 xx 个文件」摘要排除。
+    // 是否属于临时根目录由后端依据 ToolContext::scratch_dir 判定，前端不
+    // 重复硬编码 `.acecode/tmp`。
+    const hunkMessage = excludesTurnChangeSummary(item)
+      ? null
+      : hunkMessageFromToolItem(item);
     if (!hunkMessage) continue;
     if (!current) {
       current = {

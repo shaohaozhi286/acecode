@@ -1502,6 +1502,80 @@ TEST(SessionRegistry, CreateUsesExplicitSessionModelState) {
     std::filesystem::remove_all(cwd);
 }
 
+// 场景:设置页在不改名的前提下修改 saved model 上下文窗口时,所有引用该
+// name 的 active session 同步 model_state + AgentLoop 预算;其它模型和
+// provider slot 不受影响。
+TEST(SessionRegistry, SyncModelContextWindowUpdatesMatchingActiveSessionsOnly) {
+    auto cwd = temp_cwd("sync_model_context_window");
+    auto project_dir = SessionStorage::get_project_dir(cwd.string());
+    std::filesystem::remove_all(project_dir);
+
+    auto cfg = make_model_cfg();
+    cfg.saved_models[0].context_window = 64000;
+    cfg.saved_models[1].context_window = 32000;
+    ToolExecutor tools;
+    PermissionManager permissions;
+    SessionRegistryDeps deps;
+    deps.provider_accessor = [] { return std::shared_ptr<acecode::LlmProvider>{}; };
+    deps.tools = &tools;
+    deps.cwd = cwd.string();
+    deps.config = &cfg;
+    deps.template_permissions = &permissions;
+    SessionRegistry registry(std::move(deps));
+
+    SessionOptions slow_opts;
+    slow_opts.model_name = "slow";
+    SessionOptions fast_opts;
+    fast_opts.model_name = "fast";
+    const auto slow_a_id = registry.create(slow_opts);
+    const auto slow_b_id = registry.create(slow_opts);
+    const auto fast_id = registry.create(fast_opts);
+
+    auto slow_a = registry.acquire(slow_a_id);
+    auto slow_b = registry.acquire(slow_b_id);
+    auto fast = registry.acquire(fast_id);
+    ASSERT_TRUE(slow_a);
+    ASSERT_TRUE(slow_b);
+    ASSERT_TRUE(fast);
+    ASSERT_TRUE(slow_a->loop);
+    ASSERT_TRUE(slow_b->loop);
+    ASSERT_TRUE(fast->loop);
+    EXPECT_EQ(slow_a->loop->context_window(), 64000);
+    EXPECT_EQ(slow_b->loop->context_window(), 64000);
+    EXPECT_EQ(fast->loop->context_window(), 32000);
+
+    std::shared_ptr<acecode::LlmProvider> provider_before;
+    {
+        ASSERT_TRUE(slow_a->provider_slot);
+        std::lock_guard<std::mutex> lk(slow_a->provider_slot->mu);
+        provider_before = slow_a->provider_slot->provider;
+    }
+
+    cfg.saved_models[0].context_window = 96000;
+    EXPECT_EQ(registry.sync_model_context_window("slow", cfg.saved_models[0]), 2u);
+
+    auto slow_a_state = registry.current_model_state(slow_a_id);
+    auto slow_b_state = registry.current_model_state(slow_b_id);
+    auto fast_state = registry.current_model_state(fast_id);
+    ASSERT_TRUE(slow_a_state);
+    ASSERT_TRUE(slow_b_state);
+    ASSERT_TRUE(fast_state);
+    EXPECT_EQ(slow_a_state->context_window, 96000);
+    EXPECT_EQ(slow_b_state->context_window, 96000);
+    EXPECT_EQ(fast_state->context_window, 32000);
+    EXPECT_EQ(slow_a->loop->context_window(), 96000);
+    EXPECT_EQ(slow_b->loop->context_window(), 96000);
+    EXPECT_EQ(fast->loop->context_window(), 32000);
+
+    {
+        std::lock_guard<std::mutex> lk(slow_a->provider_slot->mu);
+        EXPECT_EQ(slow_a->provider_slot->provider, provider_before);
+    }
+
+    std::filesystem::remove_all(project_dir);
+    std::filesystem::remove_all(cwd);
+}
+
 // 场景: active session 只保存 saved_models.name。若全局配置删掉该 name,
 // Web/Desktop 查询当前模型和 active 列表都应得到 deleted 状态,而不是继续
 // 暴露旧 provider/model 当成可用模型。

@@ -56,11 +56,13 @@ At 96 DPI/100% text size the font remains 13 pixels. In a per-monitor context, t
 
 ### 7. Separate target monitor DPI from the active Win32 coordinate space
 
-`GetDpiForMonitor` changes its result according to the caller's DPI awareness, while `GetScaleFactorForMonitor` reports the target monitor's configured scale independently. Neither value alone says whether Windows will subsequently virtualize a top-level window.
+`GetDpiForMonitor(MDT_EFFECTIVE_DPI)` returns the user-configured effective DPI when the caller is per-monitor-aware, system DPI when system-aware, and 96 when unaware. That matches the popup's forced per-monitor thread context on the normal path.
 
-The previous implementation always converted the target scale to DPI and manually applied it. That is correct for a per-monitor-aware popup, but a system-aware or unaware popup on another-DPI monitor is then scaled again by Windows. This is the machine-dependent double scale that made either the Windows 10 machine or the high-DPI Windows 11 machine wrong after each one-sided correction.
+`GetScaleFactorForMonitor` must not be the primary source while the process/thread is DPI-aware: it returns a coarse `DEVICE_SCALE_FACTOR` enum and is known to disagree with the Settings "Scale" value (for example 180% instead of 200%, or an inflated factor on some 100% Windows 10 displays). Prefer `GetDpiForMonitor`; keep `GetScaleFactorForMonitor` only as a last-resort fallback when the DPI query fails.
 
-The popup will still dynamically call `GetScaleFactorForMonitor` for the target monitor, but will select its layout DPI from the effective thread awareness: target monitor DPI for per-monitor-aware, system DPI for system-aware, and 96 DPI for unaware. The conversion and selection are pure and covered by tests.
+Neither value alone says whether Windows will subsequently virtualize a top-level window. Always converting a raw target scale into layout pixels is correct only for a per-monitor-aware popup; a system-aware or unaware popup on another-DPI monitor is then scaled again by Windows. That machine-dependent double scale made either the Windows 10 machine or the high-DPI Windows 11 machine wrong after each one-sided correction.
+
+Layout DPI is therefore selected from the effective thread awareness: target-monitor effective DPI for per-monitor-aware, system DPI for system-aware, and 96 DPI for unaware. The conversion and selection are pure and covered by tests.
 
 ### 8. Establish the popup DPI context before reading coordinates
 

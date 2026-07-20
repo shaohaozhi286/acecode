@@ -2,11 +2,77 @@
 #include "../session/output_attachments.hpp"
 #include "utils/logger.hpp"
 #include "utils/encoding.hpp"
+#include "utils/utf8_path.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <sstream>
 
 namespace acecode {
+
+namespace {
+
+std::string normalized_path_for_scope(const std::string& raw,
+                                      const std::string& cwd) {
+    if (raw.empty()) return {};
+
+    namespace fs = std::filesystem;
+    fs::path path = path_from_utf8(raw);
+    if (path.is_relative()) {
+        if (cwd.empty()) return {};
+        path = path_from_utf8(cwd) / path;
+    }
+
+    std::error_code ec;
+    fs::path normalized = fs::weakly_canonical(path, ec);
+    if (ec) {
+        ec.clear();
+        normalized = fs::absolute(path, ec);
+        if (ec) normalized = path;
+    }
+
+    std::string text = path_to_utf8_generic(normalized.lexically_normal());
+    if (text.rfind("//?/", 0) == 0) text.erase(0, 4);
+    while (text.size() > 1 && text.back() == '/') text.pop_back();
+#ifdef _WIN32
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+#endif
+    return text;
+}
+
+} // namespace
+
+bool ToolContext::is_workspace_scratch_path(const std::string& file_path) const {
+    if (file_path.empty() || scratch_dir.empty()) return false;
+
+    const auto scratch_root = path_from_utf8(scratch_dir).parent_path();
+    if (scratch_root.empty()) return false;
+
+    const std::string file =
+        normalized_path_for_scope(file_path, cwd);
+    const std::string root =
+        normalized_path_for_scope(path_to_utf8(scratch_root), cwd);
+    if (file.empty() || root.empty()) return false;
+    return file == root ||
+        (file.size() > root.size() &&
+         file.compare(0, root.size(), root) == 0 &&
+         file[root.size()] == '/');
+}
+
+void mark_workspace_scratch_change(ToolResult& result, const ToolContext& ctx) {
+    if (!result.success ||
+        !result.summary.has_value() ||
+        !result.hunks.has_value() ||
+        result.hunks->empty()) {
+        return;
+    }
+    if (ctx.is_workspace_scratch_path(result.summary->object)) {
+        result.metadata[kExcludeFromTurnChangeSummaryMetadata] = true;
+    }
+}
 
 void ToolExecutor::register_tool(const ToolImpl& tool) {
     LOG_INFO("Registering tool: " + tool.definition.name);

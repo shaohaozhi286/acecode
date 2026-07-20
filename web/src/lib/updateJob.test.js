@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   desktopUpdateRestartAvailable,
+  formatUpdatePublishedDate,
+  normalizeUpdateReleases,
   requestDesktopUpdateRestart,
   updateDialogMode,
   updateJobIsActive,
@@ -37,9 +39,45 @@ await test('phase labels and terminal dialog modes are stable', () => {
   assert.equal(updateJobPhaseLabel({ phase: 'extracting', state: 'running' }), '正在解压安装包');
   assert.equal(updateJobPhaseLabel({ phase: 'verifying', state: 'failed' }), '升级失败');
   assert.equal(updateDialogMode(null), 'confirm');
+  assert.equal(updateDialogMode(null, { status: 'available' }), 'confirm');
+  assert.equal(updateDialogMode(null, { status: 'up_to_date' }), 'up_to_date');
   assert.equal(updateDialogMode({ state: 'running' }), 'running');
   assert.equal(updateDialogMode({ state: 'succeeded' }), 'success');
   assert.equal(updateDialogMode({ state: 'failed' }), 'failure');
+});
+
+await test('release history normalization keeps ordered non-empty plain-text notes', () => {
+  assert.deepEqual(normalizeUpdateReleases(null), []);
+  assert.deepEqual(normalizeUpdateReleases([
+    {
+      version: ' 0.8.0 ',
+      published_at: ' 2026-07-20T08:00:00Z ',
+      notes: ' First line\nSecond line ',
+      packages: [{ sha256: 'must-not-leak' }],
+    },
+    { version: '0.7.9', notes: '   ' },
+    { version: '', notes: 'missing version' },
+    null,
+    { version: '0.7.8', notes: 'Earlier tip' },
+  ]), [
+    {
+      version: '0.8.0',
+      published_at: '2026-07-20T08:00:00Z',
+      notes: 'First line\nSecond line',
+    },
+    {
+      version: '0.7.8',
+      published_at: '',
+      notes: 'Earlier tip',
+    },
+  ]);
+});
+
+await test('release publish dates use stable ISO dates and preserve unknown text', () => {
+  assert.equal(formatUpdatePublishedDate('2026-07-20T08:00:00Z'), '2026-07-20');
+  assert.equal(formatUpdatePublishedDate(' 2026-07-19 '), '2026-07-19');
+  assert.equal(formatUpdatePublishedDate('legacy date'), 'legacy date');
+  assert.equal(formatUpdatePublishedDate(null), '');
 });
 
 await test('successful job explains that the running window is still old', () => {

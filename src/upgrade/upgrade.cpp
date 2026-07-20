@@ -243,6 +243,14 @@ UpdateCheckResult check_for_update(const AppConfig& config,
         result.error = selection.error;
         return result;
     }
+    result.releases.reserve(parsed_manifest->releases.size());
+    for (const auto& release : parsed_manifest->releases) {
+        result.releases.push_back(UpdateReleaseSummary{
+            release.version,
+            release.published_at,
+            release.notes,
+        });
+    }
     if (selection.status == SelectionStatus::UpToDate || !selection.selected) {
         result.status = UpdateCheckStatus::UpToDate;
         result.latest_version = parsed_manifest->latest;

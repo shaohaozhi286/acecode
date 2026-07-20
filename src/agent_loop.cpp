@@ -806,7 +806,7 @@ void AgentLoop::emit_transcript_system_message(const std::string& content,
 
 bool AgentLoop::active_estimate_exceeds_auto_threshold() const {
     return estimate_message_tokens(provider_relevant_messages(messages_)) >
-           get_auto_compact_threshold(context_window_);
+           get_auto_compact_threshold(context_window_.load(std::memory_order_relaxed));
 }
 
 void AgentLoop::apply_compact_result(const CompactResult& result, const std::string& trigger) {
@@ -833,12 +833,13 @@ void AgentLoop::apply_compact_result(const CompactResult& result, const std::str
 }
 
 bool AgentLoop::maybe_run_auto_compact() {
+    const int context_window = context_window_.load(std::memory_order_relaxed);
     if (auto_compact_consecutive_failures_ >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
         LOG_WARN("Auto-compact circuit breaker tripped (" +
                  std::to_string(auto_compact_consecutive_failures_) +
                  " consecutive failures); messages=" +
                  std::to_string(messages_.size()) +
-                 " context_window=" + std::to_string(context_window_) +
+                 " context_window=" + std::to_string(context_window) +
                  " last_api_prompt_tokens=" +
                  std::to_string(last_api_prompt_tokens_.load()));
         emit_transcript_system_message(
@@ -850,7 +851,7 @@ bool AgentLoop::maybe_run_auto_compact() {
     const auto active_for_estimate = provider_relevant_messages(messages_);
     const int boundary_count = static_cast<int>(active_for_estimate.size());
     int pre_tokens = estimate_message_tokens(active_for_estimate);
-    const int threshold = get_auto_compact_threshold(context_window_);
+    const int threshold = get_auto_compact_threshold(context_window);
     const bool structurally_oversized =
         boundary_count > AUTOCOMPACT_MAX_PROVIDER_MESSAGES;
     LOG_INFO("Auto-compact preflight; messages=" + std::to_string(messages_.size()) +
@@ -862,7 +863,7 @@ bool AgentLoop::maybe_run_auto_compact() {
              (structurally_oversized ? "true" : "false") +
              " active_estimated_tokens=" + std::to_string(pre_tokens) +
              " threshold=" + std::to_string(threshold) +
-             " context_window=" + std::to_string(context_window_) +
+             " context_window=" + std::to_string(context_window) +
              " last_api_prompt_tokens=" +
              std::to_string(last_api_prompt_tokens_.load()) +
              " consecutive_failures=" +
@@ -1657,7 +1658,8 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     std::string session_context = cached_context_for_api(
         build_session_context_prompt(
             cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
-            skill_registry_, context_window_, custom_instructions_cfg_,
+            skill_registry_, context_window_.load(std::memory_order_relaxed),
+            custom_instructions_cfg_,
             *git_snapshot_cache_),
         session_context_cache_key_, session_context_cache_content_);
     prepend_session_context_for_api(api_messages, session_context);
@@ -1973,19 +1975,20 @@ AgentLoop::HandleErrorResult AgentLoop::handle_provider_error(
         !result.accumulated.reasoning_content.empty() ||
         result.accumulated.has_tool_calls();
     const int request_tokens = estimate_message_tokens(messages_with_system);
+    const int context_window = context_window_.load(std::memory_order_relaxed);
     constexpr int kMaxContextRescueAttempts = 3;
     const bool rescue_attempt_available =
         context_rescue_attempts < kMaxContextRescueAttempts;
     const bool rescue_indicated = should_attempt_context_overflow_rescue(
         result.provider_error_info,
         request_tokens,
-        context_window_,
+        context_window,
         model_output_seen);
     LOG_WARN("Provider error before turn completion; " +
              provider_error_summary_for_log(result.provider_error_info) +
              " request_estimated_tokens=" +
              std::to_string(request_tokens) +
-             " context_window=" + std::to_string(context_window_) +
+             " context_window=" + std::to_string(context_window) +
              " messages_with_system=" +
              std::to_string(messages_with_system.size()) +
              " model_output_seen=" +
@@ -2587,6 +2590,7 @@ bool AgentLoop::execute_tool_calls(
             }
         }
         materialize_result_attachments(result);
+        mark_workspace_scratch_change(result, tool_ctx);
 
         auto elapsed_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3218,7 +3222,10 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         if (skip_auto_compact_once) {
             LOG_INFO("Auto-compact preflight skipped once after context rescue retry");
             skip_auto_compact_once = false;
-        } else if (should_auto_compact(messages_, context_window_, last_api_prompt_tokens_.load())) {
+        } else if (should_auto_compact(
+                       messages_,
+                       context_window_.load(std::memory_order_relaxed),
+                       last_api_prompt_tokens_.load())) {
             maybe_run_auto_compact();
             reset_doom_guard_after_compact();
         }

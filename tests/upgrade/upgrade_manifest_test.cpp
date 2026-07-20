@@ -49,6 +49,37 @@ TEST(UpgradeManifest, SelectsNewestCompatiblePackage) {
     EXPECT_EQ(selected.selected->package.file, "acecode-0.1.3-windows-x64.zip");
 }
 
+TEST(UpgradeManifest, ParsesReleaseNotesAndAllowsLegacyMissingNotes) {
+    std::string text = R"({
+      "schema_version": 1,
+      "latest": "0.2.0",
+      "releases": [
+        {
+          "version": "0.2.0",
+          "published_at": "2026-07-20T08:00:00Z",
+          "notes": "New update history.\nStability fixes.",
+          "packages": []
+        },
+        {
+          "version": "0.1.0",
+          "packages": []
+        }
+      ]
+    })";
+
+    std::string err;
+    auto manifest = parse_update_manifest(text, &err);
+
+    ASSERT_TRUE(manifest.has_value()) << err;
+    ASSERT_EQ(manifest->releases.size(), 2u);
+    EXPECT_EQ(manifest->releases[0].version, "0.2.0");
+    EXPECT_EQ(manifest->releases[0].published_at, "2026-07-20T08:00:00Z");
+    EXPECT_EQ(manifest->releases[0].notes,
+              "New update history.\nStability fixes.");
+    EXPECT_TRUE(manifest->releases[1].published_at.empty());
+    EXPECT_TRUE(manifest->releases[1].notes.empty());
+}
+
 TEST(UpgradeManifest, ReportsUpToDateWhenNoNewerCompatiblePackageExists) {
     std::string sha = acecode::sha256_hex("package");
     std::string text = R"({

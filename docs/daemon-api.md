@@ -1556,7 +1556,7 @@ Checks the update manifest and returns:
 
 ```json
 {
-  "status": "ok",
+  "status": "available",
   "update_available": true,
   "current_version": "0.5.10",
   "latest_version": "0.5.11",
@@ -1564,11 +1564,26 @@ Checks the update manifest and returns:
   "manifest_url": "https://example.com/manifest.json",
   "package_file": "acecode.zip",
   "package_url": "https://example.com/acecode.zip",
-  "package_size": 123456
+  "package_size": 123456,
+  "releases": [
+    {
+      "version": "0.5.11",
+      "published_at": "2026-07-20T08:00:00Z",
+      "notes": "1. 新增版本更新记录。\n2. 优化升级稳定性。"
+    },
+    {
+      "version": "0.5.10",
+      "published_at": "2026-07-12T08:00:00Z",
+      "notes": "修复 Desktop 自动重启问题。"
+    }
+  ]
 }
 ```
 
-`http_status` and `error` are included when present.
+`releases` preserves manifest order and contains only release metadata; package
+lists, hashes, and URLs are not duplicated into each entry. Legacy entries with
+missing notes are returned with `notes: ""`. `http_status` and `error` are
+included when present.
 
 ### `POST /api/update/start`
 

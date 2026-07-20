@@ -571,6 +571,7 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
   return (
     <div
       className="ace-console-dock"
+      data-ace-focus-region="terminal"
       data-collapsed={!open}
       style={{ height: open ? height : 0 }}
     >
@@ -633,6 +634,8 @@ export function ConsoleDock({ open, height, onHeightChange, onToggle, consoleInf
             {shellMenuOpen && shellMenuPos && createPortal(
               <div
                 className="ace-console-shell-menu"
+                data-ace-focus-region="terminal"
+                data-collapsed={!open}
                 role="menu"
                 style={{ top: shellMenuPos.top, left: shellMenuPos.left }}
               >

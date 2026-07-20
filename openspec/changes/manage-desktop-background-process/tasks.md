@@ -35,3 +35,11 @@
 - [x] 6.1 Update daemon API/lifecycle documentation for managed health identity and background semantics
 - [x] 6.2 Run focused C++ and web tests plus production web and desktop builds
 - [x] 6.3 Validate the OpenSpec change and audit the final diff for unrelated or unsafe process handling changes
+
+## 7. PID Reuse Recovery
+
+- [x] 7.1 Specify proven PID reuse cleanup separately from ambiguous process identity
+- [x] 7.2 Add tri-state daemon executable inspection and process-start-time generation checks
+- [x] 7.3 Generation-safely discard proven stale Desktop runtime state without signaling the reused PID
+- [x] 7.4 Add PID reuse, same-name process generation, and ambiguous-identity regression coverage
+- [x] 7.5 Run focused tests, strict OpenSpec validation, Release builds, and a real restart smoke test

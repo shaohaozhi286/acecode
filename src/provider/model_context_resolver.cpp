@@ -437,6 +437,19 @@ int resolve_model_profile_context_window_nonblocking(const AppConfig& config,
         context_cfg, profile.provider, profile.model, fallback_context_window);
 }
 
+int resolve_runtime_model_profile_context_window_nonblocking(
+    const AppConfig& config,
+    const ModelProfile& profile,
+    int fallback_context_window,
+    int model_pool_context_window) {
+    const int resolved = resolve_model_profile_context_window_nonblocking(
+        config, profile, fallback_context_window);
+    if (profile.context_window.has_value() && *profile.context_window > 0) {
+        return resolved;
+    }
+    return model_pool_context_window > 0 ? model_pool_context_window : resolved;
+}
+
 void reset_model_context_window_cache_for_test() {
     std::lock_guard<std::mutex> lk(g_context_cache_mu);
     g_context_cache.clear();

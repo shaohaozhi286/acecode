@@ -27,7 +27,6 @@ std::string renderable_tool_summary_line(const ToolSummary& s,
                                          const std::string& metric_str,
                                          int max_visual_width);
 std::string collapse_sidebar_title_whitespace(std::string_view text);
-std::string first_user_message_title(const TuiState& state);
 void trim_ascii_space_suffix(std::string& text);
 std::string truncate_cells_prefix(std::string_view text, int max_cells);
 std::string truncate_cells_middle_ascii(std::string_view text, int max_cells);
@@ -36,18 +35,14 @@ std::string uppercase_ascii(std::string text);
 std::string repeat_utf8_glyph(const char* glyph, int count);
 
 // ---- Sidebar rendering ----
-ftxui::Element sidebar_section_header(const std::string& label, int count);
-ftxui::Element render_sidebar_change_row(const TuiState::McpSidebarServer& change, int content_width);
-ftxui::Element render_mcp_sidebar_section(
-    const std::vector<TuiState::McpSidebarServer>& servers,
-    int content_width, int anim_tick);
+// Single composition entry point for the regular TUI sidebar. Keep sections
+// here so main.cpp cannot drift from shared sidebar behavior.
 ftxui::Element render_regular_sidebar(const TuiState& state,
                                       const std::string& version_str,
                                       const std::string& cwd_display,
                                       int sidebar_width, int anim_tick);
 ftxui::Element render_pending_queue_block(const TuiState& state, int available_width);
 ftxui::Element render_pending_attachment_block(const TuiState& state, int available_width);
-std::vector<std::string> sidebar_title_lines(const std::string& title, int max_width);
 
 // ---- Status bar ----
 ftxui::Color token_progress_color(int percent);

@@ -133,6 +133,7 @@ export function App() {
   const [consoleCwd, setConsoleCwd] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [settingsNavKey, setSettingsNavKey] = useState('general');
+  const [modelProfileRevision, setModelProfileRevision] = useState(0);
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
   // 当前主会话的后台任务(spawn_subagent 子会话)索引,由 ChatView 上报。
@@ -851,26 +852,30 @@ export function App() {
     setUpdateChecking(true);
     try {
       const status = await api.getUpdateStatus();
-      setUpdateStatus(status);
-      if (status?.update_available
-          || updateJobIsActive(updateJob)
-          || (updateJob?.state === 'succeeded' && updateJob?.restart_required)) {
-        setUpdateDialogOpen(true);
-        return;
+      if (status?.status !== 'available' && status?.status !== 'up_to_date') {
+        throw new Error(
+          status?.error
+          || (status?.status ? `更新服务返回状态 ${status.status}` : '更新服务返回无效响应'),
+        );
       }
-      const currentVersion = String(status?.current_version || health?.version || '').trim();
-      toast({
-        kind: 'ok',
-        text: currentVersion
-          ? `当前已是最新版本 v${currentVersion.replace(/^v/i, '')}`
-          : '当前已是最新版本',
-      });
+      setUpdateStatus(status);
+      const keepCurrentJob = updateJobIsActive(updateJob)
+        || (updateJob?.state === 'succeeded' && updateJob?.restart_required);
+      if (!keepCurrentJob) {
+        const staleTarget = updateJob?.target_version
+          && status?.latest_version
+          && updateJob.target_version !== status.latest_version;
+        if (status.status === 'up_to_date' || staleTarget) {
+          setUpdateJob(null);
+        }
+      }
+      setUpdateDialogOpen(true);
     } catch (e) {
       toast({ kind: 'err', text: '检查更新失败:' + (e?.message || '未知错误') });
     } finally {
       setUpdateChecking(false);
     }
-  }, [health?.version, updateChecking, updateJob]);
+  }, [updateChecking, updateJob]);
 
   const showAboutAceCode = useCallback(async () => {
     const result = await showDesktopAboutDialog();
@@ -1393,6 +1398,7 @@ export function App() {
             {view === 'single' && !activeRef?.loop && (
               <ChatView
                 sessionRef={activeRef}
+                modelProfileRevision={modelProfileRevision}
                 onSessionPromoted={navigateToRef}
                 onHomeWorkspaceChange={replaceHomeWorkspace}
                 onCommandWorkspaceChange={setCommandWorkspaceHash}
@@ -1440,6 +1446,7 @@ export function App() {
             initialNavKey={settingsNavKey}
             health={health}
             activeSessionId={activeId}
+            onModelProfileUpdated={() => setModelProfileRevision((value) => value + 1)}
             onDesktopNotificationsChanged={handleDesktopNotificationsChanged}
             onReplayGuidedTour={desktopGuidedTourModeEligible(desktopModeRef.current)
               ? replayGuidedTour

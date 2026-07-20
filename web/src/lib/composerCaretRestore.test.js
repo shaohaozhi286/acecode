@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   bindDesktopComposerAutoFocus,
   requestDesktopWindowFocus,
@@ -62,13 +63,27 @@ function eventTarget() {
     removeEventListener(type, listener) {
       listeners.get(type)?.delete(listener);
     },
-    dispatch(type) {
-      for (const listener of listeners.get(type) || []) listener({ type });
+    dispatch(type, event = {}) {
+      for (const listener of listeners.get(type) || []) listener({ ...event, type });
     },
     listenerCount(type) {
       return listeners.get(type)?.size || 0;
     },
   };
+}
+
+function terminalFocusTarget({ collapsed = false, connected = true } = {}) {
+  const region = {
+    isConnected: connected,
+    getAttribute(name) {
+      return name === 'data-collapsed' ? String(collapsed) : null;
+    },
+  };
+  return Object.assign(element('terminal-textarea'), {
+    closest(selector) {
+      return selector === '[data-ace-focus-region="terminal"]' ? region : null;
+    },
+  });
 }
 
 run('composer caret restore is allowed when focus fell back to body', () => {
@@ -188,6 +203,14 @@ run('desktop composer auto-focus is enabled only for an unobstructed visible she
   }), false);
 });
 
+run('integrated terminal advertises the desktop focus region contract', () => {
+  const source = readFileSync(new URL('../components/ConsoleDock.jsx', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /className="ace-console-dock"\s+data-ace-focus-region="terminal"/,
+  );
+});
+
 run('desktop composer auto-focus follows focus visibility events and cleans up', () => {
   const win = eventTarget();
   const documentRef = Object.assign(eventTarget(), {
@@ -205,6 +228,7 @@ run('desktop composer auto-focus follows focus visibility events and cleans up',
   assert.equal(win.listenerCount('focus'), 1);
   assert.equal(win.listenerCount('pageshow'), 1);
   assert.equal(win.listenerCount('acecode:desktop-window-focus'), 1);
+  assert.equal(documentRef.listenerCount('focusin'), 1);
   assert.equal(documentRef.listenerCount('visibilitychange'), 1);
   win.dispatch('focus');
   win.dispatch('pageshow');
@@ -226,7 +250,71 @@ run('desktop composer auto-focus follows focus visibility events and cleans up',
   assert.equal(focusCalls, 4);
   assert.equal(win.listenerCount('focus'), 0);
   assert.equal(win.listenerCount('acecode:desktop-window-focus'), 0);
+  assert.equal(documentRef.listenerCount('focusin'), 0);
   assert.equal(documentRef.listenerCount('visibilitychange'), 0);
+});
+
+run('desktop composer auto-focus preserves expanded terminal ownership on reactivation', () => {
+  const win = eventTarget();
+  const body = element('body');
+  const html = element('html');
+  const documentRef = Object.assign(eventTarget(), {
+    activeElement: body,
+    body,
+    documentElement: html,
+    visibilityState: 'visible',
+    querySelector: () => null,
+  });
+  const terminalInput = terminalFocusTarget();
+  let focusCalls = 0;
+  const cleanup = bindDesktopComposerAutoFocus({
+    enabled: true,
+    onFocus: () => { focusCalls += 1; },
+    win,
+    documentRef,
+  });
+
+  documentRef.activeElement = terminalInput;
+  documentRef.dispatch('focusin', { target: terminalInput });
+  documentRef.activeElement = body;
+  win.dispatch('focus');
+  win.dispatch('acecode:desktop-window-focus');
+  documentRef.dispatch('visibilitychange');
+  assert.equal(focusCalls, 0);
+  cleanup();
+});
+
+run('desktop composer auto-focus resumes after focus leaves or closes the terminal', () => {
+  const win = eventTarget();
+  const body = element('body');
+  const html = element('html');
+  const documentRef = Object.assign(eventTarget(), {
+    activeElement: body,
+    body,
+    documentElement: html,
+    visibilityState: 'visible',
+    querySelector: () => null,
+  });
+  let focusCalls = 0;
+  const cleanup = bindDesktopComposerAutoFocus({
+    enabled: true,
+    onFocus: () => { focusCalls += 1; },
+    win,
+    documentRef,
+  });
+
+  const terminalInput = terminalFocusTarget();
+  const composerInput = textarea('draft');
+  documentRef.dispatch('focusin', { target: terminalInput });
+  documentRef.dispatch('focusin', { target: composerInput });
+  win.dispatch('focus');
+  assert.equal(focusCalls, 1);
+
+  const collapsedTerminalInput = terminalFocusTarget({ collapsed: true });
+  documentRef.dispatch('focusin', { target: collapsedTerminalInput });
+  win.dispatch('focus');
+  assert.equal(focusCalls, 2);
+  cleanup();
 });
 
 run('desktop composer auto-focus does not steal focus through a modal surface', () => {
