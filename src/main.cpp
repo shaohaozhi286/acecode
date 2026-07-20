@@ -142,6 +142,7 @@
 #include "tui/tool_result_fold.hpp"
 #include "tui/tool_row_format.hpp"
 #include "tui/tool_row_presentation.hpp"
+#include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
 #include "tui/tui_helpers.hpp"
 #include "utils/terminal_theme_detect.hpp"
@@ -511,7 +512,7 @@ static Element render_pending_queue_block(const acecode::TuiState& state,
     if (hidden > 0) {
         rows.push_back(
             text("  +" + std::to_string(hidden) + " more queued") |
-            color(tui::theme().ui.text_dim) | dim);
+            tui::readable_secondary());
     }
 
     const std::size_t start = state.pending_queue.size() - visible;
@@ -567,7 +568,7 @@ static Element render_pending_attachment_block(const acecode::TuiState& state,
         : "  Alt+A: select attachments";
     rows.push_back(
         text(truncate_cells_middle_ascii(hint, std::max(12, available_width - 2))) |
-        dim | color(tui::theme().ui.text_dim));
+        tui::readable_secondary());
     return vbox(std::move(rows));
 }
 
@@ -3794,11 +3795,11 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 tracked_message(i, line | focus_decorator));
         } else if (msg.role == "turn_done") {
             // inline-thinking-heartbeat:回合收尾伪行 "● Done for Ns"。
-            // 与推理行同款 "●" 前缀同列对齐、整行 dim —— 视觉上是推理行
+            // 与推理行同款 "●" 前缀同列对齐,使用可读次级色表现推理行
             // 落定后的余烬。显示端专属 role,不进持久化/LLM context。
             auto line = hbox({
-                text(" \xE2\x97\x8F ") | color(tui::theme().ui.text_dim),
-                paragraph(msg.content) | dim | color(tui::theme().ui.text_dim) | flex,
+                text(" \xE2\x97\x8F ") | tui::readable_secondary(),
+                paragraph(msg.content) | tui::readable_secondary() | flex,
             });
             if (focused_message) {
                 line = line | focus;
@@ -4230,7 +4231,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     }
                     break;
                 case acecode::tui::AskOverlayRowKind::Hint:
-                    el = el | dim | color(tui::theme().ui.text_dim);
+                    el = el | tui::readable_secondary();
                     break;
                 case acecode::tui::AskOverlayRowKind::CustomPrompt:
                     el = el | color(tui::theme().ui.accent);
@@ -4292,7 +4293,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         if (!state.confirm_origin_label.empty()) {
             // 子会话的远程权限请求:标注来源,避免用户误以为是主会话工具。
             rows.push_back(text(" " + state.confirm_origin_label) |
-                           dim | color(tui::theme().ui.text_dim));
+                           tui::readable_secondary());
         }
         std::string title = acecode::tui::build_confirm_question(
             state.confirm_tool_name, state.confirm_tool_args);
@@ -4336,7 +4337,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         rows.push_back(text(""));
         rows.push_back(
             text(" \xE2\x86\x91\xE2\x86\x93 move   Enter select   1/2/3 jump   Esc deny")
-            | dim | color(tui::theme().ui.text_dim));
+            | tui::readable_secondary());
         confirm_overlay_element = vbox(std::move(rows)) | border | color(tui::theme().ui.accent);
     }
 
@@ -4358,7 +4359,8 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                     color(tui::theme().ui.text_muted));
             }
             ask_prompt_parts.push_back(
-                text("use arrows + Enter (Esc to cancel)") | dim | color(tui::theme().ui.text_dim));
+                text("use arrows + Enter (Esc to cancel)") |
+                tui::readable_secondary());
             prompt_line = hbox(std::move(ask_prompt_parts));
         }
     } else if (state.confirm_pending) {
@@ -4369,7 +4371,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         prompt_line = hbox({
             text(" [" + state.confirm_tool_name + "] ") | bold | color(tui::theme().syntax.preproc),
             text("awaiting confirmation \xE2\x80\x94 use \xE2\x86\x91\xE2\x86\x93 + Enter (Esc to deny)")
-                | dim | color(tui::theme().ui.text_dim),
+                | tui::readable_secondary(),
         });
     } else {
         Elements prompt_parts;
@@ -4410,19 +4412,19 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             state.ctrl_c_armed && !state.is_waiting && !state.tool_running;
         if (show_ctrl_c_exit_hint) {
             status_parts.push_back(
-                text("  Press ctrl+c again to exit  ") | dim |
-                color(tui::theme().ui.text_dim));
+                text("  Press ctrl+c again to exit  ") |
+                tui::readable_secondary());
         } else if (dangerous_mode) {
             status_parts.push_back(
                 text("  [YOLO]  ") | bold | color(tui::theme().ui.accent));
         } else if (state.is_waiting || state.tool_running) {
             status_parts.push_back(
-                text("  esc / ctrl+c to interrupt  ") | dim |
-                color(tui::theme().ui.text_dim));
+                text("  esc / ctrl+c to interrupt  ") |
+                tui::readable_secondary());
         } else {
             status_parts.push_back(
-                text("  shift+tab: cycle permission mode  ") | dim |
-                color(tui::theme().ui.text_dim));
+                text("  shift+tab: cycle permission mode  ") |
+                tui::readable_secondary());
         }
         if (state.tool_running) {
             const long secs = elapsed_secs(state.tool_progress.start_time);
@@ -4447,16 +4449,17 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
         status_parts.push_back(goal_el);
         status_parts.push_back(token_el);
         status_parts.push_back(load_el);
-        status_parts.push_back(text(perm_mode_str) | dim | color(tui::theme().ui.text_dim));
+        status_parts.push_back(text(perm_mode_str) |
+                               tui::readable_secondary());
         bottom_bar = hbox(std::move(status_parts));
     } else if (state.ctrl_c_armed && !state.is_waiting && !state.tool_running) {
         bottom_bar = hbox({
-            text("  Press ctrl+c again to exit") | dim | color(tui::theme().ui.text_dim),
+            text("  Press ctrl+c again to exit") | tui::readable_secondary(),
             filler(),
             goal_el,
             token_el,
             load_el,
-            text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
+            text(perm_mode_str + "  ") | tui::readable_secondary(),
         });
     } else if (dangerous_mode) {
         bottom_bar = hbox({
@@ -4465,25 +4468,26 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             goal_el,
             token_el,
             load_el,
-            text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
+            text(perm_mode_str + "  ") | tui::readable_secondary(),
         });
     } else if (state.is_waiting || state.tool_running) {
         bottom_bar = hbox({
-            text("  esc / ctrl+c to interrupt") | dim | color(tui::theme().ui.text_dim),
+            text("  esc / ctrl+c to interrupt") | tui::readable_secondary(),
             filler(),
             goal_el,
             token_el,
             load_el,
-            text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
+            text(perm_mode_str + "  ") | tui::readable_secondary(),
         });
     } else {
         bottom_bar = hbox({
-            text("  shift+tab: cycle permission mode") | dim | color(tui::theme().ui.text_dim),
+            text("  shift+tab: cycle permission mode") |
+                tui::readable_secondary(),
             filler(),
             goal_el,
             token_el,
             load_el,
-            text(perm_mode_str + "  ") | dim | color(tui::theme().ui.text_dim),
+            text(perm_mode_str + "  ") | tui::readable_secondary(),
         });
     }
 
@@ -5882,7 +5886,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         if (display_text.empty()) {
             return hbox({
                 text(" ") | focusCursorBar,
-                text("Type your prompt here...") | dim | color(tui::theme().ui.text_dim),
+                text("Type your prompt here...") | tui::readable_secondary(),
             });
         }
         return render_wrapped_input_text(display_text, cursor);

@@ -17,6 +17,7 @@
 #include <ftxui/screen/string.hpp>
 
 #include "tui_state.hpp"
+#include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
 #include "tui/text_truncation.hpp"
 #include "tui/sidebar_model.hpp"
@@ -239,8 +240,8 @@ std::string repeat_utf8_glyph(const char* glyph, int count) {
 
 static Element sidebar_section_header(const std::string& label, int count) {
     return hbox({
-        text(label) | color(theme().ui.text_muted) | dim,
-        text(" " + std::to_string(count)) | color(theme().ui.text_dim) | dim,
+        text(label) | readable_secondary(),
+        text(" " + std::to_string(count)) | readable_secondary(),
     });
 }
 
@@ -280,7 +281,7 @@ static Element render_sidebar_change_row(
             color(theme().semantic.error));
     }
     if (stats_parts.empty()) {
-        stats_parts.push_back(text("0") | color(theme().ui.text_dim) | dim);
+        stats_parts.push_back(text("0") | readable_secondary());
     }
 
     return hbox({
@@ -313,7 +314,7 @@ Color mcp_sidebar_state_color(const std::string& state) {
     if (state == "starting") return Color::White;
     if (state == "failed" || state == "timed_out") return theme().semantic.error;
     if (state == "cancelled") return theme().semantic.warning;
-    return theme().ui.text_dim;
+    return theme().ui.text_secondary;
 }
 
 bool mcp_sidebar_has_loading(
@@ -428,7 +429,7 @@ static Element render_mcp_sidebar_section(
                     color(theme().ui.text_muted) | dim | flex,
             });
         } else {
-            status = text(server.state) | color(state_color) | dim;
+            status = text(server.state) | color(state_color);
         }
 
         const int name_width = std::max(1, content_width / 2);
@@ -445,7 +446,7 @@ static Element render_mcp_sidebar_section(
         rows.push_back(
             text("  +" + std::to_string(servers.size() - shown_servers) +
                  " more servers") |
-            color(theme().ui.text_dim) | dim);
+            readable_secondary());
     }
 
     return vbox(std::move(rows));
@@ -535,7 +536,7 @@ Element render_pending_queue_block(const TuiState& state, int available_width) {
     if (hidden > 0) {
         rows.push_back(
             text("  +" + std::to_string(hidden) + " more queued") |
-            color(theme().ui.text_dim) | dim);
+            readable_secondary());
     }
 
     const std::size_t start = state.pending_queue.size() - visible;
@@ -590,7 +591,7 @@ Element render_pending_attachment_block(const TuiState& state, int available_wid
         : "  Alt+A: select attachments";
     rows.push_back(
         text(truncate_cells_middle_ascii(hint, std::max(12, available_width - 2))) |
-        dim | color(theme().ui.text_dim));
+        readable_secondary());
     return vbox(std::move(rows));
 }
 
@@ -697,7 +698,7 @@ Element render_regular_sidebar(const TuiState& state,
         top_rows.push_back(
             text("  +" + std::to_string(file_changes.size() - shown_files) +
                  " more") |
-            color(theme().ui.text_dim) | dim);
+            readable_secondary());
     }
 
     Elements bottom_rows;
@@ -745,7 +746,7 @@ Element render_regular_sidebar(const TuiState& state,
                 text("\xE2\x97\x8F ") | color(theme().semantic.success),
                 text(truncate_end(label, label_width)) |
                     color(theme().ui.text_muted) | flex,
-                text(" " + elapsed) | dim | color(theme().ui.text_dim),
+                text(" " + elapsed) | readable_secondary(),
             }));
         }
         bottom_rows.push_back(text(""));

@@ -46,6 +46,11 @@ run('long turn rails use a twenty-marker window with one-step paging and recente
   );
   assert.match(
     component,
+    /\{ edgePadding: visibleWindow\.paginated \? 42 : 12 \}/,
+  );
+  assert.match(helper, /centerOffset = 28/);
+  assert.match(
+    component,
     /index: visibleWindow\.start \+ marker\.index/,
   );
   assert.match(

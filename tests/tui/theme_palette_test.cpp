@@ -19,6 +19,8 @@ void assert_all_slots_assigned(const ThemePalette& p) {
     // ui
     EXPECT_FALSE(is_default(p.ui.text_primary)) << p.name << " ui.text_primary";
     EXPECT_FALSE(is_default(p.ui.text_muted))   << p.name << " ui.text_muted";
+    EXPECT_FALSE(is_default(p.ui.text_secondary))
+        << p.name << " ui.text_secondary";
     EXPECT_FALSE(is_default(p.ui.text_dim))     << p.name << " ui.text_dim";
     EXPECT_FALSE(is_default(p.ui.accent))        << p.name << " ui.accent";
     EXPECT_FALSE(is_default(p.ui.accent_alt))    << p.name << " ui.accent_alt";
@@ -119,5 +121,9 @@ TEST(ThemePalette, DarkAndLightAccentsDiffer) {
     auto l = make_light_palette();
     EXPECT_NE(d.ui.accent, l.ui.accent);
     EXPECT_NE(d.ui.text_primary, l.ui.text_primary);
+    EXPECT_EQ(d.ui.text_secondary, Color::RGB(160, 160, 160));
+    EXPECT_EQ(l.ui.text_secondary, Color::RGB(100, 100, 100));
+    EXPECT_NE(d.ui.text_secondary, d.ui.text_dim);
+    EXPECT_NE(l.ui.text_secondary, l.ui.text_dim);
     EXPECT_NE(d.diff.bg_added_line, l.diff.bg_added_line);
 }

@@ -2,6 +2,7 @@
 
 #include "session/todo_state.hpp"
 #include "tui/text_truncation.hpp"
+#include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
 
 #include <ftxui/dom/elements.hpp>
@@ -122,7 +123,7 @@ inline ftxui::Element render_todo_checklist_block(
                 line_el = line_el | strikethrough | color(theme().ui.text_muted);
             }
             if (item.muted) {
-                line_el = line_el | dim | color(theme().ui.text_dim);
+                line_el = line_el | readable_secondary();
             }
             content_lines.push_back(std::move(line_el));
         }
@@ -131,7 +132,7 @@ inline ftxui::Element render_todo_checklist_block(
             marker = marker | color(theme().semantic.success);
         }
         if (item.muted) {
-            marker = marker | dim | color(theme().ui.text_dim);
+            marker = marker | readable_secondary();
         }
         Element row = hbox({std::move(marker), std::move(content)});
         rows.push_back(std::move(row));
@@ -141,7 +142,7 @@ inline ftxui::Element render_todo_checklist_block(
         rows.push_back(
             text("+" + std::to_string(todos.size() - kTodoChecklistMaxVisibleItems) +
                  " more") |
-            dim | color(theme().ui.text_dim));
+            readable_secondary());
     }
     return vbox(std::move(rows));
 }

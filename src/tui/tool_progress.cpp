@@ -1,4 +1,5 @@
 #include "tool_progress.hpp"
+#include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
 #include "tui/tool_row_format.hpp"
 #include "tui/tool_row_presentation.hpp"
@@ -83,7 +84,8 @@ ftxui::Element render_tool_progress(const TuiState& state) {
 
     Elements status_row;
     if (!status_left.empty()) {
-        status_row.push_back(text("   " + status_left) | dim | color(th.ui.text_dim));
+        status_row.push_back(text("   " + status_left) |
+                             tui::readable_secondary());
     } else {
         status_row.push_back(text("   ") | dim);
     }

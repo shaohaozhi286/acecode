@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "commands/compact.hpp"
+#include "commands/micro_compact.hpp"
 
 namespace {
 
@@ -207,4 +208,134 @@ TEST(CompactCore, RescueCompactReturnsClearErrorWhenSingleTurnCannotShrink) {
     EXPECT_TRUE(result.compacted_messages.empty());
     EXPECT_NE(result.error.find("too large"), std::string::npos);
     EXPECT_EQ(result.estimated_tokens_after, result.estimated_tokens_before);
+}
+
+TEST(CompactCore, CountableUserTurnIgnoresHiddenGoalContext) {
+    auto real = msg("user", "real question");
+    auto goal = msg("user", "<goal_context>continue</goal_context>");
+    goal.metadata = {{"hidden_goal_context", true}};
+    auto todo = msg("user", "<todo_context>");
+    todo.metadata = {{"hidden_todo_context", true}};
+
+    EXPECT_TRUE(acecode::is_countable_user_turn(real));
+    EXPECT_FALSE(acecode::is_countable_user_turn(goal));
+    EXPECT_FALSE(acecode::is_countable_user_turn(todo));
+}
+
+TEST(CompactCore, CompactKeepTurnsSkipsHiddenGoalContext) {
+    ChatStubProvider provider;
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", long_text('a'), "u-old"),
+        msg("assistant", long_text('b')),
+        msg("user", "keep this real user", "u-keep"),
+        msg("assistant", "kept response"),
+    };
+    auto goal = msg("user", "<goal_context>continue work</goal_context>", "u-goal");
+    goal.metadata = {{"hidden_goal_context", true}};
+    messages.push_back(std::move(goal));
+    messages.push_back(msg("assistant", "goal turn response"));
+
+    // keep_turns=1 must retain the real user turn, not treat goal injection as
+    // the only protected user message (which would drop "keep this real user").
+    auto result = acecode::compact_messages(provider, messages, "/tmp/project", 1);
+
+    ASSERT_TRUE(result.performed) << result.error;
+    bool saw_real_keep = false;
+    bool saw_goal = false;
+    for (const auto& m : result.compacted_messages) {
+        if (m.content == "keep this real user") saw_real_keep = true;
+        if (m.metadata.is_object() &&
+            m.metadata.value("hidden_goal_context", false)) {
+            saw_goal = true;
+        }
+    }
+    EXPECT_TRUE(saw_real_keep);
+    EXPECT_TRUE(saw_goal);
+}
+
+acecode::ChatMessage tool_call(const std::string& id, const std::string& name) {
+    acecode::ChatMessage out;
+    out.role = "assistant";
+    out.content = "";
+    out.tool_calls = nlohmann::json::array({
+        {
+            {"id", id},
+            {"type", "function"},
+            {"function", {{"name", name}, {"arguments", "{}"}}},
+        },
+    });
+    return out;
+}
+
+acecode::ChatMessage tool_result(const std::string& id, const std::string& content) {
+    acecode::ChatMessage out;
+    out.role = "tool";
+    out.tool_call_id = id;
+    out.content = content;
+    return out;
+}
+
+TEST(MicroCompact, ProtectsRecentUserTurnToolResults) {
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "old"),
+        tool_call("c-old", "file_read"),
+        tool_result("c-old", std::string(2000, 'O')),
+        msg("user", "recent"),
+        tool_call("c-new", "file_read"),
+        tool_result("c-new", std::string(2000, 'N')),
+    };
+
+    auto result = acecode::run_micro_compact(messages, 0, 1);
+
+    ASSERT_TRUE(result.performed);
+    EXPECT_EQ(result.tool_results_cleared, 1);
+    EXPECT_EQ(messages[2].content, "[Older tool output omitted from context]");
+    EXPECT_EQ(messages[5].content, std::string(2000, 'N'));
+}
+
+TEST(MicroCompact, NeverClearsFileEditOrWriteResults) {
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "old edit"),
+        tool_call("c-edit", "file_edit"),
+        tool_result("c-edit", std::string(2000, 'E')),
+        tool_call("c-write", "file_write"),
+        tool_result("c-write", std::string(2000, 'W')),
+        msg("user", "later"),
+        msg("assistant", "ok"),
+        msg("user", "later2"),
+        msg("assistant", "ok2"),
+        msg("user", "later3"),
+        msg("assistant", "ok3"),
+        msg("user", "later4"),
+        msg("assistant", "ok4"),
+    };
+
+    auto result = acecode::run_micro_compact(messages, 0, 4);
+
+    EXPECT_FALSE(result.performed);
+    EXPECT_EQ(messages[2].content, std::string(2000, 'E'));
+    EXPECT_EQ(messages[4].content, std::string(2000, 'W'));
+}
+
+TEST(MicroCompact, ProtectsEverythingWhenFewerThanKeepUserTurns) {
+    // Previously, not reaching keep_assistant_turns left cutoff at end and
+    // wiped *all* tool results. With insufficient real user turns we must
+    // clear nothing.
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "only one real turn"),
+        tool_call("c1", "bash"),
+        tool_result("c1", std::string(2000, 'x')),
+        msg("assistant", "done"),
+    };
+    auto goal = msg("user", "<goal_context>continue</goal_context>");
+    goal.metadata = {{"hidden_goal_context", true}};
+    messages.push_back(std::move(goal));
+    messages.push_back(tool_call("c2", "bash"));
+    messages.push_back(tool_result("c2", std::string(2000, 'y')));
+
+    auto result = acecode::run_micro_compact(messages, 0, 4);
+
+    EXPECT_FALSE(result.performed);
+    EXPECT_EQ(messages[2].content, std::string(2000, 'x'));
+    EXPECT_EQ(messages[6].content, std::string(2000, 'y'));
 }

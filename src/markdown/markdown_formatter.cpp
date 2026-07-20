@@ -1,6 +1,7 @@
 #include "markdown_formatter.hpp"
 #include "markdown_lexer.hpp"
 #include "syntax_highlight.hpp"
+#include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
 #include "utils/logger.hpp"
 #include <sstream>
@@ -440,7 +441,8 @@ static Element format_block_token(const Token& token, const FormatContext& ctx) 
         // Language label
         if (!token.lang.empty()) {
             code_elements.push_back(
-                text(" " + token.lang + " ") | dim | color(acecode::tui::theme().ui.text_dim)
+                text(" " + token.lang + " ") |
+                    acecode::tui::readable_secondary()
             );
         }
 

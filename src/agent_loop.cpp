@@ -828,7 +828,12 @@ void AgentLoop::apply_compact_result(const CompactResult& result, const std::str
         session_manager_->append_compact_checkpoint(checkpoint);
     }
     messages_ = std::move(replacement_history);
-    MtimeTracker::instance().clear_read_observations();
+    // Micro-compact only omits old tool bodies; recent file reads remain in
+    // context. Clearing mtime observations here forces the model to re-read
+    // everything and was a major post-compact retry amplifier.
+    if (trigger != "micro") {
+        MtimeTracker::instance().clear_read_observations();
+    }
     compact_generation_.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -880,7 +885,8 @@ bool AgentLoop::maybe_run_auto_compact() {
         }
     }
 
-    auto micro_result = run_micro_compact(messages_, boundary_start);
+    auto micro_result = run_micro_compact(
+        messages_, boundary_start, MICRO_COMPACT_KEEP_TURNS);
     if (micro_result.performed) {
         messages_.push_back(create_microcompact_boundary_message(
             pre_tokens,
@@ -891,12 +897,12 @@ bool AgentLoop::maybe_run_auto_compact() {
         replace_result.performed = true;
         replace_result.messages_compressed = micro_result.tool_results_cleared;
         replace_result.estimated_tokens_saved = micro_result.estimated_tokens_saved;
-        replace_result.summary_text = "[Micro-compact] Cleared old tool results.";
+        replace_result.summary_text = "[Micro-compact] Omitted old tool results.";
         replace_result.compacted_messages = messages_;
-        apply_compact_result(replace_result, "auto");
+        apply_compact_result(replace_result, "micro");
 
         emit_transcript_system_message(
-            "[Micro-compact] Cleared " +
+            "[Micro-compact] Omitted " +
                 std::to_string(micro_result.tool_results_cleared) +
                 " old tool results, saved ~" +
                 TokenTracker::format_tokens(micro_result.estimated_tokens_saved) +

@@ -27,7 +27,7 @@ function test(name, fn) {
 test('sidebar fixed navigation keeps the confirmed order and callbacks', () => {
   assert.deepEqual(SIDEBAR_NAV_ITEMS, [
     { id: 'new-task', label: '新建任务', icon: 'newSession', callback: 'onNewTask' },
-    { id: 'new-loop', label: '新建循环', icon: 'alarm', callback: 'onNewLoop' },
+    { id: 'new-loop', label: '循环任务', icon: 'alarm', callback: 'onNewLoop' },
     { id: 'search-tasks', label: '搜索任务', icon: 'search', callback: 'onSearchTasks' },
   ]);
 });

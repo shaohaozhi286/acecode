@@ -11,7 +11,7 @@ export const TOPBAR_QUICK_ACTIONS = Object.freeze([
   }),
   Object.freeze({
     id: 'new-loop',
-    label: '新建循环',
+    label: '循环任务',
     icon: 'alarm',
     iconSize: 16,
     callback: 'onOpenLoop',

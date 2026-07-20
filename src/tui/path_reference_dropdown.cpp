@@ -2,6 +2,7 @@
 
 #include "../tui_state.hpp"
 #include "path_reference_input.hpp"
+#include "text_style.hpp"
 #include "theme_palette.hpp"
 
 #include <algorithm>
@@ -20,12 +21,12 @@ ftxui::Element render_path_reference_dropdown(
     Elements rows;
     if (!state.path_reference_error.empty()) {
         rows.push_back(text("  " + state.path_reference_error) |
-                       color(theme().ui.text_dim));
+                       readable_secondary());
     }
     if (state.path_reference_items.empty()) {
         if (state.path_reference_error.empty()) {
             rows.push_back(text("  No matching files or folders") |
-                           color(theme().ui.text_dim));
+                           readable_secondary());
         }
     } else {
         const int total = static_cast<int>(state.path_reference_items.size());
@@ -34,7 +35,7 @@ ftxui::Element render_path_reference_dropdown(
                                       std::max(0, total - visible));
         if (offset > 0) {
             rows.push_back(text("  ^ " + std::to_string(offset) + " more above") |
-                           color(theme().ui.text_dim));
+                           readable_secondary());
         }
         for (int i = offset; i < offset + visible; ++i) {
             const auto& item = state.path_reference_items[i];
@@ -56,7 +57,7 @@ ftxui::Element render_path_reference_dropdown(
         const int below = total - offset - visible;
         if (below > 0) {
             rows.push_back(text("  v " + std::to_string(below) + " more below") |
-                           color(theme().ui.text_dim));
+                           readable_secondary());
         }
     }
     return vbox(std::move(rows)) | border | color(theme().ui.border);

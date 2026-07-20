@@ -330,7 +330,10 @@ TEST(AgentLoopCompactEvents, AutoCompactRunsMicroCompactBeforeFullCompact) {
         acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>& messages,
                                    const std::vector<acecode::ToolDef>& tools) override {
             for (const auto& msg : messages) {
-                if (msg.content.find("[Old tool result content cleared]") != std::string::npos) {
+                if (msg.content.find("[Older tool output omitted from context]") !=
+                        std::string::npos ||
+                    msg.content.find("[Old tool result content cleared]") !=
+                        std::string::npos) {
                     compact_prompt_saw_cleared_tool_result = true;
                 }
             }
@@ -365,7 +368,7 @@ TEST(AgentLoopCompactEvents, AutoCompactRunsMicroCompactBeforeFullCompact) {
     for (const auto& evt : events) {
         if (evt.kind == acecode::SessionEventKind::Message &&
             evt.payload.value("role", "") == "system" &&
-            evt.payload.value("content", "").find("[Micro-compact] Cleared") != std::string::npos) {
+            evt.payload.value("content", "").find("[Micro-compact]") != std::string::npos) {
             saw_micro_message = true;
         }
     }
@@ -378,8 +381,10 @@ TEST(AgentLoopCompactEvents, StructuralLimitForcesFullCompactAfterMicroCompact) 
         acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>& messages,
                                    const std::vector<acecode::ToolDef>& tools) override {
             for (const auto& msg : messages) {
-                if (msg.content.find("[Old tool result content cleared]") !=
-                    std::string::npos) {
+                if (msg.content.find("[Older tool output omitted from context]") !=
+                        std::string::npos ||
+                    msg.content.find("[Old tool result content cleared]") !=
+                        std::string::npos) {
                     compact_prompt_saw_cleared_tool_result = true;
                 }
             }
@@ -428,7 +433,7 @@ TEST(AgentLoopCompactEvents, StructuralLimitForcesFullCompactAfterMicroCompact) 
             continue;
         }
         const std::string content = evt.payload.value("content", "");
-        if (content.find("[Micro-compact] Cleared") != std::string::npos) {
+        if (content.find("[Micro-compact]") != std::string::npos) {
             saw_micro_message = true;
         }
         if (content.find("[Auto-compact] Compacted") != std::string::npos) {

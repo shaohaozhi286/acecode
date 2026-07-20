@@ -21,7 +21,8 @@ using ftxui::Color;
 struct UiColors {
     Color text_primary;     // 强调文字(标题、粗体)
     Color text_muted;       // 普通文字
-    Color text_dim;         // 暗淡文字(分隔符、辅助信息)
+    Color text_secondary;   // 可读的次级文字(状态、占位、操作提示)
+    Color text_dim;         // 仅装饰性弱元素(分隔符、轨道、树枝)
     Color accent;           // 主强调色(工具名、关键字高亮)
     Color accent_alt;       // 次强调色(计时器、token 统计)
     Color border;           // 边框、下拉面板

@@ -21,7 +21,7 @@ test('top-bar quick actions keep the requested labels and order', () => {
     TOPBAR_QUICK_ACTIONS.map(({ id, label, group }) => ({ id, label, group })),
     [
       { id: 'new-session', label: '新对话', group: 'navigation' },
-      { id: 'new-loop', label: '新建循环', group: 'navigation' },
+      { id: 'new-loop', label: '循环任务', group: 'navigation' },
       { id: 'find-content', label: '查找内容', group: 'navigation' },
       { id: 'settings', label: '设置', group: 'application' },
       { id: 'about', label: '关于 ACECode', group: 'application' },

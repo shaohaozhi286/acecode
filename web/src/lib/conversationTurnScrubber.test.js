@@ -166,7 +166,7 @@ run('paging arrows stay immediately outside the marker stack endpoints', () => {
   assert.equal(spacious[spacious.length - 1].centerY, 431);
   assert.equal(
     conversationTurnPageControlTop(spacious[0].centerY, -1, 520),
-    59,
+    51,
   );
   assert.equal(
     conversationTurnPageControlTop(
@@ -174,25 +174,47 @@ run('paging arrows stay immediately outside the marker stack endpoints', () => {
       1,
       520,
     ),
-    441,
+    449,
+  );
+  assert.equal(
+    conversationTurnPageControlTop(
+      spacious[0].centerY,
+      -1,
+      520,
+      { centerOffset: 20 },
+    ) - conversationTurnPageControlTop(spacious[0].centerY, -1, 520),
+    8,
+  );
+  assert.equal(
+    conversationTurnPageControlTop(
+      spacious[spacious.length - 1].centerY,
+      1,
+      520,
+    ) - conversationTurnPageControlTop(
+      spacious[spacious.length - 1].centerY,
+      1,
+      520,
+      { centerOffset: 20 },
+    ),
+    8,
   );
 
   const compressed = conversationTurnMarkerLayout(
     20,
-    68,
-    { edgePadding: 34 },
+    84,
+    { edgePadding: 42 },
   );
   assert.equal(
-    conversationTurnPageControlTop(compressed[0].centerY, -1, 68),
+    conversationTurnPageControlTop(compressed[0].centerY, -1, 84),
     4,
   );
   assert.equal(
     conversationTurnPageControlTop(
       compressed[compressed.length - 1].centerY,
       1,
-      68,
+      84,
     ),
-    44,
+    60,
   );
 });
 

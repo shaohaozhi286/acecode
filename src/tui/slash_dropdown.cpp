@@ -1,6 +1,7 @@
 #include "slash_dropdown.hpp"
 #include "../commands/command_registry.hpp"
 #include "picker_scroll.hpp"
+#include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
 
 #include <ftxui/dom/elements.hpp>
@@ -199,7 +200,7 @@ ftxui::Element render_slash_dropdown(const TuiState& state,
         } else {
             rows.push_back(
                 text("  \xE2\x86\x91 " + std::to_string(items_above) + " more above")
-                | dim | color(tui::theme().ui.text_dim));
+                | tui::readable_secondary());
         }
     }
     for (int i = offset; i < offset + visible; ++i) {
@@ -244,7 +245,7 @@ ftxui::Element render_slash_dropdown(const TuiState& state,
         } else {
             rows.push_back(
                 text("  \xE2\x86\x93 " + std::to_string(items_below) + " more below")
-                | dim | color(tui::theme().ui.text_dim));
+                | tui::readable_secondary());
         }
     }
 

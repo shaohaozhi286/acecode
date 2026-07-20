@@ -13,6 +13,7 @@ ThemePalette make_dark_palette() {
     p.ui = {
         /* text_primary  */ Color::White,
         /* text_muted    */ Color::GrayLight,
+        /* text_secondary */ Color::RGB(160, 160, 160),
         /* text_dim      */ Color::GrayDark,
         /* accent        */ Color::Yellow,
         /* accent_alt    */ Color::CyanLight,
@@ -77,6 +78,7 @@ ThemePalette make_light_palette() {
     p.ui = {
         /* text_primary  */ Color::Black,
         /* text_muted    */ Color::RGB(80, 80, 80),
+        /* text_secondary */ Color::RGB(100, 100, 100),
         /* text_dim      */ Color::RGB(140, 140, 140),
         /* accent        */ Color::RGB(160, 100, 0),
         /* accent_alt    */ Color::RGB(0, 120, 160),

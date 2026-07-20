@@ -262,7 +262,7 @@ export function conversationTurnPageControlTop(
   availableHeight,
   {
     controlSize = 20,
-    centerOffset = 20,
+    centerOffset = 28,
   } = {},
 ) {
   const height = Math.max(0, Number(availableHeight) || 0);

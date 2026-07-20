@@ -7,12 +7,20 @@
 
 namespace acecode {
 
+// Read / search / shell outputs are bulk noise and safe to drop once stale.
+// Never include file_edit / file_write: clearing mutation confirmations makes
+// the model re-apply the same edits in a loop after compact.
 const std::set<std::string> COMPACTABLE_TOOLS = {
-    "file_read", "file_write", "file_edit",
+    "file_read",
     "bash", "shell",
     "grep", "glob",
     "web_fetch"
 };
+
+// Quiet placeholder: avoid words like "compressed" / "cleared" that make
+// models believe the whole conversation was wiped and re-read everything.
+const char* kMicroCompactOmittedPlaceholder =
+    "[Older tool output omitted from context]";
 
 namespace {
 
@@ -38,42 +46,57 @@ std::string find_tool_name_for_call_id(
     return "";
 }
 
+bool is_already_omitted_tool_result(const std::string& content) {
+    return content == kMicroCompactOmittedPlaceholder ||
+           content == "[Old tool result content cleared]";
+}
+
 } // namespace
 
 MicroCompactResult run_micro_compact(
     std::vector<ChatMessage>& messages,
     int boundary_start,
-    int keep_assistant_turns
+    int keep_user_turns
 ) {
     MicroCompactResult result;
     int n = static_cast<int>(messages.size());
+    if (boundary_start < 0) boundary_start = 0;
+    if (boundary_start >= n) return result;
 
-    // Find the cutoff: messages before the last `keep_assistant_turns` assistant messages
-    int assistant_count = 0;
-    int cutoff_index = n; // messages at or after this index are "recent"
+    const int keep = std::max(1, keep_user_turns);
 
+    // Protect everything from the start of the last `keep` countable user
+    // turns through the end. If fewer than `keep` real user turns exist,
+    // protect the entire active window (clear nothing).
+    //
+    // Previous logic counted assistant turns and defaulted cutoff to `n`
+    // when the keep count was not reached — which wiped *all* tool results,
+    // including the most recent ones. That caused post-compact amnesia loops.
+    int cutoff_index = boundary_start;
+    int user_count = 0;
     for (int i = n - 1; i >= boundary_start; --i) {
-        if (messages[i].role == "assistant") {
-            assistant_count++;
-            if (assistant_count >= keep_assistant_turns) {
-                cutoff_index = i;
-                break;
-            }
+        if (!is_countable_user_turn(messages[i])) continue;
+        ++user_count;
+        if (user_count >= keep) {
+            cutoff_index = i;
+            break;
         }
     }
 
-    // Micro-compact only clears tool results before the cutoff
-    static const std::string placeholder = "[Old tool result content cleared]";
+    const std::string placeholder = kMicroCompactOmittedPlaceholder;
 
     for (int i = boundary_start; i < cutoff_index; ++i) {
         auto& msg = messages[i];
         if (msg.role != "tool") continue;
-        if (msg.content == placeholder) continue; // already cleared
+        if (is_already_omitted_tool_result(msg.content)) continue;
         if (msg.content.empty()) continue;
 
-        // Check if the tool is in the compactable set
-        std::string tool_name = find_tool_name_for_call_id(messages, boundary_start, cutoff_index, msg.tool_call_id);
-        if (tool_name.empty() || COMPACTABLE_TOOLS.find(tool_name) == COMPACTABLE_TOOLS.end()) {
+        // Tool name may live on an assistant message before this tool row;
+        // search the full active window, not only the droppable prefix.
+        std::string tool_name = find_tool_name_for_call_id(
+            messages, boundary_start, n, msg.tool_call_id);
+        if (tool_name.empty() ||
+            COMPACTABLE_TOOLS.find(tool_name) == COMPACTABLE_TOOLS.end()) {
             continue;
         }
 
@@ -91,8 +114,11 @@ MicroCompactResult run_micro_compact(
     result.performed = result.tool_results_cleared > 0;
 
     if (result.performed) {
-        LOG_INFO("Micro-compact: cleared " + std::to_string(result.tool_results_cleared) +
-                 " tool results, estimated ~" + std::to_string(result.estimated_tokens_saved) + " tokens saved");
+        LOG_INFO("Micro-compact: omitted " + std::to_string(result.tool_results_cleared) +
+                 " old tool results, estimated ~" +
+                 std::to_string(result.estimated_tokens_saved) + " tokens saved" +
+                 " cutoff_index=" + std::to_string(cutoff_index) +
+                 " keep_user_turns=" + std::to_string(keep));
     }
 
     return result;
@@ -117,7 +143,7 @@ ChatMessage create_microcompact_boundary_message(
     }
 
     msg.metadata = {
-        {"trigger", "auto"},
+        {"trigger", "micro"},
         {"pre_tokens", pre_tokens},
         {"tokens_saved", tokens_saved},
         {"cleared_tool_call_ids", ids_array}

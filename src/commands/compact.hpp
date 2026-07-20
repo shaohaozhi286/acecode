@@ -22,8 +22,14 @@ constexpr int AUTOCOMPACT_BUFFER_TOKENS = 13000;
 constexpr int MAX_OUTPUT_TOKENS_RESERVED = 20000;
 constexpr int MAX_PTL_RETRIES = 3;
 constexpr int MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3;
-constexpr int MICRO_COMPACT_KEEP_TURNS = 3; // preserve last N assistant turns
+// Preserve tool results for the last N *real* user turns (align with full
+// compact keep_turns). Hidden goal/todo injections must not consume this budget.
+constexpr int MICRO_COMPACT_KEEP_TURNS = 4;
 constexpr int AUTOCOMPACT_MAX_PROVIDER_MESSAGES = 256;
+
+// True for ordinary user turns that should count toward keep_turns / micro-keep.
+// Excludes meta messages and hidden goal/todo context injections.
+bool is_countable_user_turn(const ChatMessage& msg);
 
 // ============================================================
 // Structs

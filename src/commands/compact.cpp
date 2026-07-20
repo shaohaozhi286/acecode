@@ -52,7 +52,9 @@ int find_tail_start_for_user_turns(const std::vector<acecode::ChatMessage>& mess
     const int target_turns = std::max(1, user_turns);
     int turns_found = 0;
     for (int i = static_cast<int>(messages.size()) - 1; i >= 0; --i) {
-        if (!messages[i].is_meta && messages[i].role == "user") {
+        // Skip hidden goal/todo injections so they do not consume the
+        // protected tail budget (they are system-driven continuations).
+        if (acecode::is_countable_user_turn(messages[i])) {
             ++turns_found;
             if (turns_found >= target_turns) {
                 return i;
@@ -80,6 +82,17 @@ std::vector<int> rescue_tail_candidates(int preferred_tail_user_turns) {
 } // namespace
 
 namespace acecode {
+
+bool is_countable_user_turn(const ChatMessage& msg) {
+    if (msg.is_meta) return false;
+    if (msg.role != "user") return false;
+    if (msg.metadata.is_object()) {
+        if (msg.metadata.value("hidden_goal_context", false)) return false;
+        if (msg.metadata.value("hidden_todo_context", false)) return false;
+        if (msg.metadata.value("transcript_only", false)) return false;
+    }
+    return true;
+}
 
 // ============================================================
 // Token estimation
@@ -485,12 +498,13 @@ CompactResult compact_messages(
     const int boundary_start = last_boundary_index >= 0 ? last_boundary_index : 0;
     const int active_start = last_boundary_index >= 0 ? last_boundary_index + 1 : 0;
 
-    // Count user/assistant turn pairs from the end to find the keep boundary
+    // Count real user turns from the end to find the keep boundary.
+    // Hidden goal/todo context messages must not consume keep_turns slots.
     int turns_found = 0;
     int keep_from = static_cast<int>(messages.size());
 
     for (int i = static_cast<int>(messages.size()) - 1; i >= active_start; --i) {
-        if (messages[i].role == "user") {
+        if (is_countable_user_turn(messages[i])) {
             turns_found++;
             if (turns_found >= keep_turns) {
                 keep_from = i;

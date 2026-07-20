@@ -20,13 +20,17 @@ struct MicroCompactResult {
 
 // Run micro-compact: clear old tool results in-place.
 // Only clears tool results that are:
-// 1. From tools in the COMPACTABLE_TOOLS set
-// 2. Older than the last `keep_assistant_turns` assistant messages
+// 1. From tools in the COMPACTABLE_TOOLS set (read/search/shell only —
+//    never file_edit/file_write; wiping mutations causes rewrite loops)
+// 2. Older than the last `keep_user_turns` countable user turns
+//    (default matches full-compact keep_turns so auto-compact does not
+//    erase the window full-compact is about to retain)
+// If fewer than keep_user_turns exist, clears nothing (protect everything).
 // Returns info about what was cleared.
 MicroCompactResult run_micro_compact(
     std::vector<ChatMessage>& messages,
     int boundary_start,
-    int keep_assistant_turns = 3
+    int keep_user_turns = 4
 );
 
 // Create a microcompact boundary marker message

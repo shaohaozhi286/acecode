@@ -116,7 +116,7 @@ export function ConversationTurnScrubber({
     () => conversationTurnMarkerLayout(
       visibleWindow.visibleCount,
       railHeight,
-      { edgePadding: visibleWindow.paginated ? 34 : 12 },
+      { edgePadding: visibleWindow.paginated ? 42 : 12 },
     ).map((marker) => ({
       ...marker,
       index: visibleWindow.start + marker.index,
