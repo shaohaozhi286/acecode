@@ -1,6 +1,6 @@
 {
     "name":  "acecode",
-    "version-semver":  "0.7.6",
+    "version-semver":  "0.7.7",
     "dependencies":  [
                          "cpr",
                          "crow",
@@ -11,7 +11,7 @@
                          "sqlite3",
                          {
                              "name":  "wintoast",
-                             "platform":  "windows & !mingw"
+                             "platform":  "windows \u0026 !mingw"
                          }
                      ]
 }
