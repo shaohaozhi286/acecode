@@ -12,9 +12,11 @@ import {
   conversationTurnPreviewTop,
   conversationTurnSteppedWindowStart,
   conversationTurnWheelDirection,
+  conversationTurnWheelImpulse,
   conversationTurnWindow,
   conversationTurnWindowStartContainingIndex,
   nearestConversationTurnIndex,
+  nextConversationTurnHoldInterval,
   shouldShowConversationTurnScrubber,
 } from './conversationTurnScrubber.js';
 
@@ -89,12 +91,27 @@ run('turn window arrows move exactly one turn and clamp at both boundaries', () 
   assert.equal(conversationTurnSteppedWindowStart(20, 1, 40), 20);
 });
 
-run('vertical wheel direction matches the paging arrows', () => {
+run('dominant wheel axis matches the paging arrows', () => {
   assert.equal(conversationTurnWheelDirection(-120), -1);
   assert.equal(conversationTurnWheelDirection(120), 1);
   assert.equal(conversationTurnWheelDirection(0), 0);
-  assert.equal(conversationTurnWheelDirection(8, 16), 0);
+  assert.equal(conversationTurnWheelDirection(8, 16), 1);
+  assert.equal(conversationTurnWheelDirection(-8, -16), -1);
   assert.equal(conversationTurnWheelDirection(Number.NaN), 0);
+});
+
+run('wheel impulse normalizes mouse, side-scroll, line, and page deltas', () => {
+  assert.equal(conversationTurnWheelImpulse(120), 1);
+  assert.equal(conversationTurnWheelImpulse(0, -60), -0.5);
+  assert.equal(conversationTurnWheelImpulse(3, 0, 1), 1);
+  assert.equal(conversationTurnWheelImpulse(1, 0, 2, 600), 1.5);
+  assert.equal(conversationTurnWheelImpulse(0, 0), 0);
+});
+
+run('arrow hold interval accelerates to a bounded minimum', () => {
+  assert.equal(Math.round(nextConversationTurnHoldInterval(140)), 120);
+  assert.equal(nextConversationTurnHoldInterval(75), 72);
+  assert.equal(nextConversationTurnHoldInterval(72), 72);
 });
 
 run('upper and lower selections recenter near the middle with edge clamping', () => {

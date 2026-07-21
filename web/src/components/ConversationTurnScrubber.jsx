@@ -15,15 +15,22 @@ import {
   conversationTurnPageControlTop,
   conversationTurnPreviewTop,
   conversationTurnSteppedWindowStart,
-  conversationTurnWheelDirection,
+  conversationTurnWheelImpulse,
   conversationTurnWindow,
   conversationTurnWindowStartContainingIndex,
   nearestConversationTurnIndex,
+  nextConversationTurnHoldInterval,
 } from '../lib/conversationTurnScrubber.js';
 
 const PREVIEW_DISMISS_DELAY_MS = 120;
 const PREVIEW_ESTIMATED_HEIGHT = 118;
-const WHEEL_STEP_INTERVAL_MS = 120;
+const WHEEL_INERTIA_TRANSFER = 0.2;
+const WHEEL_INERTIA_FRICTION = 0.84;
+const WHEEL_INERTIA_STOP_VELOCITY = 0.02;
+const WHEEL_MAX_VELOCITY = 0.9;
+const WHEEL_MIN_STEP_INTERVAL_MS = 72;
+const ARROW_HOLD_DELAY_MS = 320;
+const ARROW_HOLD_INITIAL_INTERVAL_MS = 140;
 
 export function ConversationTurnScrubber({
   turns,
@@ -35,10 +42,10 @@ export function ConversationTurnScrubber({
   const dismissTimerRef = useRef(0);
   const pointerFocusIndexRef = useRef(-1);
   const turnsIdentityRef = useRef('');
-  const wheelStepRef = useRef({
-    direction: 0,
-    timestamp: Number.NEGATIVE_INFINITY,
-  });
+  const pagingAvailabilityRef = useRef({ hasPrevious: false, hasNext: false });
+  const wheelMotionCancelRef = useRef(null);
+  const arrowHoldRef = useRef(null);
+  const suppressPageClickRef = useRef(false);
   const previewId = useId();
   const [railHeight, setRailHeight] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState(-1);
@@ -118,6 +125,10 @@ export function ConversationTurnScrubber({
     ),
     [turns.length, windowStart],
   );
+  pagingAvailabilityRef.current = {
+    hasPrevious: visibleWindow.hasPrevious,
+    hasNext: visibleWindow.hasNext,
+  };
   const markerLayout = useMemo(
     () => conversationTurnMarkerLayout(
       visibleWindow.visibleCount,
@@ -196,6 +207,7 @@ export function ConversationTurnScrubber({
 
   const jumpToTurn = useCallback((turn, index) => {
     if (!turn) return;
+    wheelMotionCancelRef.current?.();
     setWindowStart(centeredConversationTurnWindowStart(
       index,
       turns.length,
@@ -218,35 +230,164 @@ export function ConversationTurnScrubber({
     ));
   }, [clearDismissTimer, turns.length]);
 
+  const canStepWindow = useCallback((direction) => {
+    const availability = pagingAvailabilityRef.current;
+    if (direction < 0) return availability.hasPrevious;
+    if (direction > 0) return availability.hasNext;
+    return false;
+  }, []);
+
+  const stopArrowHold = useCallback((suppressTrailingClick = false) => {
+    const hold = arrowHoldRef.current;
+    if (!hold) return;
+    arrowHoldRef.current = null;
+    if (hold.timer) window.clearTimeout(hold.timer);
+    if (suppressTrailingClick && hold.repeated) {
+      suppressPageClickRef.current = true;
+      window.setTimeout(() => {
+        suppressPageClickRef.current = false;
+      }, 0);
+    }
+  }, []);
+
+  const startArrowHold = useCallback((event, direction) => {
+    if (event.button !== 0 || !canStepWindow(direction)) return;
+    wheelMotionCancelRef.current?.();
+    stopArrowHold(false);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    const hold = {
+      direction,
+      interval: ARROW_HOLD_INITIAL_INTERVAL_MS,
+      repeated: false,
+      timer: 0,
+    };
+    arrowHoldRef.current = hold;
+
+    const repeat = () => {
+      if (arrowHoldRef.current !== hold) return;
+      if (!canStepWindow(hold.direction)) {
+        hold.timer = 0;
+        return;
+      }
+      hold.repeated = true;
+      stepWindow(hold.direction);
+      hold.interval = nextConversationTurnHoldInterval(hold.interval);
+      hold.timer = window.setTimeout(repeat, hold.interval);
+    };
+    hold.timer = window.setTimeout(repeat, ARROW_HOLD_DELAY_MS);
+  }, [canStepWindow, stepWindow, stopArrowHold]);
+
+  const activatePageControl = useCallback((direction) => {
+    if (suppressPageClickRef.current) {
+      suppressPageClickRef.current = false;
+      return;
+    }
+    wheelMotionCancelRef.current?.();
+    stepWindow(direction);
+  }, [stepWindow]);
+
+  useEffect(() => {
+    const finishHold = () => stopArrowHold(true);
+    const cancelHold = () => stopArrowHold(false);
+    window.addEventListener('pointerup', finishHold);
+    window.addEventListener('pointercancel', cancelHold);
+    window.addEventListener('blur', cancelHold);
+    return () => {
+      window.removeEventListener('pointerup', finishHold);
+      window.removeEventListener('pointercancel', cancelHold);
+      window.removeEventListener('blur', cancelHold);
+      stopArrowHold(false);
+      suppressPageClickRef.current = false;
+    };
+  }, [stopArrowHold, turnsIdentity]);
+
   useEffect(() => {
     const rail = railRef.current;
     if (!rail || !visibleWindow.paginated) return undefined;
 
+    let frame = 0;
+    let velocity = 0;
+    let carry = 0;
+    let lastStepAt = Number.NEGATIVE_INFINITY;
+
+    const stopWheelMotion = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = 0;
+      velocity = 0;
+      carry = 0;
+      lastStepAt = Number.NEGATIVE_INFINITY;
+    };
+
+    const advanceWheelMotion = (timestamp) => {
+      frame = 0;
+      carry += velocity;
+      if (
+        Math.abs(carry) >= 1
+        && timestamp - lastStepAt >= WHEEL_MIN_STEP_INTERVAL_MS
+      ) {
+        const direction = Math.sign(carry);
+        if (!canStepWindow(direction)) {
+          stopWheelMotion();
+          return;
+        }
+        stepWindow(direction);
+        carry -= direction;
+        lastStepAt = timestamp;
+      }
+
+      velocity *= WHEEL_INERTIA_FRICTION;
+      if (Math.abs(velocity) < WHEEL_INERTIA_STOP_VELOCITY) velocity = 0;
+      if (velocity !== 0 || Math.abs(carry) >= 1) {
+        frame = window.requestAnimationFrame(advanceWheelMotion);
+      } else {
+        carry = 0;
+      }
+    };
+
+    wheelMotionCancelRef.current = stopWheelMotion;
+
     const handleWheel = (event) => {
       if (event.ctrlKey || event.metaKey) return;
-      const direction = conversationTurnWheelDirection(
+      const impulse = conversationTurnWheelImpulse(
         event.deltaY,
         event.deltaX,
+        event.deltaMode,
+        rail.clientHeight,
       );
-      if (direction === 0) return;
+      if (impulse === 0) return;
 
       event.preventDefault();
       event.stopPropagation();
-      const now = window.performance.now();
-      const previous = wheelStepRef.current;
-      if (
-        previous.direction === direction
-        && now - previous.timestamp < WHEEL_STEP_INTERVAL_MS
-      ) {
-        return;
+      stopArrowHold(true);
+
+      const direction = Math.sign(impulse);
+      const currentDirection = Math.sign(velocity || carry);
+      if (currentDirection !== 0 && currentDirection !== direction) {
+        velocity = 0;
+        carry = 0;
+        lastStepAt = Number.NEGATIVE_INFINITY;
       }
-      wheelStepRef.current = { direction, timestamp: now };
-      stepWindow(direction);
+      carry += impulse;
+      velocity = Math.min(
+        WHEEL_MAX_VELOCITY,
+        Math.max(
+          -WHEEL_MAX_VELOCITY,
+          velocity + impulse * WHEEL_INERTIA_TRANSFER,
+        ),
+      );
+      if (!frame) frame = window.requestAnimationFrame(advanceWheelMotion);
     };
 
     rail.addEventListener('wheel', handleWheel, { passive: false });
-    return () => rail.removeEventListener('wheel', handleWheel);
-  }, [stepWindow, visibleWindow.paginated]);
+    return () => {
+      rail.removeEventListener('wheel', handleWheel);
+      stopWheelMotion();
+      if (wheelMotionCancelRef.current === stopWheelMotion) {
+        wheelMotionCancelRef.current = null;
+      }
+    };
+  }, [canStepWindow, stepWindow, stopArrowHold, turnsIdentity, visibleWindow.paginated]);
 
   const previewTop = previewMarker
     ? conversationTurnPreviewTop(
@@ -280,7 +421,11 @@ export function ConversationTurnScrubber({
             clearDismissTimer();
             setHoveredIndex(-1);
           }}
-          onClick={() => stepWindow(-1)}
+          onPointerDown={(event) => startArrowHold(event, -1)}
+          onPointerUp={() => stopArrowHold(true)}
+          onPointerCancel={() => stopArrowHold(false)}
+          onLostPointerCapture={() => stopArrowHold(false)}
+          onClick={() => activatePageControl(-1)}
         >
           <svg viewBox="0 0 20 20" aria-hidden="true">
             <path d="m5 12 5-5 5 5" />
@@ -361,7 +506,11 @@ export function ConversationTurnScrubber({
             clearDismissTimer();
             setHoveredIndex(-1);
           }}
-          onClick={() => stepWindow(1)}
+          onPointerDown={(event) => startArrowHold(event, 1)}
+          onPointerUp={() => stopArrowHold(true)}
+          onPointerCancel={() => stopArrowHold(false)}
+          onLostPointerCapture={() => stopArrowHold(false)}
+          onClick={() => activatePageControl(1)}
         >
           <svg viewBox="0 0 20 20" aria-hidden="true">
             <path d="m5 8 5 5 5-5" />

@@ -62,31 +62,8 @@ run('long turn rails use a twenty-marker window with one-step paging and recente
   assert.match(component, /data-conversation-turn-page-control="next"/);
   assert.match(component, /style=\{\{ top: previousPageTop \}\}/);
   assert.match(component, /style=\{\{ top: nextPageTop \}\}/);
-  assert.match(component, /onClick=\{\(\) => stepWindow\(-1\)\}/);
-  assert.match(component, /onClick=\{\(\) => stepWindow\(1\)\}/);
-  assert.match(component, /const WHEEL_STEP_INTERVAL_MS = 120/);
-  assert.match(
-    component,
-    /if \(!rail \|\| !visibleWindow\.paginated\) return undefined;/,
-  );
-  assert.match(
-    component,
-    /conversationTurnWheelDirection\(\s*event\.deltaY,\s*event\.deltaX,/,
-  );
-  assert.match(component, /if \(event\.ctrlKey \|\| event\.metaKey\) return;/);
-  assert.match(
-    component,
-    /event\.preventDefault\(\);\s*event\.stopPropagation\(\);/,
-  );
-  assert.match(
-    component,
-    /previous\.direction === direction\s*&& now - previous\.timestamp < WHEEL_STEP_INTERVAL_MS/,
-  );
-  assert.match(component, /stepWindow\(direction\)/);
-  assert.match(
-    component,
-    /addEventListener\('wheel', handleWheel, \{ passive: false \}\)/,
-  );
+  assert.match(component, /onClick=\{\(\) => activatePageControl\(-1\)\}/);
+  assert.match(component, /onClick=\{\(\) => activatePageControl\(1\)\}/);
   assert.doesNotMatch(
     styles,
     /data-conversation-turn-page-control="previous"[\s\S]*?top:\s*0/,
@@ -103,6 +80,65 @@ run('long turn rails use a twenty-marker window with one-step paging and recente
     styles,
     /\.ace-conversation-turn-scrubber-hit \{[\s\S]*?transition: top 280ms cubic-bezier\(\.22, 1, \.36, 1\)/,
   );
+});
+
+run('paged turn rail applies dominant-axis wheel inertia without transcript scroll', () => {
+  const helper = source('lib/conversationTurnScrubber.js');
+  const component = source('components/ConversationTurnScrubber.jsx');
+  assert.match(helper, /export function conversationTurnWheelImpulse\(/);
+  assert.match(component, /const WHEEL_INERTIA_TRANSFER = 0\.2/);
+  assert.match(component, /const WHEEL_INERTIA_FRICTION = 0\.84/);
+  assert.match(component, /const WHEEL_MIN_STEP_INTERVAL_MS = 72/);
+  assert.match(
+    component,
+    /if \(!rail \|\| !visibleWindow\.paginated\) return undefined;/,
+  );
+  assert.match(
+    component,
+    /conversationTurnWheelImpulse\(\s*event\.deltaY,\s*event\.deltaX,\s*event\.deltaMode,/,
+  );
+  assert.match(component, /if \(event\.ctrlKey \|\| event\.metaKey\) return;/);
+  assert.match(
+    component,
+    /event\.preventDefault\(\);\s*event\.stopPropagation\(\);/,
+  );
+  assert.match(
+    component,
+    /currentDirection !== 0 && currentDirection !== direction/,
+  );
+  assert.match(component, /carry \+= impulse/);
+  assert.match(component, /velocity \*= WHEEL_INERTIA_FRICTION/);
+  assert.match(
+    component,
+    /timestamp - lastStepAt >= WHEEL_MIN_STEP_INTERVAL_MS/,
+  );
+  assert.match(component, /requestAnimationFrame\(advanceWheelMotion\)/);
+  assert.match(
+    component,
+    /addEventListener\('wheel', handleWheel, \{ passive: false \}\)/,
+  );
+});
+
+run('paging arrow holds repeat with acceleration and suppress the trailing click', () => {
+  const helper = source('lib/conversationTurnScrubber.js');
+  const component = source('components/ConversationTurnScrubber.jsx');
+  assert.match(helper, /export function nextConversationTurnHoldInterval\(/);
+  assert.match(component, /const ARROW_HOLD_DELAY_MS = 320/);
+  assert.match(
+    component,
+    /setPointerCapture\?\.\(event\.pointerId\)/,
+  );
+  assert.match(component, /window\.setTimeout\(repeat, ARROW_HOLD_DELAY_MS\)/);
+  assert.match(component, /nextConversationTurnHoldInterval\(hold\.interval\)/);
+  assert.match(component, /onPointerDown=\{\(event\) => startArrowHold\(event, -1\)\}/);
+  assert.match(component, /onPointerDown=\{\(event\) => startArrowHold\(event, 1\)\}/);
+  assert.match(component, /onPointerUp=\{\(\) => stopArrowHold\(true\)\}/);
+  assert.match(component, /onPointerCancel=\{\(\) => stopArrowHold\(false\)\}/);
+  assert.match(
+    component,
+    /if \(suppressPageClickRef\.current\) \{\s*suppressPageClickRef\.current = false;\s*return;/,
+  );
+  assert.match(component, /window\.addEventListener\('blur', cancelHold\)/);
 });
 
 run('conversation turn rail loads lazily with an empty failure-safe fallback', () => {

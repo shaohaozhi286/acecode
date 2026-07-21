@@ -152,15 +152,56 @@ export function conversationTurnSteppedWindowStart(
 export function conversationTurnWheelDirection(deltaY, deltaX = 0) {
   const vertical = Number(deltaY);
   const horizontal = Number(deltaX);
-  if (
-    !Number.isFinite(vertical)
-    || !Number.isFinite(horizontal)
-    || vertical === 0
-    || Math.abs(horizontal) > Math.abs(vertical)
-  ) {
-    return 0;
+  if (!Number.isFinite(vertical) || !Number.isFinite(horizontal)) return 0;
+  const dominant = Math.abs(horizontal) > Math.abs(vertical)
+    ? horizontal
+    : vertical;
+  return Math.sign(dominant);
+}
+
+export function conversationTurnWheelImpulse(
+  deltaY,
+  deltaX = 0,
+  deltaMode = 0,
+  pageSize = 0,
+  {
+    linePixels = 40,
+    notchPixels = 120,
+    maximumImpulse = 1.5,
+  } = {},
+) {
+  const vertical = Number(deltaY);
+  const horizontal = Number(deltaX);
+  if (!Number.isFinite(vertical) || !Number.isFinite(horizontal)) return 0;
+
+  let dominant = Math.abs(horizontal) > Math.abs(vertical)
+    ? horizontal
+    : vertical;
+  if (dominant === 0) return 0;
+
+  const mode = Math.floor(Number(deltaMode) || 0);
+  if (mode === 1) {
+    dominant *= Math.max(1, Number(linePixels) || 0);
+  } else if (mode === 2) {
+    dominant *= Math.max(1, Number(pageSize) || 0);
   }
-  return Math.sign(vertical);
+
+  const scale = Math.max(1, Number(notchPixels) || 0);
+  const limit = Math.max(0, Number(maximumImpulse) || 0);
+  return Math.min(limit, Math.max(-limit, dominant / scale));
+}
+
+export function nextConversationTurnHoldInterval(
+  currentInterval,
+  {
+    minimumInterval = 72,
+    acceleration = 0.86,
+  } = {},
+) {
+  const minimum = Math.max(0, Number(minimumInterval) || 0);
+  const current = Math.max(minimum, Number(currentInterval) || 0);
+  const factor = Math.min(1, Math.max(0, Number(acceleration) || 0));
+  return Math.max(minimum, current * factor);
 }
 
 export function centeredConversationTurnWindowStart(
