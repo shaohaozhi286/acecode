@@ -11,6 +11,7 @@ import {
   conversationTurnPageControlTop,
   conversationTurnPreviewTop,
   conversationTurnSteppedWindowStart,
+  conversationTurnWheelDirection,
   conversationTurnWindow,
   conversationTurnWindowStartContainingIndex,
   nearestConversationTurnIndex,
@@ -86,6 +87,14 @@ run('turn window arrows move exactly one turn and clamp at both boundaries', () 
   assert.equal(conversationTurnSteppedWindowStart(10, -1, 40), 9);
   assert.equal(conversationTurnSteppedWindowStart(0, -1, 40), 0);
   assert.equal(conversationTurnSteppedWindowStart(20, 1, 40), 20);
+});
+
+run('vertical wheel direction matches the paging arrows', () => {
+  assert.equal(conversationTurnWheelDirection(-120), -1);
+  assert.equal(conversationTurnWheelDirection(120), 1);
+  assert.equal(conversationTurnWheelDirection(0), 0);
+  assert.equal(conversationTurnWheelDirection(8, 16), 0);
+  assert.equal(conversationTurnWheelDirection(Number.NaN), 0);
 });
 
 run('upper and lower selections recenter near the middle with edge clamping', () => {

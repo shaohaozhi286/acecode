@@ -34,6 +34,7 @@ run('long turn rails use a twenty-marker window with one-step paging and recente
   assert.match(helper, /MAX_CONVERSATION_TURN_SCRUBBER_MARKERS = 20/);
   assert.match(helper, /export function conversationTurnWindow\(/);
   assert.match(helper, /export function conversationTurnSteppedWindowStart\(/);
+  assert.match(helper, /export function conversationTurnWheelDirection\(/);
   assert.match(helper, /export function centeredConversationTurnWindowStart\(/);
   assert.match(helper, /export function conversationTurnPageControlTop\(/);
   assert.match(
@@ -63,6 +64,29 @@ run('long turn rails use a twenty-marker window with one-step paging and recente
   assert.match(component, /style=\{\{ top: nextPageTop \}\}/);
   assert.match(component, /onClick=\{\(\) => stepWindow\(-1\)\}/);
   assert.match(component, /onClick=\{\(\) => stepWindow\(1\)\}/);
+  assert.match(component, /const WHEEL_STEP_INTERVAL_MS = 120/);
+  assert.match(
+    component,
+    /if \(!rail \|\| !visibleWindow\.paginated\) return undefined;/,
+  );
+  assert.match(
+    component,
+    /conversationTurnWheelDirection\(\s*event\.deltaY,\s*event\.deltaX,/,
+  );
+  assert.match(component, /if \(event\.ctrlKey \|\| event\.metaKey\) return;/);
+  assert.match(
+    component,
+    /event\.preventDefault\(\);\s*event\.stopPropagation\(\);/,
+  );
+  assert.match(
+    component,
+    /previous\.direction === direction\s*&& now - previous\.timestamp < WHEEL_STEP_INTERVAL_MS/,
+  );
+  assert.match(component, /stepWindow\(direction\)/);
+  assert.match(
+    component,
+    /addEventListener\('wheel', handleWheel, \{ passive: false \}\)/,
+  );
   assert.doesNotMatch(
     styles,
     /data-conversation-turn-page-control="previous"[\s\S]*?top:\s*0/,

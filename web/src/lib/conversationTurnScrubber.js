@@ -149,6 +149,20 @@ export function conversationTurnSteppedWindowStart(
   ).start;
 }
 
+export function conversationTurnWheelDirection(deltaY, deltaX = 0) {
+  const vertical = Number(deltaY);
+  const horizontal = Number(deltaX);
+  if (
+    !Number.isFinite(vertical)
+    || !Number.isFinite(horizontal)
+    || vertical === 0
+    || Math.abs(horizontal) > Math.abs(vertical)
+  ) {
+    return 0;
+  }
+  return Math.sign(vertical);
+}
+
 export function centeredConversationTurnWindowStart(
   turnIndex,
   totalTurns,

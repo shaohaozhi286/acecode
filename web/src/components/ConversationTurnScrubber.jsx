@@ -15,6 +15,7 @@ import {
   conversationTurnPageControlTop,
   conversationTurnPreviewTop,
   conversationTurnSteppedWindowStart,
+  conversationTurnWheelDirection,
   conversationTurnWindow,
   conversationTurnWindowStartContainingIndex,
   nearestConversationTurnIndex,
@@ -22,6 +23,7 @@ import {
 
 const PREVIEW_DISMISS_DELAY_MS = 120;
 const PREVIEW_ESTIMATED_HEIGHT = 118;
+const WHEEL_STEP_INTERVAL_MS = 120;
 
 export function ConversationTurnScrubber({
   turns,
@@ -33,6 +35,10 @@ export function ConversationTurnScrubber({
   const dismissTimerRef = useRef(0);
   const pointerFocusIndexRef = useRef(-1);
   const turnsIdentityRef = useRef('');
+  const wheelStepRef = useRef({
+    direction: 0,
+    timestamp: Number.NEGATIVE_INFINITY,
+  });
   const previewId = useId();
   const [railHeight, setRailHeight] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState(-1);
@@ -211,6 +217,36 @@ export function ConversationTurnScrubber({
       )
     ));
   }, [clearDismissTimer, turns.length]);
+
+  useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || !visibleWindow.paginated) return undefined;
+
+    const handleWheel = (event) => {
+      if (event.ctrlKey || event.metaKey) return;
+      const direction = conversationTurnWheelDirection(
+        event.deltaY,
+        event.deltaX,
+      );
+      if (direction === 0) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      const now = window.performance.now();
+      const previous = wheelStepRef.current;
+      if (
+        previous.direction === direction
+        && now - previous.timestamp < WHEEL_STEP_INTERVAL_MS
+      ) {
+        return;
+      }
+      wheelStepRef.current = { direction, timestamp: now };
+      stepWindow(direction);
+    };
+
+    rail.addEventListener('wheel', handleWheel, { passive: false });
+    return () => rail.removeEventListener('wheel', handleWheel);
+  }, [stepWindow, visibleWindow.paginated]);
 
   const previewTop = previewMarker
     ? conversationTurnPreviewTop(
