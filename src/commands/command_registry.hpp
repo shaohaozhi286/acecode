@@ -46,6 +46,9 @@ struct CommandContext {
     std::string cwd;                   // working directory for cwd-scoped operations
     tui::SubagentHost* subagent_host = nullptr; // /tasks 的子代理宿主(仅斜杠 dispatch 路径注入)
     std::function<void(const UserInput&)> submit_user_input; // optional TUI submit wrapper
+    // Optional observer installed only by direct user-input surfaces. Internal
+    // dispatch contexts omit it so programmatic commands do not affect usage.
+    std::function<void(const std::string&)> on_command_recognized;
 };
 
 inline void submit_user_input(CommandContext& ctx, UserInput input) {

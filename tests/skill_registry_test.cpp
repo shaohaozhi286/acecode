@@ -377,10 +377,17 @@ TEST_F(SkillRegistryCompatTest, CommandDispatchInvokesNewSkillWithoutReloadingCo
         &command_registry,
         temp_root.string(),
     };
+    std::vector<std::string> observed_commands;
+    ctx.on_command_recognized =
+        [&observed_commands](const std::string& name) {
+            observed_commands.push_back(name);
+        };
 
     write_skill(root, "engineering", "fresh-skill", "created after command registration");
 
     EXPECT_TRUE(command_registry.dispatch("/fresh-skill run this", ctx));
+    EXPECT_EQ(observed_commands,
+              (std::vector<std::string>{"fresh-skill"}));
     ASSERT_EQ(state.conversation.size(), 1u);
     EXPECT_NE(state.conversation[0].content.find("[Invoking skill: fresh-skill]"),
               std::string::npos);

@@ -14,6 +14,7 @@
 
 #include <string>
 #include <string_view>
+#include <cstdint>
 #include <vector>
 #include <deque>
 #include <map>
@@ -311,6 +312,9 @@ struct TuiState {
     int slash_dropdown_view_offset = 0; // top index of the visible viewport
     int slash_dropdown_total_matches = 0; // full match count, equals items.size()
     bool slash_dropdown_dismissed_for_input = false;
+    // Application-owned, cross-launch counters loaded once at TUI startup.
+    // Dropdown refreshes read only this cache and never touch the filesystem.
+    std::map<std::string, std::uint64_t> slash_command_usage_counts;
 
     // @ path-reference dropdown. The token offsets are UTF-8 byte offsets so
     // they can be applied directly to input_text without lossy conversion.

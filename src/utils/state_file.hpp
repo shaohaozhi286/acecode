@@ -8,9 +8,11 @@
 // 得到)。
 //
 // 设计取舍见 openspec/changes/add-legacy-terminal-fallback/design.md
-// Decision 4。本 helper 故意做得很轻 — 只支持 bool flag,key/value 一对一。
-// 后续如果有需求再扩 string / int。
+// Decision 4。对外只暴露按用途划分的 typed helper，避免调用方直接耦合
+// state.json 的整体 schema。
 
+#include <cstdint>
+#include <map>
 #include <string>
 
 namespace acecode {
@@ -64,5 +66,22 @@ void write_last_active_workspace_hash(const std::string& hash);
 // 空字符串是有效值,表示"不使用工作区"。
 std::string read_last_home_workspace_hash();
 void write_last_home_workspace_hash(const std::string& hash);
+
+// TUI slash-command adaptive ordering. The persisted shape is:
+//   { "tui_slash_command_usage": { "help": 3, "model": 7 } }
+// Reads are tolerant: missing/malformed containers and invalid individual
+// entries are ignored. Only aggregate command names/counts are stored.
+std::map<std::string, std::uint64_t> read_tui_slash_command_usage();
+
+struct SlashCommandUsageWriteResult {
+    // Updated count for the current process even when persistence failed.
+    std::uint64_t count = 0;
+    bool persisted = false;
+};
+
+// Atomically increment one command's durable count while preserving unrelated
+// state.json keys. Counts saturate at uint64_t max rather than overflowing.
+SlashCommandUsageWriteResult record_tui_slash_command_use(
+    const std::string& command_name);
 
 } // namespace acecode

@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 
@@ -34,6 +35,47 @@ std::string state_file_path() {
     const auto& override_path = test_path_override();
     if (!override_path.empty()) return override_path;
     return path_to_utf8(path_from_utf8(resolve_data_dir(get_run_mode())) / "state.json");
+}
+
+constexpr const char* kTuiSlashCommandUsageKey = "tui_slash_command_usage";
+
+bool valid_slash_command_name(const std::string& name) {
+    if (name.empty()) return false;
+    for (char c : name) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') return false;
+    }
+    return true;
+}
+
+std::optional<std::uint64_t> parse_positive_count(
+    const nlohmann::json& value) {
+    if (value.is_number_unsigned()) {
+        const auto count = value.get<std::uint64_t>();
+        if (count > 0) return count;
+        return std::nullopt;
+    }
+    if (value.is_number_integer()) {
+        const auto count = value.get<std::int64_t>();
+        if (count > 0) return static_cast<std::uint64_t>(count);
+    }
+    return std::nullopt;
+}
+
+std::map<std::string, std::uint64_t> parse_tui_slash_command_usage(
+    const nlohmann::json& state) {
+    std::map<std::string, std::uint64_t> counts;
+    if (!state.contains(kTuiSlashCommandUsageKey) ||
+        !state[kTuiSlashCommandUsageKey].is_object()) {
+        return counts;
+    }
+
+    for (auto it = state[kTuiSlashCommandUsageKey].begin();
+         it != state[kTuiSlashCommandUsageKey].end(); ++it) {
+        if (!valid_slash_command_name(it.key())) continue;
+        auto count = parse_positive_count(it.value());
+        if (count) counts.emplace(it.key(), *count);
+    }
+    return counts;
 }
 
 // 加载现有 state.json:解析失败 / 文件不存在 → 返回空 object。
@@ -217,6 +259,38 @@ std::string read_last_home_workspace_hash() {
 void write_last_home_workspace_hash(const std::string& hash) {
     std::lock_guard<std::mutex> lock(state_file_mutex());
     (void)write_state_value("last_home_workspace_hash", hash);
+}
+
+std::map<std::string, std::uint64_t> read_tui_slash_command_usage() {
+    std::lock_guard<std::mutex> lock(state_file_mutex());
+    return parse_tui_slash_command_usage(load_state_or_empty());
+}
+
+SlashCommandUsageWriteResult record_tui_slash_command_use(
+    const std::string& command_name) {
+    if (!valid_slash_command_name(command_name)) return {};
+
+    std::lock_guard<std::mutex> lock(state_file_mutex());
+    bool corrupted = false;
+    auto state = load_state_or_empty(&corrupted);
+    if (corrupted) {
+        LOG_WARN("[state_file] state.json corrupted, rewriting");
+    }
+
+    auto counts = parse_tui_slash_command_usage(state);
+    auto& count = counts[command_name];
+    if (count < (std::numeric_limits<std::uint64_t>::max)()) ++count;
+
+    nlohmann::json usage = nlohmann::json::object();
+    for (const auto& [name, value] : counts) usage[name] = value;
+    state[kTuiSlashCommandUsageKey] = std::move(usage);
+
+    const std::string path = state_file_path();
+    const bool persisted = atomic_write_file(path, state.dump(2));
+    if (!persisted) {
+        LOG_WARN("[state_file] failed to write " + path);
+    }
+    return {count, persisted};
 }
 
 } // namespace acecode

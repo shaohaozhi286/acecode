@@ -3,12 +3,30 @@
 #include "../skills/skill_activation.hpp"
 #include "../skills/skill_commands.hpp"
 #include "../skills/skill_registry.hpp"
+#include "../utils/logger.hpp"
 
 #include <chrono>
+#include <exception>
 #include <mutex>
 #include <sstream>
 
 namespace acecode {
+
+namespace {
+
+void notify_command_recognized(CommandContext& ctx,
+                               const std::string& command_name) {
+    if (!ctx.on_command_recognized) return;
+    try {
+        ctx.on_command_recognized(command_name);
+    } catch (const std::exception& e) {
+        LOG_WARN(std::string("[commands] command observer failed: ") + e.what());
+    } catch (...) {
+        LOG_WARN("[commands] command observer failed with unknown exception");
+    }
+}
+
+} // namespace
 
 void CommandRegistry::register_command(const SlashCommand& cmd) {
     commands_[cmd.name] = cmd;
@@ -43,6 +61,7 @@ bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
             reload_opencode_commands(*this, ctx.config, ctx.cwd);
             it = commands_.find(cmd_name);
             if (it != commands_.end()) {
+                notify_command_recognized(ctx, cmd_name);
                 it->second.execute(ctx, args);
                 return true;
             }
@@ -55,6 +74,7 @@ bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
             reload_skill_commands(*this, *ctx.skills);
             it = commands_.find(cmd_name);
             if (it != commands_.end()) {
+                notify_command_recognized(ctx, cmd_name);
                 it->second.execute(ctx, args);
                 return true;
             }
@@ -62,6 +82,7 @@ bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
         if (ctx.skills) {
             auto skill = ctx.skills->find(cmd_name);
             if (skill) {
+                notify_command_recognized(ctx, cmd_name);
                 std::string message = build_skill_invocation_hint(*skill, args);
                 {
                     std::lock_guard<std::mutex> lk(ctx.state.mu);
@@ -88,6 +109,7 @@ bool CommandRegistry::dispatch(const std::string& input, CommandContext& ctx) {
         return true; // consumed the input (even though command unknown)
     }
 
+    notify_command_recognized(ctx, cmd_name);
     it->second.execute(ctx, args);
     return true;
 }

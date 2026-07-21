@@ -1,5 +1,6 @@
 #include "slash_dropdown.hpp"
 #include "../commands/command_registry.hpp"
+#include "../commands/slash_command_ranking.hpp"
 #include "picker_scroll.hpp"
 #include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
@@ -52,16 +53,6 @@ std::string truncate_cells(const std::string& value, int max_cells) {
     return out + "...";
 }
 
-int score_command(const std::string& query,
-                  const std::string& name,
-                  const std::string& description) {
-    if (query.empty()) return 1; // everything matches, equal weight
-    if (name.rfind(query, 0) == 0) return 100; // prefix
-    if (name.find(query) != std::string::npos) return 50; // substring on name
-    if (description.find(query) != std::string::npos) return 10;
-    return 0;
-}
-
 } // namespace
 
 void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
@@ -104,31 +95,21 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
         return;
     }
 
-    // Build scored candidate list.
+    // Build and rank the matching candidate list. Match relevance remains the
+    // primary key; persisted usage replaces alphabetical order for equal tiers.
     const std::string query = state.input_text.substr(1); // drop leading '/'
-    struct Scored {
-        int score;
-        std::string name;
-        std::string description;
-    };
-    std::vector<Scored> scored;
-    scored.reserve(reg.commands().size());
-    for (const auto& [name, cmd] : reg.commands()) {
-        int s = score_command(query, cmd.name, cmd.description);
-        if (s > 0) {
-            scored.push_back({s, cmd.name, cmd.description});
-        }
+    std::vector<SlashCommandCandidate> candidates;
+    candidates.reserve(reg.commands().size());
+    for (const auto& entry : reg.commands()) {
+        const auto& cmd = entry.second;
+        candidates.push_back({cmd.name, cmd.description});
     }
+    auto ranked = rank_slash_command_candidates(
+        query, candidates, state.slash_command_usage_counts);
 
-    // Stable sort by score desc, then name asc.
-    std::sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
-        if (a.score != b.score) return a.score > b.score;
-        return a.name < b.name;
-    });
+    state.slash_dropdown_total_matches = static_cast<int>(ranked.size());
 
-    state.slash_dropdown_total_matches = static_cast<int>(scored.size());
-
-    if (scored.empty()) {
+    if (ranked.empty()) {
         state.slash_dropdown_active = false;
         state.slash_dropdown_items.clear();
         state.slash_dropdown_selected = 0;
@@ -151,10 +132,10 @@ void refresh_slash_dropdown(TuiState& state, const CommandRegistry& reg) {
     // overflow, so the user can reach commands beyond the first kSlashDropdownVisibleRows
     // via Arrow / PgUp / PgDn / Home / End instead of needing to refine the filter.
     state.slash_dropdown_items.clear();
-    state.slash_dropdown_items.reserve(scored.size());
-    for (auto& s : scored) {
+    state.slash_dropdown_items.reserve(ranked.size());
+    for (auto& candidate : ranked) {
         state.slash_dropdown_items.push_back(
-            {std::move(s.name), std::move(s.description)});
+            {std::move(candidate.name), std::move(candidate.description)});
     }
 
     int new_selected = 0;

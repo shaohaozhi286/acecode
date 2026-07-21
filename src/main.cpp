@@ -161,6 +161,7 @@
 #include "desktop/workspace_registry.hpp"
 
 #include <cstdio>
+#include <limits>
 
 using namespace ftxui;
 using namespace acecode;
@@ -4641,6 +4642,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
     TuiState state;
     initialize_tui_state_before_screen(state, config, working_dir, dangerous_mode,
                                        mcp_manager, provider_accessor());
+    state.slash_command_usage_counts = read_tui_slash_command_usage();
     if (!startup_worktree_banner.empty()) {
         state.conversation.push_back({"system", startup_worktree_banner, false});
     }
@@ -7046,7 +7048,19 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     &cmd_registry,
                     working_dir,
                     &subagent_host,
-                    submit_tui_input
+                    submit_tui_input,
+                    [&state](const std::string& command_name) {
+                        const auto write_result =
+                            record_tui_slash_command_use(command_name);
+                        std::lock_guard<std::mutex> usage_lock(state.mu);
+                        auto& cached =
+                            state.slash_command_usage_counts[command_name];
+                        if (cached <
+                            (std::numeric_limits<std::uint64_t>::max)()) {
+                            ++cached;
+                        }
+                        cached = std::max(cached, write_result.count);
+                    }
                 };
                 const size_t before_command_messages =
                     state.conversation.size();

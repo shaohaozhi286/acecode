@@ -466,6 +466,25 @@ TEST(BuiltinCommands, DesktopCommandIsRegisteredAndListedInHelp) {
               std::string::npos);
 }
 
+TEST(CommandRegistry, ObserverRunsOnceOnlyForRecognizedObservedDispatches) {
+    ResumeCommandHarness harness("command_observer");
+    std::vector<std::string> observed;
+    auto observed_context = harness.context();
+    observed_context.on_command_recognized =
+        [&observed](const std::string& name) { observed.push_back(name); };
+
+    EXPECT_TRUE(harness.registry_.dispatch("/help", observed_context));
+    EXPECT_EQ(observed, (std::vector<std::string>{"help"}));
+
+    EXPECT_TRUE(harness.registry_.dispatch(
+        "/definitely-not-a-command", observed_context));
+    EXPECT_EQ(observed, (std::vector<std::string>{"help"}));
+
+    auto unobserved_context = harness.context();
+    EXPECT_TRUE(harness.registry_.dispatch("/help", unobserved_context));
+    EXPECT_EQ(observed, (std::vector<std::string>{"help"}));
+}
+
 TEST(BuiltinCommands, DesktopCommandValidatesArgumentsAndReportsLaunchResult) {
     ResumeCommandHarness harness("desktop_launch_result");
     int launch_calls = 0;
