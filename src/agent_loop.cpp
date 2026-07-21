@@ -10,6 +10,7 @@
 #include "utils/uuid.hpp"
 #include "commands/compact.hpp"
 #include "session/compact_checkpoint.hpp"
+#include "session/compact_notice.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "session/tool_result_storage.hpp"
 #include "session/output_attachments.hpp"
@@ -786,7 +787,9 @@ void AgentLoop::emit_transcript_system_message(const std::string& content,
     msg.metadata = metadata.is_object() ? std::move(metadata) : nlohmann::json::object();
     msg.metadata["transcript_only"] = true;
 
-    if (callbacks_.on_message) {
+    if (callbacks_.on_transcript_message) {
+        callbacks_.on_transcript_message(msg);
+    } else if (callbacks_.on_message) {
         callbacks_.on_message(msg.role, msg.content, false);
     }
     if (session_manager_) {
@@ -883,7 +886,10 @@ void AgentLoop::initialize_compact_window_state() {
     }
 }
 
-void AgentLoop::apply_compact_result(const CompactResult& result, const std::string& trigger) {
+void AgentLoop::apply_compact_result(
+    const CompactResult& result,
+    const std::string& trigger,
+    const std::string& compact_notice_id) {
     auto initial_context = build_compaction_initial_context();
     auto pre_history = provider_relevant_messages(messages_);
     auto pre_request = initial_context;
@@ -929,12 +935,19 @@ void AgentLoop::apply_compact_result(const CompactResult& result, const std::str
     MtimeTracker::instance().clear_read_observations();
     compact_generation_.fetch_add(1, std::memory_order_relaxed);
 
-    emit_transcript_system_message("--- [Compact Checkpoint] ---");
+    const std::string notice_id = compact_notice_id.empty()
+        ? generate_uuid_v7()
+        : compact_notice_id;
     emit_transcript_system_message(
-        "[Conversation summary]\n" + result.summary_text);
+        "--- [Compact Checkpoint] ---",
+        make_compact_notice_metadata(notice_id, "checkpoint"));
+    emit_transcript_system_message(
+        "[Conversation summary]\n" + result.summary_text,
+        make_compact_notice_metadata(notice_id, "summary"));
     emit_transcript_system_message(
         "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
-        "Start a new thread when possible to keep threads small and targeted.");
+        "Start a new thread when possible to keep threads small and targeted.",
+        make_compact_notice_metadata(notice_id, "warning", true));
 }
 
 bool AgentLoop::maybe_run_auto_compact() {
@@ -964,20 +977,23 @@ bool AgentLoop::maybe_run_auto_compact() {
         }
     }
 
+    const std::string compact_notice_id = generate_uuid_v7();
     events_.emit(SessionEventKind::AgentProgress, nlohmann::json{
         {"phase", "compacting"},
         {"label", "Compacting conversation"},
         {"started_at_ms", now_epoch_ms()},
     });
     emit_transcript_system_message(
-        "[Auto-compact] Context approaching limit, compacting...");
+        "[Auto-compact] Context approaching limit, compacting...",
+        make_compact_notice_metadata(compact_notice_id, "progress"));
 
     std::shared_ptr<LlmProvider> provider_snapshot;
     if (provider_accessor_) provider_snapshot = provider_accessor_();
     if (!provider_snapshot) {
         LOG_WARN("Auto-compact failed; provider unavailable");
         emit_transcript_system_message(
-            "[Auto-compact] provider unavailable for compaction");
+            "[Auto-compact] provider unavailable for compaction",
+            make_compact_notice_metadata(compact_notice_id, "error"));
         return false;
     }
 
@@ -996,7 +1012,9 @@ bool AgentLoop::maybe_run_auto_compact() {
                  log_truncate(result.error, 500) +
                  " active_estimated_tokens=" + std::to_string(pre_tokens) +
                  " threshold=" + std::to_string(threshold));
-        emit_transcript_system_message("[Auto-compact] " + result.error);
+        emit_transcript_system_message(
+            "[Auto-compact] " + result.error,
+            make_compact_notice_metadata(compact_notice_id, "error"));
         return false;
     }
 
@@ -1009,7 +1027,7 @@ bool AgentLoop::maybe_run_auto_compact() {
              " estimated_tokens_saved=" +
              std::to_string(result.estimated_tokens_saved) +
              " compacted_estimated_tokens=" + std::to_string(compacted_tokens));
-    apply_compact_result(result, "auto");
+    apply_compact_result(result, "auto", compact_notice_id);
     if (hook_manager_) {
         auto fields = build_hook_common_fields(kCodexHookEventPostCompact);
         auto payload = build_compact_hook_payload(fields, "auto");
@@ -3438,6 +3456,8 @@ void AgentLoop::run_compact() {
     abort_requested_ = false;
     busy_ = true;
 
+    const std::string compact_notice_id = generate_uuid_v7();
+
     if (callbacks_.on_busy_changed) {
         callbacks_.on_busy_changed(true);
     }
@@ -3447,7 +3467,9 @@ void AgentLoop::run_compact() {
         {"label", "Compacting conversation"},
         {"started_at_ms", now_epoch_ms()},
     });
-    emit_transcript_system_message("Compacting conversation...");
+    emit_transcript_system_message(
+        "Compacting conversation...",
+        make_compact_notice_metadata(compact_notice_id, "progress"));
 
     auto finish = [this]() {
         if (callbacks_.on_busy_changed) {
@@ -3491,7 +3513,7 @@ void AgentLoop::run_compact() {
         return;
     }
 
-    apply_compact_result(result, "manual");
+    apply_compact_result(result, "manual", compact_notice_id);
     if (hook_manager_) {
         auto fields = build_hook_common_fields(kCodexHookEventPostCompact);
         auto payload = build_compact_hook_payload(fields, "manual");

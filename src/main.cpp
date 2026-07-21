@@ -137,6 +137,8 @@
 #include "tui/text_truncation.hpp"
 #include "tui/thick_vscroll_bar.hpp"
 #include "tui/thinking_animation.hpp"
+#include "tui/compact_animation.hpp"
+#include "tui/compact_notice_row.hpp"
 #include "tui/thinking_heartbeat.hpp"
 #include "tui/tool_progress.hpp"
 #include "tui/tool_result_fold.hpp"
@@ -157,6 +159,7 @@
 #include "utils/terminal_title.hpp"
 #include "session/attachment_store.hpp"
 #include "session/session_storage.hpp"
+#include "session/compact_notice.hpp"
 #include "history/input_history_store.hpp"
 #include "desktop/workspace_registry.hpp"
 
@@ -1389,6 +1392,8 @@ static std::size_t message_render_revision(const TuiState::Message& msg,
     add_size(msg.is_tool ? 1u : 0u);
     add_string(msg.display_override);
     add_size(msg.expanded ? 1u : 0u);
+    add_string(msg.compact_notice_id);
+    add_size(msg.compact_notice_complete ? 1u : 0u);
     add_size(transcript_expanded ? 1u : 0u);
     add_size(msg.summary.has_value() ? 1u : 0u);
     if (msg.summary.has_value()) {
@@ -3784,6 +3789,25 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 message_elements.push_back(
                     tracked_message(i, line | focus_decorator));
             }
+        } else if (msg.role == "compact_notice") {
+            const bool row_expanded = tui::compact_notice_row_is_expanded(
+                msg, state.transcript_expanded);
+            Element content = row_expanded
+                ? paragraph(msg.content) | color(tui::theme().ui.accent)
+                : hbox({
+                      text(tui::kCollapsedCompactNoticeLabel) | bold,
+                      text("  (Ctrl+E to expand)") |
+                          color(tui::theme().ui.text_dim),
+                  });
+            auto line = hbox({
+                text(" i ") | bold | color(tui::theme().ui.accent),
+                std::move(content) | flex,
+            });
+            if (focused_message) {
+                line = line | focus;
+            }
+            message_elements.push_back(
+                tracked_message(i, line | focus_decorator));
         } else if (msg.role == "system") {
             auto line = hbox({
                 text(" i ") | bold | color(tui::theme().ui.accent),
@@ -3866,6 +3890,37 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
     if (!conhost_compat_layout && state.tool_running) {
         thinking_element = render_tool_progress(state);
     } else if (!conhost_compat_layout && state.is_waiting) {
+        if (state.is_compacting) {
+            const auto compact_now = std::chrono::steady_clock::now();
+            const auto compact_origin =
+                state.compact_animation_start_time.time_since_epoch().count() != 0
+                    ? state.compact_animation_start_time
+                    : compact_now;
+            const long long compact_elapsed_ms = std::max<long long>(
+                0, std::chrono::duration_cast<std::chrono::milliseconds>(
+                       compact_now - compact_origin).count());
+            const std::vector<std::string> compact_glyphs =
+                ftxui::Utf8ToGlyphs("Compacting conversation...");
+            const auto compact_frame = tui::make_compact_animation_frame(
+                compact_glyphs.size(), compact_elapsed_ms);
+            Elements compact_chars;
+            for (std::size_t i = 0; i < compact_glyphs.size(); ++i) {
+                const bool highlighted =
+                    compact_frame.highlighted_background[i];
+                Element glyph = text(compact_glyphs[i]) |
+                    color(highlighted
+                              ? tui::theme().ui.selection_fg
+                              : tui::theme().ui.text_primary);
+                if (highlighted) {
+                    glyph = glyph | bgcolor(tui::theme().ui.selection_bg);
+                }
+                compact_chars.push_back(std::move(glyph));
+            }
+            thinking_element = hbox({
+                text(" \xE2\x97\x8F ") | color(tui::theme().ui.accent),
+                hbox(std::move(compact_chars)),
+            });
+        } else {
         const auto thinking_now = std::chrono::steady_clock::now();
         const auto animation_origin =
             state.thinking_start_time.time_since_epoch().count() != 0
@@ -3915,6 +3970,7 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             hbox(std::move(chars)),
             heartbeat,
         });
+        }
     }
 
     Element mcp_loading_element = emptyElement();
@@ -4873,6 +4929,31 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         clamp_chat_focus();
         screen.PostEvent(Event::Custom);
     };
+    callbacks.on_transcript_message =
+        [&state, &clamp_chat_focus, &screen,
+         &reset_chat_line_measure_state](const ChatMessage& message) {
+            std::lock_guard<std::mutex> lk(state.mu);
+            const auto notice = decode_compact_notice(message);
+            if (notice.has_value() && notice->stage == "progress") {
+                state.is_compacting = true;
+                state.compact_animation_start_time =
+                    std::chrono::steady_clock::now();
+            }
+
+            if (!acecode::tui::append_compact_notice_row(
+                    state.conversation, message)) {
+                state.conversation.push_back(
+                    {message.role, message.content, false});
+            }
+            if (notice.has_value() && notice->complete) {
+                state.is_compacting = false;
+            }
+
+            reset_chat_line_measure_state();
+            state.chat_follow_tail = true;
+            clamp_chat_focus();
+            screen.PostEvent(Event::Custom);
+        };
     callbacks.on_busy_changed = [&state, &screen](bool busy) {
         acecode::note_process_session_busy("tui-main", busy);
         std::lock_guard<std::mutex> lk(state.mu);
@@ -4883,6 +4964,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
             state.turn_completion_tokens_confirmed = 0;
         }
         state.is_waiting = busy;
+        if (!busy) state.is_compacting = false;
         screen.PostEvent(Event::Custom);
     };
     callbacks.on_tool_confirm = [&state, &screen, &agent_aborting](const std::string& tool_name, const std::string& args) -> PermissionResult {
@@ -5626,6 +5708,7 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
         }
         const bool was_waiting = state.is_waiting;
         state.is_waiting = busy;
+        if (!busy) state.is_compacting = false;
         std::optional<acecode::desktop::NotifyPayload> completion_notification;
         // inline-thinking-heartbeat:回合正常收尾时追加显示端伪行
         // "● Done for Ns"(只进 state.conversation,不进 LLM context、不进
@@ -7933,6 +8016,11 @@ static int run_interactive_app(const InteractiveCliOptions& cli,
                     ? tool_result_names[
                         static_cast<std::size_t>(state.chat_focus_index)]
                     : std::string();
+                if (acecode::tui::toggle_completed_compact_notice_row(msg)) {
+                    invalidate_chat_line_measure_at(state.chat_focus_index);
+                    screen.PostEvent(Event::Custom);
+                    return true;
+                }
                 if (msg.role == "tool_result" &&
                     (msg.summary.has_value() || msg.hunks.has_value()) &&
                     !acecode::tui::is_task_complete_result(

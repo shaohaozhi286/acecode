@@ -253,6 +253,8 @@ set(ACECODE_TESTABLE_TUI_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tui/pending_attachment_selection.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/path_reference_input.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/confirm_question.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/compact_animation.cpp
+    ${CMAKE_SOURCE_DIR}/src/tui/compact_notice_row.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/diff_line_wrap.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/model_picker.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/mode_picker.cpp

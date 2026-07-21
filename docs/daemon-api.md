@@ -1923,6 +1923,24 @@ successful turn.
 `transcript_replace` is for retry/recovery cleanup. Normal compact success
 appends visible marker messages and a hidden checkpoint instead.
 
+Visible messages belonging to one compact operation carry lifecycle metadata:
+
+```json
+{
+  "transcript_only": true,
+  "compact_notice": true,
+  "compact_notice_id": "019f85aa-3a00-7000-8000-000000000005",
+  "compact_notice_stage": "progress|checkpoint|summary|warning|error",
+  "compact_notice_complete": false
+}
+```
+
+Manual and automatic compaction reuse one UUIDv7 `compact_notice_id`. Only the
+terminal warning of a successful operation sets `compact_notice_complete` to
+`true`; failures remain incomplete. Clients may therefore show incoming details
+while the operation runs and replace a completed group with one expandable
+`Context compacted` row without changing append-only transcript persistence.
+
 ### Client messages
 
 All client frames are JSON:

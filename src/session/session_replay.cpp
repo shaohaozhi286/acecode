@@ -3,6 +3,7 @@
 #include "session_replay.hpp"
 
 #include "compact_checkpoint.hpp"
+#include "compact_notice.hpp"
 #include "session_rewind.hpp"
 #include "tool_metadata_codec.hpp"
 #include "tool_result_storage.hpp"
@@ -10,6 +11,7 @@
 #include "turn_timing.hpp"
 #include "../tool/ask_user_question_tool.hpp"
 #include "../tool/tool_executor.hpp"
+#include "../tui/compact_notice_row.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -77,6 +79,12 @@ std::vector<TuiState::Message> replay_session_messages(
         }
         if (msg.metadata.is_object() &&
             msg.metadata.value("hidden_goal_context", false)) {
+            continue;
+        }
+
+        if (decode_compact_notice(msg).has_value()) {
+            flush_pending_calls();
+            (void)tui::append_compact_notice_row(out, msg);
             continue;
         }
 

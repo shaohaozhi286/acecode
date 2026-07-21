@@ -5,6 +5,7 @@
 #include "permissions.hpp"
 #include "provider/llm_provider.hpp"
 #include "session/compact_checkpoint.hpp"
+#include "session/compact_notice.hpp"
 #include "session/session_manager.hpp"
 #include "session/session_storage.hpp"
 #include "tool/tool_executor.hpp"
@@ -181,6 +182,21 @@ bool has_system_event(const std::vector<acecode::SessionEvent>& events,
     return false;
 }
 
+std::vector<acecode::CompactNotice> compact_notices(
+    const std::vector<acecode::SessionEvent>& events) {
+    std::vector<acecode::CompactNotice> notices;
+    for (const auto& event : events) {
+        if (event.kind != acecode::SessionEventKind::Message ||
+            !event.payload.contains("metadata")) {
+            continue;
+        }
+        auto notice = acecode::decode_compact_notice(
+            event.payload["metadata"]);
+        if (notice.has_value()) notices.push_back(std::move(*notice));
+    }
+    return notices;
+}
+
 acecode::ToolImpl huge_output_tool() {
     acecode::ToolImpl tool;
     tool.definition.name = "huge_output";
@@ -219,6 +235,21 @@ TEST(AgentLoopCompactEvents, QueuedCompactAppendsCodexMarkerWithoutTranscriptRep
     EXPECT_TRUE(has_system_event(events, "--- [Compact Checkpoint] ---"));
     EXPECT_TRUE(has_system_event(events, "[Conversation summary]"));
     EXPECT_TRUE(has_system_event(events, "Long threads and multiple compactions"));
+    const auto notices = compact_notices(events);
+    ASSERT_EQ(notices.size(), 4u);
+    EXPECT_EQ(notices[0].stage, "progress");
+    EXPECT_EQ(notices[1].stage, "checkpoint");
+    EXPECT_EQ(notices[2].stage, "summary");
+    EXPECT_EQ(notices[3].stage, "warning");
+    ASSERT_EQ(notices[0].id.size(), 36u);
+    EXPECT_EQ(notices[0].id[14], '7');
+    for (const auto& notice : notices) {
+        EXPECT_EQ(notice.id, notices[0].id);
+    }
+    EXPECT_FALSE(notices[0].complete);
+    EXPECT_FALSE(notices[1].complete);
+    EXPECT_FALSE(notices[2].complete);
+    EXPECT_TRUE(notices[3].complete);
     ASSERT_FALSE(loop.messages().empty());
     EXPECT_EQ(loop.messages().back().role, "user");
     EXPECT_EQ(loop.messages().back().content,
@@ -496,6 +527,13 @@ TEST(AgentLoopCompactEvents, FailedAutoCompactIsAtomicAndRetriesOnNextTurn) {
             loop.submit("failing compact " + std::to_string(i));
         });
         EXPECT_FALSE(has_system_event(events, "--- [Compact Checkpoint] ---"));
+        const auto notices = compact_notices(events);
+        ASSERT_EQ(notices.size(), 2u);
+        EXPECT_EQ(notices[0].stage, "progress");
+        EXPECT_EQ(notices[1].stage, "error");
+        EXPECT_EQ(notices[0].id, notices[1].id);
+        EXPECT_FALSE(notices[0].complete);
+        EXPECT_FALSE(notices[1].complete);
     }
 
     EXPECT_EQ(provider->chat_calls, 4)

@@ -436,6 +436,69 @@ function objectMetadata(item) {
   return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
 }
 
+function compactNoticeId(item) {
+  if (item?.kind !== 'msg') return '';
+  const metadata = objectMetadata(item);
+  if (metadata.compact_notice !== true) return '';
+  return typeof metadata.compact_notice_id === 'string'
+    ? metadata.compact_notice_id.trim()
+    : '';
+}
+
+function collapseCompletedCompactNoticeGroups(items) {
+  const groups = new Map();
+  items.forEach((item, index) => {
+    const id = compactNoticeId(item);
+    if (!id) return;
+    const group = groups.get(id) || {
+      id,
+      indexes: [],
+      items: [],
+      complete: false,
+    };
+    group.indexes.push(index);
+    group.items.push(item);
+    group.complete = group.complete
+      || objectMetadata(item).compact_notice_complete === true;
+    groups.set(id, group);
+  });
+
+  const replacements = new Map();
+  const removed = new Set();
+  for (const group of groups.values()) {
+    if (!group.complete || group.indexes.length === 0) continue;
+    const first = group.items[0];
+    const syntheticId = `compact-notice:${group.id}`;
+    replacements.set(group.indexes[0], {
+      ...first,
+      kind: 'msg',
+      id: syntheticId,
+      messageId: syntheticId,
+      role: 'system',
+      content: group.items.map((item) => String(item?.content ?? '')).join('\n\n'),
+      contentParts: [],
+      metadata: {
+        ...objectMetadata(first),
+        compact_notice: true,
+        compact_notice_id: group.id,
+        compact_notice_stage: 'complete',
+        compact_notice_complete: true,
+        compact_label: 'Context compacted',
+      },
+      coveredItemIds: collectCoveredIds(group.items),
+      ts: itemTimestamp(first) || Date.now(),
+    });
+    group.indexes.forEach((index) => removed.add(index));
+  }
+
+  const out = [];
+  items.forEach((item, index) => {
+    if (replacements.has(index)) out.push(replacements.get(index));
+    else if (!removed.has(index)) out.push(item);
+  });
+  return out;
+}
+
 function suppressStructuredToolWrappers(items) {
   const structuredById = new Map();
   const structuredIndexes = [];
@@ -993,7 +1056,9 @@ function projectTurn(items, options = {}) {
 }
 
 export function projectCollapsedTranscriptItems(items, options = {}) {
-  const source = Array.isArray(items) ? items : [];
+  const source = collapseCompletedCompactNoticeGroups(
+    Array.isArray(items) ? items : [],
+  );
   if (source.length === 0) return [];
 
   const out = [];
@@ -1031,4 +1096,5 @@ export const __test__ = {
   taskCompleteSummaryText,
   isSubagentToolItem,
   groupSubagentTools,
+  collapseCompletedCompactNoticeGroups,
 };

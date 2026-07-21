@@ -74,6 +74,10 @@ struct TuiState {
         // 非空时 TUI 走彩色 diff 视图;为空(老会话或非编辑类工具)走灰色 fold 路径。
         // 同样不写入 session JSONL。
         std::optional<std::vector<DiffHunk>> hunks;
+        // Runtime projection for one persisted compact-notice lifecycle. The
+        // joined source text remains available when a completed row is folded.
+        std::string compact_notice_id;
+        bool compact_notice_complete = false;
     };
 
     std::vector<Message> conversation;
@@ -382,6 +386,7 @@ struct TuiState {
 
     // Async compact state
     bool is_compacting = false;                       // protected by mu
+    std::chrono::steady_clock::time_point compact_animation_start_time{};
     std::atomic<bool> compact_abort_requested{false};  // cross-thread abort signal
     std::thread compact_thread;                        // background compaction thread
 

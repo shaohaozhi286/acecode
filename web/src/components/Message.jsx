@@ -238,10 +238,17 @@ function AssistantBubble({
 }
 
 function SystemRow({ role, content, metadata }) {
-  const [expanded, setExpanded] = useState(false);
+  const isCompactNotice = metadata?.compact_notice === true;
+  const isCompletedCompactNotice = isCompactNotice
+    && metadata?.compact_notice_complete === true;
+  const [expanded, setExpanded] = useState(
+    isCompactNotice && !isCompletedCompactNotice,
+  );
   const customLabel = metadata && typeof metadata.compact_label === 'string'
     ? metadata.compact_label
-    : '';
+    : (isCompactNotice
+      ? (isCompletedCompactNotice ? 'Context compacted' : 'Compacting conversation')
+      : '');
   const isToolCompact = role === 'tool_call' || role === 'tool_result' || customLabel === '工具调用 / 返回';
   const { label, text, preview, lineCount, charCount } = useMemo(
     () => buildCompactMessagePreview({ role, content, label: customLabel }),

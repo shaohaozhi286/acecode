@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "session/session_replay.hpp"
+#include "session/compact_notice.hpp"
 #include "session/file_checkpoint_store.hpp"
 #include "session/tool_metadata_codec.hpp"
 #include "tool/ask_user_question_tool.hpp"
@@ -105,6 +106,66 @@ TEST(SessionReplay, SystemPassthrough) {
     EXPECT_EQ(out[0].role, "system");
     EXPECT_EQ(out[0].content, "[Auto-compact] ...");
     EXPECT_FALSE(out[0].is_tool);
+}
+
+// A completed compact lifecycle is reconstructed as one collapsed row while
+// preserving every source notice in order for later expansion.
+TEST(SessionReplay, CompletedCompactNoticesRestoreAsOneCollapsedRow) {
+    const std::string notice_id = "019f85aa-3a00-7000-8000-000000000001";
+    auto notice = [&](const std::string& content,
+                      const std::string& stage,
+                      bool complete = false) {
+        ChatMessage message;
+        message.role = "system";
+        message.content = content;
+        message.metadata = acecode::make_compact_notice_metadata(
+            notice_id, stage, complete);
+        return message;
+    };
+
+    ToolExecutor tools;
+    auto out = replay_session_messages({
+        notice("Compacting conversation...", "progress"),
+        notice("--- [Compact Checkpoint] ---", "checkpoint"),
+        notice("[Conversation summary]\nsummary body", "summary"),
+        notice("Heads up", "warning", true),
+    }, tools);
+
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].role, "compact_notice");
+    EXPECT_EQ(out[0].compact_notice_id, notice_id);
+    EXPECT_TRUE(out[0].compact_notice_complete);
+    EXPECT_FALSE(out[0].expanded);
+    EXPECT_EQ(out[0].content,
+              "Compacting conversation...\n\n"
+              "--- [Compact Checkpoint] ---\n\n"
+              "[Conversation summary]\nsummary body\n\n"
+              "Heads up");
+}
+
+// A failed operation has no completion edge, so its progress and error remain
+// expanded instead of being presented as a successful collapsed row.
+TEST(SessionReplay, IncompleteCompactNoticesRemainExpanded) {
+    const std::string notice_id = "019f85aa-3a00-7000-8000-000000000002";
+    ChatMessage progress;
+    progress.role = "system";
+    progress.content = "Compacting conversation...";
+    progress.metadata = acecode::make_compact_notice_metadata(
+        notice_id, "progress");
+    ChatMessage error;
+    error.role = "system";
+    error.content = "provider unavailable";
+    error.metadata = acecode::make_compact_notice_metadata(
+        notice_id, "error");
+
+    ToolExecutor tools;
+    auto out = replay_session_messages({progress, error}, tools);
+
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].role, "compact_notice");
+    EXPECT_FALSE(out[0].compact_notice_complete);
+    EXPECT_TRUE(out[0].expanded);
+    EXPECT_NE(out[0].content.find("provider unavailable"), std::string::npos);
 }
 
 // 纯文本 assistant,content 非空 + tool_calls 空 → 1 行 {assistant, content, false}。

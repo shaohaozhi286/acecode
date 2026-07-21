@@ -48,6 +48,11 @@ struct AgentCallbacks {
     // Called when a new message is added to the conversation
     std::function<void(const std::string& role, const std::string& content, bool is_tool)> on_message;
 
+    // Metadata-preserving observer for persisted transcript-only messages.
+    // When installed, it receives those messages instead of the legacy
+    // three-field on_message callback so UI grouping can use stable metadata.
+    std::function<void(const ChatMessage& message)> on_transcript_message;
+
     // Called after each tool execution with the structured ToolResult so the
     // TUI can render a summary row. Fires in addition to on_message (not in
     // place of it) so consumers that only care about the text stream continue
@@ -357,7 +362,9 @@ private:
     bool active_estimate_exceeds_auto_threshold() const;
     std::vector<ChatMessage> build_compaction_initial_context() const;
     void initialize_compact_window_state();
-    void apply_compact_result(const CompactResult& result, const std::string& trigger);
+    void apply_compact_result(const CompactResult& result,
+                              const std::string& trigger,
+                              const std::string& compact_notice_id);
 
     // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
     // (events_)。所有 on_message 触发点都该走这个 helper,确保 daemon

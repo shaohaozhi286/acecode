@@ -56,6 +56,24 @@ function toolWrapper(id, role, content, extra = {}) {
   };
 }
 
+function compactNotice(id, operationId, stage, content, complete = false) {
+  return {
+    kind: 'msg',
+    id,
+    messageId: `compact-${id}`,
+    role: 'system',
+    content,
+    ts: id * 1000,
+    metadata: {
+      transcript_only: true,
+      compact_notice: true,
+      compact_notice_id: operationId,
+      compact_notice_stage: stage,
+      compact_notice_complete: complete,
+    },
+  };
+}
+
 function taskComplete(id, summary = 'done', ts = id * 1000, success = true) {
   return {
     kind: 'tool',
@@ -110,6 +128,47 @@ function askQuestionTool(id, ts = id * 1000) {
     },
   };
 }
+
+run('完成的压缩通知投影为一个可展开 Context compacted 消息', () => {
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    compactNotice(2, 'operation-1', 'progress', 'Compacting conversation...'),
+    compactNotice(3, 'operation-1', 'checkpoint', '--- [Compact Checkpoint] ---'),
+    compactNotice(4, 'operation-1', 'summary', '[Conversation summary]\nlong summary'),
+    compactNotice(5, 'operation-1', 'warning', 'Heads up', true),
+  ], { deferTrailingToolSummary: true });
+
+  assert.equal(projected.length, 2);
+  const compacted = projected[1];
+  assert.equal(compacted.kind, 'msg');
+  assert.equal(compacted.role, 'system');
+  assert.equal(compacted.metadata.compact_label, 'Context compacted');
+  assert.equal(compacted.metadata.compact_notice_complete, true);
+  assert.deepEqual(compacted.coveredItemIds, [2, 3, 4, 5]);
+  assert.equal(
+    compacted.content,
+    'Compacting conversation...\n\n'
+      + '--- [Compact Checkpoint] ---\n\n'
+      + '[Conversation summary]\nlong summary\n\n'
+      + 'Heads up',
+  );
+});
+
+run('未完成或失败的压缩通知保持逐条可见', () => {
+  const progress = compactNotice(
+    2, 'operation-2', 'progress', 'Compacting conversation...', false,
+  );
+  const error = compactNotice(3, 'operation-2', 'error', 'provider unavailable', false);
+  const projected = projectCollapsedTranscriptItems([
+    user(1),
+    progress,
+    error,
+  ], { deferTrailingToolSummary: true });
+
+  assert.deepEqual(projected, [user(1), progress, error]);
+  assert.equal(projected[1].metadata.compact_notice_complete, false);
+  assert.equal(projected[2].content, 'provider unavailable');
+});
 
 run('连续工具在 assistant 文本前折叠成一个 activity_summary', () => {
   const projected = projectCollapsedTranscriptItems([

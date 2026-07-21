@@ -92,6 +92,66 @@ run('history load 使用持久 timestamp 而不是页面加载时间', () => {
   assert.equal(loaded.items[1].ts, Date.parse(assistantTs));
 });
 
+run('history load 后完成的压缩通知恢复为一个折叠投影', () => {
+  const operationId = '019f85aa-3a00-7000-8000-000000000003';
+  const compactMessage = (id, stage, content, complete = false) => ({
+    id,
+    role: 'system',
+    content,
+    metadata: {
+      transcript_only: true,
+      compact_notice: true,
+      compact_notice_id: operationId,
+      compact_notice_stage: stage,
+      compact_notice_complete: complete,
+    },
+  });
+  const loaded = loadTranscriptHistory(createTranscriptState({ title: 's1' }), {
+    messages: [
+      compactMessage('c1', 'progress', 'Compacting conversation...'),
+      compactMessage('c2', 'summary', '[Conversation summary]\nlong summary'),
+      compactMessage('c3', 'warning', 'Heads up', true),
+    ],
+    events: [],
+  }).state;
+
+  const projected = projectLoadedItems(loaded.items);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].metadata.compact_label, 'Context compacted');
+  assert.equal(projected[0].metadata.compact_notice_complete, true);
+  assert.match(projected[0].content, /long summary/);
+});
+
+run('live compact 消息到达完成边界后合并为一个折叠投影', () => {
+  const operationId = '019f85aa-3a00-7000-8000-000000000004';
+  const event = (seq, stage, content, complete = false) => ({
+    type: 'message',
+    seq,
+    payload: {
+      id: `live-compact-${seq}`,
+      role: 'system',
+      content,
+      metadata: {
+        transcript_only: true,
+        compact_notice: true,
+        compact_notice_id: operationId,
+        compact_notice_stage: stage,
+        compact_notice_complete: complete,
+      },
+    },
+  });
+  const live = reduceMany([
+    event(1, 'progress', 'Compacting conversation...'),
+    event(2, 'summary', '[Conversation summary]\nlong summary'),
+    event(3, 'warning', 'Heads up', true),
+  ]);
+
+  const projected = projectLoadedItems(live.items);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].metadata.compact_label, 'Context compacted');
+  assert.deepEqual(projected[0].coveredItemIds, [1, 2, 3]);
+});
+
 run('assistant token streaming 被 final message 替换', () => {
   const state = reduceMany([
     { type: 'token', payload: { text: 'hel' }, seq: 1 },

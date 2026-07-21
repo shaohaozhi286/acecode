@@ -418,6 +418,8 @@ acecode: session <id> saved. Resume with: acecode --resume <id>
 
 Desktop、Web 和 TUI 使用同一条串行压缩路径。压缩不会改写或截短人类可见 transcript；JSONL 会追加一个隐藏 checkpoint，记录替换后的模型历史和 compact-window 编号/标识，之后的消息继续追加。刷新、恢复和 fork 会从最新有效 checkpoint 恢复模型历史，再按顺序回放其后的消息。压缩失败时不会写 checkpoint，也不会通过无摘要截断来“抢救”请求。
 
+压缩期间，TUI 会显示 `Compacting conversation...`：整段文字先使用高亮背景，然后默认背景从左右两端对称向中间收缩并循环。压缩产生的进度、checkpoint、摘要和警告仍会完整追加到 transcript；成功完成后，TUI 和 Web 会把同一次操作收成一条 `Context compacted`，可用 TUI 的 `Ctrl+E` / `Ctrl+O` 或 Web 的展开按钮查看全部原文。失败的压缩没有成功完成标记，因此进度和错误会保持展开可见。
+
 当前 Chat Completions 类型 provider 使用上述本地算法。只有未来能够原生发送 compaction trigger 并验证 compaction response item 的 provider 才能启用服务端原生压缩。
 
 ---
