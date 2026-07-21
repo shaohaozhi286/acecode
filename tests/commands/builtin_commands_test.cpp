@@ -2,6 +2,7 @@
 
 #include "commands/builtin_commands.hpp"
 #include "commands/command_registry.hpp"
+#include "commands/desktop_command.hpp"
 #include "config/config.hpp"
 #include "permissions.hpp"
 #include "provider/provider_factory.hpp"
@@ -451,6 +452,54 @@ TEST(BuiltinCommands, TurnBtwAndSideCommandsAreRegistered) {
     EXPECT_TRUE(registry.has_command("turn"));
     EXPECT_TRUE(registry.has_command("btw"));
     EXPECT_TRUE(registry.has_command("side"));
+}
+
+TEST(BuiltinCommands, DesktopCommandIsRegisteredAndListedInHelp) {
+    ResumeCommandHarness harness("desktop_help");
+
+    ASSERT_TRUE(harness.registry_.has_command("desktop"));
+    EXPECT_EQ(harness.registry_.commands().at("desktop").description,
+              "Open ACECode Desktop");
+    ASSERT_TRUE(harness.dispatch("/help"));
+    ASSERT_FALSE(harness.state_.conversation.empty());
+    EXPECT_NE(harness.state_.conversation.back().content.find("/desktop"),
+              std::string::npos);
+}
+
+TEST(BuiltinCommands, DesktopCommandValidatesArgumentsAndReportsLaunchResult) {
+    ResumeCommandHarness harness("desktop_launch_result");
+    int launch_calls = 0;
+    const fs::path desktop_path = harness.cwd_ / "acecode-desktop.exe";
+    acecode::register_desktop_command(
+        harness.registry_,
+        [&] {
+            ++launch_calls;
+            return acecode::DesktopLaunchResult{true, desktop_path, {}};
+        });
+
+    ASSERT_TRUE(harness.dispatch("/desktop unexpected"));
+    ASSERT_FALSE(harness.state_.conversation.empty());
+    EXPECT_EQ(harness.state_.conversation.back().content, "Usage: /desktop");
+    EXPECT_EQ(launch_calls, 0);
+
+    ASSERT_TRUE(harness.dispatch("/desktop"));
+    EXPECT_EQ(launch_calls, 1);
+    EXPECT_NE(harness.state_.conversation.back().content.find(
+                  "ACECode Desktop started:"),
+              std::string::npos);
+    EXPECT_NE(harness.state_.conversation.back().content.find(
+                  "acecode-desktop.exe"),
+              std::string::npos);
+
+    acecode::register_desktop_command(
+        harness.registry_,
+        [] {
+            return acecode::DesktopLaunchResult{
+                false, {}, "synthetic launch failure"};
+        });
+    ASSERT_TRUE(harness.dispatch("/desktop"));
+    EXPECT_EQ(harness.state_.conversation.back().content,
+              "Failed to start ACECode Desktop: synthetic launch failure");
 }
 
 TEST(BuiltinCommands, TurnCommandSteersTheCurrentlyRunningTurn) {

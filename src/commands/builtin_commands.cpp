@@ -1,5 +1,6 @@
 #include "builtin_commands.hpp"
 #include "compact.hpp"
+#include "desktop_command.hpp"
 #include "history_command.hpp"
 #include "goal_command.hpp"
 #include "init_command.hpp"
@@ -410,6 +411,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /models   - Inspect bundled models.dev registry\n"
         << "  /browser  - Show or toggle ACE Browser Bridge tools for this session\n"
         << "  /proxy    - Show or switch the HTTP proxy used for LLM/API requests\n"
+        << "  /desktop  - Open ACECode Desktop\n"
         << "  /title    - Set or show the window title for this session\n"
         << "  /exit     - Exit acecode";
 
@@ -1901,6 +1903,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     register_websearch_command(registry);
     register_lsp_command(registry);
     register_remote_control_command(registry);
+    register_desktop_command(registry);
     registry.register_command({"feedback", "Upload current session diagnostics to the configured upgrade service", cmd_feedback});
     registry.register_command({"browser", "Show or toggle ACE Browser Bridge tools for this session", cmd_browser});
     registry.register_command({"tasks", "List, abort, or clear subagent background tasks", cmd_tasks});

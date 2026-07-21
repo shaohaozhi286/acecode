@@ -4,7 +4,8 @@
 
 namespace acecode {
 
-// Register all builtin slash commands (/help, /clear, /new, /model, /config, /tokens, /compact, /exit)
+// Register all builtin slash commands, including /desktop and the core
+// conversation/configuration commands.
 void register_builtin_commands(CommandRegistry& registry);
 
 // Resume an exact persisted session without going through the numeric picker.
