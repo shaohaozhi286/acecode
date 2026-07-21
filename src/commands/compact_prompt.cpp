@@ -1,103 +1,35 @@
 #include "compact_prompt.hpp"
 
 #include <string>
-#include <regex>
 
 namespace acecode {
 
 namespace {
 
-const char* NO_TOOLS_PREAMBLE =
-    "IMPORTANT: Respond with TEXT ONLY. Do NOT attempt to call any tools or functions. "
-    "Do NOT output any JSON tool call structures. Just provide a plain text response.\n\n";
+const std::string kCompactPrompt =
+    "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\n"
+    "Include:\n"
+    "- Current progress and key decisions made\n"
+    "- Important context, constraints, or user preferences\n"
+    "- What remains to be done (clear next steps)\n"
+    "- Any critical data, examples, or references needed to continue\n\n"
+    "Be concise, structured, and focused on helping the next LLM seamlessly continue the work.";
 
-const char* BASE_COMPACT_PROMPT =
-    "You are a conversation summarizer. Your task is to create a detailed, structured summary "
-    "of the conversation so far. This summary will replace the original conversation in the "
-    "context window, so it must preserve ALL important information.\n\n"
-    "First, analyze the conversation in <analysis> tags (this will be discarded), then write "
-    "the final summary in <summary> tags.\n\n"
-    "In your <analysis>, consider:\n"
-    "- What is the user's primary goal?\n"
-    "- What technical decisions were made and why?\n"
-    "- What files were read, created, or modified?\n"
-    "- What errors occurred and how were they resolved?\n"
-    "- What is the current state of the work?\n\n"
-    "In your <summary>, include ALL of the following sections (skip a section only if "
-    "it is truly not applicable):\n\n"
-    "## 1. Primary Request and Intent\n"
-    "What the user originally asked for and their underlying goal.\n\n"
-    "## 2. Key Technical Concepts\n"
-    "Important technical details, architecture decisions, patterns, and constraints.\n\n"
-    "## 3. Files and Code Sections\n"
-    "All files that were read, created, edited, or are relevant. Include file paths and "
-    "brief descriptions of changes or content.\n\n"
-    "## 4. Errors and Fixes\n"
-    "Any errors encountered and how they were resolved (or remain unresolved).\n\n"
-    "## 5. Problem Solving\n"
-    "The approach taken to solve problems, including alternatives considered.\n\n"
-    "## 6. All User Messages\n"
-    "Preserve the intent and key content of EVERY user message. Do not skip any user messages.\n\n"
-    "## 7. Pending Tasks\n"
-    "Tasks that are planned but not yet started or completed.\n\n"
-    "## 8. Current Work\n"
-    "What is currently in progress or was most recently being worked on.\n\n"
-    "## 9. Optional Next Step\n"
-    "A brief suggestion for the next logical step.\n\n"
-    "IMPORTANT GUIDELINES:\n"
-    "- Be thorough: this summary replaces the original conversation\n"
-    "- Preserve ALL file paths exactly as they appeared\n"
-    "- Preserve ALL code snippets and error messages that are relevant\n"
-    "- Preserve ALL user preferences and constraints mentioned\n"
-    "- Do NOT fabricate information not present in the conversation\n";
-
-const char* AUTO_COMPACT_SUFFIX =
-    "\nIMPORTANT: Do NOT include follow-up questions or ask what the user wants to do next. "
-    "This is an automated summary, not an interactive response.\n";
-
-const char* MANUAL_COMPACT_SUFFIX =
-    "\nYou may include a brief next-step suggestion in section 9.\n";
+const std::string kSummaryPrefix =
+    "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 
 } // namespace
 
-std::string get_compact_prompt(bool is_auto) {
-    std::string prompt;
-    prompt.reserve(4096);
-    prompt += NO_TOOLS_PREAMBLE;
-    prompt += BASE_COMPACT_PROMPT;
-    prompt += is_auto ? AUTO_COMPACT_SUFFIX : MANUAL_COMPACT_SUFFIX;
-    return prompt;
+const std::string& get_compact_prompt() {
+    return kCompactPrompt;
 }
 
-std::string format_compact_summary(const std::string& llm_response) {
-    std::string result = llm_response;
-
-    // Strip <analysis>...</analysis> block
-    std::regex analysis_re("<analysis>[\\s\\S]*?</analysis>", std::regex::ECMAScript);
-    result = std::regex_replace(result, analysis_re, "");
-
-    // Extract content from <summary>...</summary> tags if present
-    std::regex summary_re("<summary>([\\s\\S]*?)</summary>", std::regex::ECMAScript);
-    std::smatch match;
-    if (std::regex_search(result, match, summary_re)) {
-        result = match[1].str();
-    }
-
-    // Trim leading/trailing whitespace
-    auto start = result.find_first_not_of(" \t\n\r");
-    auto end = result.find_last_not_of(" \t\n\r");
-    if (start != std::string::npos && end != std::string::npos) {
-        result = result.substr(start, end - start + 1);
-    }
-
-    return result;
+const std::string& get_compact_summary_prefix() {
+    return kSummaryPrefix;
 }
 
 std::string get_compact_user_summary_message(const std::string& summary_text) {
-    return "[Conversation summary - This summary was generated by compacting the conversation. "
-           "The original messages have been removed to save context space. "
-           "If important details seem missing, they may have been in earlier messages "
-           "that were part of a previous conversation transcript.]\n\n" + summary_text;
+    return kSummaryPrefix + "\n" + summary_text;
 }
 
 } // namespace acecode

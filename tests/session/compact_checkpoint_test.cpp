@@ -2,6 +2,8 @@
 
 #include "session/compact_checkpoint.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,6 +54,10 @@ TEST(CompactCheckpoint, RoundTripsReplacementHistory) {
     checkpoint.estimated_tokens_saved = 345;
     checkpoint.pre_tokens = 1000;
     checkpoint.post_tokens = 200;
+    checkpoint.window_number = 3;
+    checkpoint.first_window_id = "window-first";
+    checkpoint.previous_window_id = "window-previous";
+    checkpoint.window_id = "window-current";
     checkpoint.replacement_history = {msg("system", "summary"), assistant};
 
     auto encoded = acecode::encode_compact_checkpoint(checkpoint);
@@ -67,9 +73,50 @@ TEST(CompactCheckpoint, RoundTripsReplacementHistory) {
     EXPECT_EQ(decoded->summary, "summary");
     EXPECT_EQ(decoded->messages_compressed, 12);
     EXPECT_EQ(decoded->estimated_tokens_saved, 345);
+    EXPECT_EQ(decoded->window_number, 3);
+    EXPECT_EQ(decoded->first_window_id, "window-first");
+    EXPECT_EQ(decoded->previous_window_id, "window-previous");
+    EXPECT_EQ(decoded->window_id, "window-current");
     ASSERT_EQ(decoded->replacement_history.size(), 2u);
     EXPECT_EQ(decoded->replacement_history[0].content, "summary");
     EXPECT_TRUE(decoded->replacement_history[1].tool_calls.is_array());
+}
+
+TEST(CompactCheckpoint, DecodesLegacyVersionWithoutWindowMetadata) {
+    acecode::CompactCheckpoint checkpoint;
+    checkpoint.id = "legacy-checkpoint-id";
+    checkpoint.replacement_history = {msg("user", "legacy summary")};
+    auto encoded = acecode::encode_compact_checkpoint(checkpoint);
+    encoded.metadata["version"] = 1;
+    encoded.metadata.erase("window_number");
+    encoded.metadata.erase("first_window_id");
+    encoded.metadata.erase("previous_window_id");
+    encoded.metadata.erase("window_id");
+
+    auto decoded = acecode::decode_compact_checkpoint(encoded);
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->version, 1);
+    EXPECT_EQ(decoded->id, "legacy-checkpoint-id");
+    EXPECT_EQ(decoded->window_number, 0);
+    EXPECT_TRUE(decoded->first_window_id.empty());
+    EXPECT_TRUE(decoded->previous_window_id.empty());
+    EXPECT_TRUE(decoded->window_id.empty());
+    ASSERT_EQ(decoded->replacement_history.size(), 1u);
+    EXPECT_EQ(decoded->replacement_history[0].content, "legacy summary");
+}
+
+TEST(CompactCheckpoint, RoundTripsUnsignedWindowNumberWithoutOverflow) {
+    acecode::CompactCheckpoint checkpoint;
+    checkpoint.window_number = std::numeric_limits<std::uint64_t>::max();
+    checkpoint.replacement_history = {msg("user", "summary")};
+
+    auto decoded = acecode::decode_compact_checkpoint(
+        acecode::encode_compact_checkpoint(checkpoint));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->window_number,
+              std::numeric_limits<std::uint64_t>::max());
 }
 
 TEST(CompactCheckpoint, ProviderRelevantMessagesFiltersHiddenRows) {

@@ -665,6 +665,15 @@ When `since=0` or omitted, returns a full snapshot object:
 Hidden file checkpoints, compact checkpoints, and hidden goal context messages
 are filtered from `messages`.
 
+Compact checkpoints are append-only. Version 2 records the Codex-shaped
+replacement model history together with `window_number`, `first_window_id`,
+`previous_window_id`, and `window_id`. Resume and fork start from the newest
+valid checkpoint and replay only its suffix. A fork preserves the inherited
+replacement history but resets its latest inherited checkpoint to a fresh
+UUIDv7 window zero, so later compactions form a fork-local chain. Version 1
+checkpoints without window metadata remain readable. Visible transcript rows
+before compaction are not removed.
+
 When `since>0`, returns an event array directly:
 
 ```json

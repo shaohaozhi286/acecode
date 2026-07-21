@@ -27,9 +27,9 @@ struct ChatMessage {
     // models; never set on user / system / tool messages.
     std::string reasoning_content;
 
-    // Metadata fields for compact pipeline
-    std::string uuid;                    // unique identifier (for boundary tracking)
-    std::string subtype;                 // "compact_boundary" | "microcompact_boundary" | ""
+    // Metadata fields for persisted/session-only records.
+    std::string uuid;                    // unique identifier
+    std::string subtype;                 // e.g. "compact_checkpoint"; empty for normal messages
     std::string timestamp;               // ISO 8601 timestamp
     bool is_meta = false;                // meta-message (boundary etc.), not sent to API
     bool is_compact_summary = false;     // marks this message as a compact summary
@@ -185,6 +185,12 @@ public:
 
     virtual std::string model() const = 0;
     virtual void set_model(const std::string& m) = 0;
+
+    // Native Responses-style compaction requires provider-specific trigger and
+    // response-item support. Chat providers remain on local compaction. A
+    // future provider must override this only together with that full native
+    // protocol; advertising support alone never fabricates native items.
+    virtual bool supports_native_compaction() const { return false; }
 
     // 认证热更新访问器(连接器 auth recovery 用,见 src/connectors/)。
     // 默认实现表示该 provider 不支持 —— AgentLoop 会跳过自动恢复。

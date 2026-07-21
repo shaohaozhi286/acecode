@@ -14,9 +14,6 @@ constexpr size_t MAX_GREP_RESULTS = 200;
 // Timeouts
 constexpr int DEFAULT_BASH_TIMEOUT_MS = 120000; // 2 minutes
 
-// Compact thresholds
-constexpr int MINIMUM_TOKENS_TO_COMPACT = 200;
-
 // Daemon / web defaults
 // 28080 是高位端口,大概率不与常用开发服务(3000/5173/8080/8000/9000)冲撞;
 // 用户可在 config.json 的 web.port 覆盖。Service 模式下端口被占直接拒启,不 retry。

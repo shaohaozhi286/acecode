@@ -15,6 +15,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <cstdint>
 #include <mutex>
 #include <atomic>
 #include <thread>
@@ -190,7 +191,14 @@ public:
     void cancel() { abort(); }
 
     // Clear all messages (for /clear command)
-    void clear_messages() { messages_.clear(); }
+    void clear_messages() {
+        messages_.clear();
+        last_api_total_tokens_.store(0, std::memory_order_relaxed);
+        compact_window_initialized_ = false;
+        compact_window_number_ = 0;
+        compact_first_window_id_.clear();
+        compact_current_window_id_.clear();
+    }
 
     // Push a message (for session restore)
     void push_message(const ChatMessage& msg) { messages_.push_back(msg); }
@@ -347,6 +355,8 @@ private:
     std::size_t close_active_turn_and_discard();
     bool maybe_run_auto_compact();
     bool active_estimate_exceeds_auto_threshold() const;
+    std::vector<ChatMessage> build_compaction_initial_context() const;
+    void initialize_compact_window_state();
     void apply_compact_result(const CompactResult& result, const std::string& trigger);
 
     // Section 7: 同时调老 on_message callback(若 TUI 挂了)和新事件流
@@ -417,16 +427,13 @@ private:
         const ApiRequestBundle& bundle,
         const ProgressEmitter& emit_progress);
 
-    // Phase 4: Classify provider errors and attempt context rescue.
+    // Phase 4: Classify provider errors and handle connector auth recovery.
     enum class HandleErrorResult { Continue, Break, Proceed };
     HandleErrorResult handle_provider_error(
         ProviderCallResult& result,
         const std::vector<ChatMessage>& messages_with_system,
         // Mutable state passed by reference from the orchestrator:
-        int& context_rescue_attempts,
         int& auth_recovery_attempts,
-        int& last_context_rescue_tokens,
-        bool& skip_auto_compact_once,
         int& total_iterations,
         std::string& turn_timing_status);
 
@@ -493,9 +500,14 @@ private:
     // until set_agent_loop_config is called from main.cpp.
     AgentLoopConfig loop_cfg_;
     LoopExecutionPolicy loop_execution_policy_;
-    std::atomic<int> last_api_prompt_tokens_{0}; // from most recent API response
+    // Latest server-reported total active-context usage. For providers that do
+    // not return total_tokens, prompt_tokens is used as the fallback.
+    std::atomic<int> last_api_total_tokens_{0};
     std::atomic<int> compact_generation_{0};
-    int auto_compact_consecutive_failures_ = 0;
+    bool compact_window_initialized_ = false;
+    std::uint64_t compact_window_number_ = 0;
+    std::string compact_first_window_id_;
+    std::string compact_current_window_id_;
     SessionManager* session_manager_ = nullptr;
     HookManager* hook_manager_ = nullptr;
     std::vector<std::string> hook_request_context_;

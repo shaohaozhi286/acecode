@@ -8,6 +8,7 @@
 #include "tool/tool_executor.hpp"
 #include "../agent_loop/stub_provider.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -133,20 +134,24 @@ struct LoopHarness {
 class CompactCountingProvider : public acecode::LlmProvider {
 public:
     int chat_calls = 0;
+    std::vector<acecode::ChatMessage> last_compact_messages;
+    std::vector<acecode::ChatMessage> last_stream_messages;
 
-    acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>&,
+    acecode::ChatResponse chat(const std::vector<acecode::ChatMessage>& messages,
                                const std::vector<acecode::ToolDef>&) override {
         ++chat_calls;
+        last_compact_messages = messages;
         acecode::ChatResponse response;
-        response.content = "<summary>compact summary</summary>";
+        response.content = "compact summary";
         response.finish_reason = "stop";
         return response;
     }
 
-    void chat_stream(const std::vector<acecode::ChatMessage>&,
+    void chat_stream(const std::vector<acecode::ChatMessage>& messages,
                      const std::vector<acecode::ToolDef>&,
                      const acecode::StreamCallback& callback,
                      std::atomic<bool>* = nullptr) override {
+        last_stream_messages = messages;
         // 必须发非空文本:纯 Done 的空响应会触发 AgentLoop 的空回复兜底重试
         // (fix-glm-empty-response-turn-end),一个 turn 变成 1+2 轮,导致
         // AutoPreCompactContinueFalse 的 pre-compact hook 计数从 1 变 3。
@@ -684,4 +689,55 @@ TEST(HookAgentLoop, PostCompactRunsAfterManualCompact) {
     ASSERT_TRUE(cv.wait_for(lk, 5s, [&] { return !busy; }));
     EXPECT_EQ(provider->chat_calls, 1);
     EXPECT_EQ(post_calls.load(), 1);
+}
+
+TEST(HookAgentLoop, AutoCompactDoesNotConsumeOneShotHookContext) {
+    auto provider = std::make_shared<CompactCountingProvider>();
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    std::mutex mu;
+    std::condition_variable cv;
+    bool busy = false;
+    acecode::AgentCallbacks callbacks;
+    callbacks.on_busy_changed = [&](bool value) {
+        std::lock_guard<std::mutex> lock(mu);
+        busy = value;
+        if (!busy) cv.notify_all();
+    };
+    acecode::AgentLoop loop(
+        [provider]() -> std::shared_ptr<acecode::LlmProvider> { return provider; },
+        tools, callbacks, ".", permissions);
+    loop.set_context_window(100);
+
+    acecode::HookManager hooks(
+        registry_with({make_codex_hook(
+            "user-context", acecode::kCodexHookEventUserPromptSubmit)}),
+        acecode::HookProcessRunner{},
+        [](const std::string&, const std::string&, int, const std::string&) {
+            return hook_json(
+                R"({"hookSpecificOutput":{"additionalContext":"one-shot hook context"}})");
+        });
+    loop.set_hook_manager(&hooks);
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        busy = true;
+    }
+    loop.submit("trigger compact first");
+    std::unique_lock<std::mutex> lock(mu);
+    ASSERT_TRUE(cv.wait_for(lock, 5s, [&] { return !busy; }));
+
+    ASSERT_EQ(provider->chat_calls, 1);
+    EXPECT_FALSE(std::any_of(
+        provider->last_compact_messages.begin(),
+        provider->last_compact_messages.end(),
+        [](const acecode::ChatMessage& message) {
+            return message.content.find("one-shot hook context") != std::string::npos;
+        }));
+    EXPECT_TRUE(std::any_of(
+        provider->last_stream_messages.begin(),
+        provider->last_stream_messages.end(),
+        [](const acecode::ChatMessage& message) {
+            return message.content.find("one-shot hook context") != std::string::npos;
+        }));
 }

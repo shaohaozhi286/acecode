@@ -16,6 +16,12 @@ The practical impact was not limited to display. The wrong value also affected r
 - `/config` output
 - auto-compact trigger threshold in `AgentLoop`
 
+`AgentLoop` derives automatic compaction at 90% of the resolved model context
+window and the hard effective input window at 95%. The runtime compares the
+latest server-reported total active-context usage with a fresh estimate of the
+current request and uses the larger value. Message count is not an independent
+compaction trigger.
+
 ## Root Cause
 
 GitHub Copilot's `/models` metadata is not a reliable source for the full model context window.

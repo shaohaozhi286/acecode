@@ -1,57 +1,24 @@
 #pragma once
 
 #include "../provider/llm_provider.hpp"
-#include "../tui_state.hpp"
-#include "../utils/token_tracker.hpp"
 
+#include <atomic>
+#include <cstddef>
 #include <string>
 #include <vector>
-#include <optional>
-#include <atomic>
 
 namespace acecode {
 
-// Forward declaration
-class AgentLoop;
-
-// ============================================================
-// Constants
-// ============================================================
-
-constexpr int AUTOCOMPACT_BUFFER_TOKENS = 13000;
-constexpr int MAX_OUTPUT_TOKENS_RESERVED = 20000;
-constexpr int MAX_PTL_RETRIES = 3;
-constexpr int MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3;
-// Preserve tool results for the last N *real* user turns (align with full
-// compact keep_turns). Hidden goal/todo injections must not consume this budget.
-constexpr int MICRO_COMPACT_KEEP_TURNS = 4;
-constexpr int AUTOCOMPACT_MAX_PROVIDER_MESSAGES = 256;
-
-// True for ordinary user turns that should count toward keep_turns / micro-keep.
-// Excludes meta messages and hidden goal/todo context injections.
-bool is_countable_user_turn(const ChatMessage& msg);
-
-// ============================================================
-// Structs
-// ============================================================
+constexpr std::size_t COMPACT_USER_MESSAGE_MAX_TOKENS = 20000;
+constexpr int EFFECTIVE_CONTEXT_WINDOW_PERCENT = 95;
+constexpr int AUTO_COMPACT_CONTEXT_WINDOW_PERCENT = 90;
 
 struct CompactResult {
     bool performed = false;
     int messages_compressed = 0;
     int estimated_tokens_saved = 0;
+    int compaction_request_items_removed = 0;
     std::string summary_text;
-    std::vector<ChatMessage> compacted_messages;
-    std::string error;
-};
-
-struct ContextRescueResult {
-    bool performed = false;
-    bool can_retry = false;
-    int messages_removed = 0;
-    int estimated_tokens_before = 0;
-    int estimated_tokens_after = 0;
-    int protected_user_turns = 0;
-    std::string marker_text;
     std::vector<ChatMessage> compacted_messages;
     std::string error;
 };
@@ -63,115 +30,46 @@ struct TokenWarningState {
     bool is_above_auto_compact = false;
 };
 
-// ============================================================
-// Token estimation
-// ============================================================
+// Codex uses an intentionally simple UTF-8 byte estimate: ceil(bytes / 4).
+std::size_t approx_token_count(const std::string& text);
 
-// Estimate total tokens from a message list (characters / 4 heuristic)
+// Codex's token truncation keeps the beginning and end around a marker.
+std::string truncate_text_to_token_budget(const std::string& text,
+                                          std::size_t max_tokens);
+
 int estimate_message_tokens(const std::vector<ChatMessage>& messages);
 
-// ============================================================
-// Compact Boundary (tasks 2.1-2.4)
-// ============================================================
+bool is_real_user_message(const ChatMessage& msg);
+bool is_compact_summary_message(const ChatMessage& msg);
 
-// Create a compact boundary marker message
-ChatMessage create_compact_boundary_message(const std::string& trigger, int pre_tokens);
+std::vector<ChatMessage> build_compacted_history(
+    const std::vector<ChatMessage>& messages,
+    const std::string& summary_text,
+    std::size_t max_user_message_tokens = COMPACT_USER_MESSAGE_MAX_TOKENS);
 
-// Check if a message is a compact boundary marker
-bool is_compact_boundary_message(const ChatMessage& msg);
+std::vector<ChatMessage> normalize_messages_for_api(
+    const std::vector<ChatMessage>& messages);
 
-// Find the index of the last compact boundary in the message list (-1 if none)
-int find_last_compact_boundary_index(const std::vector<ChatMessage>& messages);
+int get_effective_context_window(int context_window);
+int get_auto_compact_threshold(int context_window);
 
-// Return messages after the last compact boundary (inclusive). If no boundary, returns all.
-// Returns a pair of (start_index, count) into the original vector.
-std::pair<int, int> get_messages_after_compact_boundary(const std::vector<ChatMessage>& messages);
+bool should_auto_compact(int context_window,
+                         int server_total_tokens,
+                         int current_request_estimated_tokens);
 
-// ============================================================
-// API message filtering (task 2.5)
-// ============================================================
+TokenWarningState calculate_token_warning_state(int estimated_tokens,
+                                                 int context_window);
 
-// Filter out is_meta=true messages for API calls
-std::vector<ChatMessage> normalize_messages_for_api(const std::vector<ChatMessage>& messages);
+bool is_context_overflow_error(const ProviderErrorInfo& info);
+bool is_context_overflow_error(const std::string& error_message);
 
-// ============================================================
-// Full Compact (tasks 5.x)
-// ============================================================
-
-// Pure compact core. It summarizes a message list and returns the replacement
-// message list without touching TUI state or an AgentLoop instance.
+// Run Codex-compatible local compaction. initial_context contains stable
+// base/session instructions that are always retained during overflow retries.
 CompactResult compact_messages(
     LlmProvider& provider,
     const std::vector<ChatMessage>& messages,
-    const std::string& cwd,
-    int keep_turns = 4,
+    const std::vector<ChatMessage>& initial_context = {},
     bool is_auto = false,
-    std::atomic<bool>* abort_flag = nullptr
-);
-
-// Perform context compaction with new boundary-aware pipeline
-CompactResult compact_context(
-    LlmProvider& provider,
-    AgentLoop& agent_loop,
-    TuiState& state,
-    int keep_turns = 4,
-    bool is_auto = false,
-    std::atomic<bool>* abort_flag = nullptr
-);
-
-// ============================================================
-// Auto-compact threshold (tasks 7.x)
-// ============================================================
-
-// Calculate effective context window size
-int get_effective_context_window(int context_window);
-
-// Calculate auto-compact threshold
-int get_auto_compact_threshold(int context_window);
-
-// Check if auto-compact should trigger. Structurally oversized provider history
-// always triggers. Otherwise, when last_api_prompt_tokens > 0 (from API
-// response), uses that directly and falls back to estimate_message_tokens().
-bool should_auto_compact(const std::vector<ChatMessage>& messages, int context_window, int last_api_prompt_tokens = 0);
-
-// Calculate token warning state
-TokenWarningState calculate_token_warning_state(int estimated_tokens, int context_window);
-
-// ============================================================
-// Context-overflow rescue compact
-// ============================================================
-
-bool is_context_overflow_error(const ProviderErrorInfo& info);
-
-bool should_attempt_context_overflow_rescue(
-    const ProviderErrorInfo& info,
-    int estimated_request_tokens,
-    int context_window,
-    bool model_output_seen
-);
-
-ContextRescueResult rescue_compact_messages(
-    const std::vector<ChatMessage>& messages,
-    const std::string& cwd,
-    int preferred_tail_user_turns = 4
-);
-
-// ============================================================
-// PTL retry helpers (tasks 6.x)
-// ============================================================
-
-struct ApiRoundGroup {
-    int start_index = 0;
-    int end_index = 0; // exclusive
-};
-
-// Group messages into API round groups (user -> assistant -> tool_results)
-std::vector<ApiRoundGroup> group_messages_by_api_round(const std::vector<ChatMessage>& messages);
-
-// Truncate oldest round groups for PTL retry
-std::vector<ChatMessage> truncate_head_for_ptl_retry(
-    const std::vector<ChatMessage>& messages,
-    int groups_to_drop = 0
-);
+    std::atomic<bool>* abort_flag = nullptr);
 
 } // namespace acecode

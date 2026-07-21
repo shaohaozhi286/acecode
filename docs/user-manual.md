@@ -411,10 +411,14 @@ acecode: session <id> saved. Resume with: acecode --resume <id>
 
 当对话历史较长，接近模型上下文窗口限制时：
 
-- **自动压缩**：acecode 会自动触发压缩，保留摘要以节省 token
+- **自动压缩**：当前活动上下文达到模型标称窗口的 90% 时触发；95% 作为有效输入上限。判断会取服务端最近一次上报的 total token 与当前请求的即时估算两者中的较大值
 - **手动压缩**：随时可以输入 `/compact` 主动压缩当前对话历史
 
-Desktop/Web 手动 `/compact` 会显示压缩进度，完成后提示压缩了多少条消息以及估算节省的 token，并把当前 transcript 替换为压缩后的摘要和保留消息；刷新或恢复会话时也会读取压缩后的 JSONL。
+压缩行为与 Codex 的本地 checkpoint 算法一致：模型会看到完整的有效历史和固定的 handoff prompt；生成摘要后，新的模型历史只保留最近的真实 user 消息（总计最多约 20,000 token）以及位于最后的、带 Codex 固定前缀的 summary user 消息。assistant、tool call、tool output 和 reasoning 的关键信息由摘要承接，不会原样复制到新模型历史。如果摘要请求本身超出上下文，acecode 每次只移除最旧的一条逻辑历史消息后重试，并始终保留 checkpoint prompt；若该项属于 tool call/output 对，会同步移除对应项，避免产生无效的孤立 tool 消息。
+
+Desktop、Web 和 TUI 使用同一条串行压缩路径。压缩不会改写或截短人类可见 transcript；JSONL 会追加一个隐藏 checkpoint，记录替换后的模型历史和 compact-window 编号/标识，之后的消息继续追加。刷新、恢复和 fork 会从最新有效 checkpoint 恢复模型历史，再按顺序回放其后的消息。压缩失败时不会写 checkpoint，也不会通过无摘要截断来“抢救”请求。
+
+当前 Chat Completions 类型 provider 使用上述本地算法。只有未来能够原生发送 compaction trigger 并验证 compaction response item 的 provider 才能启用服务端原生压缩。
 
 ---
 

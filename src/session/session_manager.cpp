@@ -8,6 +8,7 @@
 #include "session_usage_ledger.hpp"
 #include "../utils/atomic_file.hpp"
 #include "../utils/logger.hpp"
+#include "../utils/uuid.hpp"
 #include "../utils/utf8_path.hpp"
 
 #include <filesystem>
@@ -169,6 +170,26 @@ std::string canonical_or_absolute_utf8(const std::string& input) {
         if (ec) resolved = p;
     }
     return normalize_path_for_prefix(acecode::path_to_utf8(resolved));
+}
+
+std::vector<acecode::ChatMessage> reset_latest_compact_window_for_fork(
+    const std::vector<acecode::ChatMessage>& retained_prefix) {
+    auto fork_messages = retained_prefix;
+    for (std::size_t i = fork_messages.size(); i > 0; --i) {
+        auto checkpoint =
+            acecode::decode_compact_checkpoint(fork_messages[i - 1]);
+        if (!checkpoint.has_value()) continue;
+
+        const std::string initial_window_id = acecode::generate_uuid_v7();
+        auto& message = fork_messages[i - 1];
+        message.metadata["version"] = acecode::kCompactCheckpointVersion;
+        message.metadata["window_number"] = std::uint64_t{0};
+        message.metadata["first_window_id"] = initial_window_id;
+        message.metadata["previous_window_id"] = std::string{};
+        message.metadata["window_id"] = initial_window_id;
+        break;
+    }
+    return fork_messages;
 }
 
 } // namespace
@@ -615,8 +636,11 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     if (!started_) return {};
     if (!ensure_created()) return {};
 
+    const auto fork_messages =
+        reset_latest_compact_window_for_fork(retained_prefix);
+
     std::set<std::string> retained_user_uuids;
-    for (const auto& msg : retained_prefix) {
+    for (const auto& msg : fork_messages) {
         if (msg.role == "user" && !msg.uuid.empty()) {
             retained_user_uuids.insert(msg.uuid);
         }
@@ -626,7 +650,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     const std::string new_session_id = SessionStorage::generate_session_id();
     auto checkpoint_meta = checkpoint_store_.fork_to_session(new_session_id, retained_user_uuids);
     auto timing_by_user = collect_retained_turn_timing_messages(
-        SessionStorage::load_messages(jsonl_path_), retained_prefix, retained_user_uuids);
+        SessionStorage::load_messages(jsonl_path_), fork_messages, retained_user_uuids);
 
     release_writer_lease_locked();
 
@@ -651,7 +675,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     }
     created_ = true;
 
-    for (auto it = retained_prefix.rbegin(); it != retained_prefix.rend(); ++it) {
+    for (auto it = fork_messages.rbegin(); it != fork_messages.rend(); ++it) {
         if (is_visible_user_turn_message(*it) && !it->content.empty()) {
             last_user_summary_ = extract_summary(it->content);
             break;
@@ -661,7 +685,7 @@ std::string SessionManager::fork_active_session(const std::vector<ChatMessage>& 
     fs::create_directories(project_dir_);
     update_meta();
 
-    for (const auto& msg : retained_prefix) {
+    for (const auto& msg : fork_messages) {
         if (is_file_checkpoint_message(msg)) continue;
         if (is_turn_timing_message(msg)) continue;
         SessionStorage::append_message(jsonl_path_, msg);
@@ -714,6 +738,9 @@ std::string SessionManager::fork_session_to_new_id(
     std::lock_guard<std::mutex> lk(mu_);
     if (!started_) return {};
 
+    const auto fork_messages =
+        reset_latest_compact_window_for_fork(retained_prefix);
+
     // ensure project_dir 存在 — 即使当前 manager 还没 ensure_created
     // (理论上 web fork 调用前 manager 已经 active,但保险)。
     if (project_dir_.empty()) {
@@ -727,14 +754,14 @@ std::string SessionManager::fork_session_to_new_id(
     const std::string new_jsonl = SessionStorage::session_path(project_dir_, new_session_id);
     const std::string new_meta  = SessionStorage::meta_path(project_dir_, new_session_id);
     std::set<std::string> retained_user_uuids;
-    for (const auto& msg : retained_prefix) {
+    for (const auto& msg : fork_messages) {
         if (msg.role == "user" && !msg.uuid.empty()) {
             retained_user_uuids.insert(msg.uuid);
         }
     }
     auto timing_by_user = collect_retained_turn_timing_messages(
         jsonl_path_.empty() ? std::vector<ChatMessage>{} : SessionStorage::load_messages(jsonl_path_),
-        retained_prefix,
+        fork_messages,
         retained_user_uuids);
 
     // 写新 jsonl(过滤 file_checkpoint 元消息;新 session 不继承 checkpoints)
@@ -743,7 +770,7 @@ std::string SessionManager::fork_session_to_new_id(
     std::string last_user_summary;
     bool io_error = false;
     try {
-        for (const auto& msg : retained_prefix) {
+        for (const auto& msg : fork_messages) {
             if (is_file_checkpoint_message(msg)) continue;
             if (is_turn_timing_message(msg)) continue;
             SessionStorage::append_message(new_jsonl, msg);

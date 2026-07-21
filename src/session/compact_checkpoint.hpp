@@ -2,6 +2,7 @@
 
 #include "../provider/llm_provider.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,7 +10,7 @@
 namespace acecode {
 
 constexpr const char* kCompactCheckpointSubtype = "compact_checkpoint";
-constexpr int kCompactCheckpointVersion = 1;
+constexpr int kCompactCheckpointVersion = 2;
 
 struct CompactCheckpoint {
     int version = kCompactCheckpointVersion;
@@ -21,6 +22,10 @@ struct CompactCheckpoint {
     int estimated_tokens_saved = 0;
     int pre_tokens = 0;
     int post_tokens = 0;
+    std::uint64_t window_number = 0;
+    std::string first_window_id;
+    std::string previous_window_id;
+    std::string window_id;
     std::vector<ChatMessage> replacement_history;
 };
 

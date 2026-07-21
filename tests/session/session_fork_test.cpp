@@ -324,6 +324,10 @@ TEST(SessionFork, CompactCheckpointMessagesPreservedForEffectiveHistory) {
     acecode::CompactCheckpoint checkpoint;
     checkpoint.trigger = "manual";
     checkpoint.summary = "old summarized";
+    checkpoint.window_number = 7;
+    checkpoint.first_window_id = "source-first-window";
+    checkpoint.previous_window_id = "source-previous-window";
+    checkpoint.window_id = "source-current-window";
     checkpoint.replacement_history = {make_assistant("[Conversation summary]\nold summarized")};
     auto checkpoint_msg = acecode::encode_compact_checkpoint(checkpoint);
 
@@ -343,6 +347,17 @@ TEST(SessionFork, CompactCheckpointMessagesPreservedForEffectiveHistory) {
     EXPECT_EQ(loaded[0].content, "old prompt");
     EXPECT_TRUE(acecode::is_compact_checkpoint_message(loaded[1]));
     EXPECT_EQ(loaded[2].content, "new prompt");
+
+    auto fork_checkpoint = acecode::decode_compact_checkpoint(loaded[1]);
+    ASSERT_TRUE(fork_checkpoint.has_value());
+    EXPECT_EQ(fork_checkpoint->window_number, 0u);
+    EXPECT_FALSE(fork_checkpoint->window_id.empty());
+    EXPECT_EQ(fork_checkpoint->first_window_id,
+              fork_checkpoint->window_id);
+    EXPECT_TRUE(fork_checkpoint->previous_window_id.empty());
+    EXPECT_NE(fork_checkpoint->window_id, "source-current-window");
+    ASSERT_EQ(fork_checkpoint->window_id.size(), 36u);
+    EXPECT_EQ(fork_checkpoint->window_id[14], '7');
 
     auto effective = acecode::reconstruct_effective_model_history(loaded);
     ASSERT_EQ(effective.size(), 2u);

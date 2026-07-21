@@ -4,14 +4,11 @@
 
 namespace acecode {
 
-// Get the structured compact prompt (no-tools preamble + 9-section template)
-// is_auto: if true, suppresses follow-up questions in output
-std::string get_compact_prompt(bool is_auto = false);
+// These strings intentionally match the pinned Codex checkpoint contract.
+const std::string& get_compact_prompt();
+const std::string& get_compact_summary_prefix();
 
-// Extract <summary> content from LLM response, strip <analysis> block
-std::string format_compact_summary(const std::string& llm_response);
-
-// Wrap the summary text in the final message format for storage
+// Prefix the model-produced suffix exactly as Codex stores it.
 std::string get_compact_user_summary_message(const std::string& summary_text);
 
 } // namespace acecode

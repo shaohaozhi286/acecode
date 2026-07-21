@@ -734,64 +734,14 @@ static void cmd_tokens(CommandContext& ctx, const std::string& /*args*/) {
 }
 
 static void cmd_compact(CommandContext& ctx, const std::string& /*args*/) {
-    {
-        std::lock_guard<std::mutex> lk(ctx.state.mu);
-
-        // Reject if already compacting
-        if (ctx.state.is_compacting) {
-            ctx.state.conversation.push_back({"system", "Compaction already in progress.", false});
-            ctx.state.chat_follow_tail = true;
-            return;
-        }
-
-        ctx.state.is_compacting = true;
-        ctx.state.compact_abort_requested.store(false);
-        ctx.state.conversation.push_back({"system", "Compacting conversation...", false});
-        ctx.state.chat_follow_tail = true;
-    }
-
-    // Join any previous compact thread before launching a new one
-    if (ctx.state.compact_thread.joinable()) {
-        ctx.state.compact_thread.join();
-    }
-
-    // 把 provider 通过 shared_ptr by-value 捕获进线程,生命周期不再依赖 ctx
-    // 的存活期 —— /model 切走旧 provider 时,这里仍持一份 ref-count 保活直到
-    // compact 线程结束。slot 缺失(测试桩)时直接报错并退出。
-    auto provider_snap = ctx.provider_slot ? ctx.provider_slot->provider : nullptr;
-    if (!provider_snap) {
-        std::lock_guard<std::mutex> lk(ctx.state.mu);
-        ctx.state.is_compacting = false;
-        ctx.state.conversation.push_back({"system",
-            "Compaction unavailable: no provider attached.", false});
-        ctx.state.chat_follow_tail = true;
+    // Serialize manual compaction on the AgentLoop worker, the same path used
+    // by daemon sessions. This prevents transcript/model-history races and
+    // gives TUI and web callers identical checkpoint semantics.
+    if (ctx.agent_loop.is_busy()) {
+        ctx.agent_loop.emit_system_message("Compaction unavailable while another operation is active.");
         return;
     }
-
-    auto& agent_loop = ctx.agent_loop;
-    auto& state      = ctx.state;
-    auto post_event  = ctx.post_event;
-
-    ctx.state.compact_thread = std::thread([provider_snap, &agent_loop, &state, post_event]() {
-        auto result = compact_context(*provider_snap, agent_loop, state, 4, false,
-                                      &state.compact_abort_requested);
-
-        {
-            std::lock_guard<std::mutex> lk(state.mu);
-            if (!result.performed) {
-                state.conversation.push_back({"system", result.error, false});
-            } else {
-                std::ostringstream oss;
-                oss << "Compacted " << result.messages_compressed << " messages, saved ~"
-                    << TokenTracker::format_tokens(result.estimated_tokens_saved) << " tokens";
-                state.conversation.push_back({"system", oss.str(), false});
-            }
-            state.is_compacting = false;
-            state.chat_follow_tail = true;
-        }
-
-        if (post_event) post_event();
-    });
+    ctx.agent_loop.submit_compact();
 }
 
 static const char* mcp_state_label(McpServerState s) {

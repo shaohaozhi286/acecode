@@ -60,6 +60,10 @@ ChatMessage encode_compact_checkpoint(const CompactCheckpoint& checkpoint) {
         {"estimated_tokens_saved", checkpoint.estimated_tokens_saved},
         {"pre_tokens", checkpoint.pre_tokens},
         {"post_tokens", checkpoint.post_tokens},
+        {"window_number", checkpoint.window_number},
+        {"first_window_id", checkpoint.first_window_id},
+        {"previous_window_id", checkpoint.previous_window_id},
+        {"window_id", checkpoint.window_id},
         {"replacement_history", std::move(replacement)},
     };
     return msg;
@@ -76,7 +80,7 @@ std::optional<CompactCheckpoint> decode_compact_checkpoint(const ChatMessage& ms
     }
 
     CompactCheckpoint checkpoint;
-    checkpoint.version = metadata.value("version", kCompactCheckpointVersion);
+    checkpoint.version = metadata.value("version", 1);
     checkpoint.id = metadata.value("id", msg.uuid);
     checkpoint.timestamp = metadata.value("timestamp", msg.timestamp);
     checkpoint.trigger = metadata.value("trigger", std::string{});
@@ -85,6 +89,20 @@ std::optional<CompactCheckpoint> decode_compact_checkpoint(const ChatMessage& ms
     checkpoint.estimated_tokens_saved = metadata.value("estimated_tokens_saved", 0);
     checkpoint.pre_tokens = metadata.value("pre_tokens", 0);
     checkpoint.post_tokens = metadata.value("post_tokens", 0);
+    if (metadata.contains("window_number") &&
+        metadata["window_number"].is_number_unsigned()) {
+        checkpoint.window_number =
+            metadata["window_number"].get<std::uint64_t>();
+    } else if (metadata.contains("window_number") &&
+               metadata["window_number"].is_number_integer()) {
+        const auto value = metadata["window_number"].get<std::int64_t>();
+        if (value > 0) {
+            checkpoint.window_number = static_cast<std::uint64_t>(value);
+        }
+    }
+    checkpoint.first_window_id = metadata.value("first_window_id", std::string{});
+    checkpoint.previous_window_id = metadata.value("previous_window_id", std::string{});
+    checkpoint.window_id = metadata.value("window_id", std::string{});
 
     for (const auto& item : metadata["replacement_history"]) {
         auto decoded = message_from_json(item);

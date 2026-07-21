@@ -230,7 +230,7 @@ Returning `decision: "block"` or `continue: false` cannot undo side effects, but
 
 ### `PreCompact` And `PostCompact`
 
-`PreCompact` runs before compact and can stop it with `continue: false`. `PostCompact` runs after transcript replacement and can stop follow-on compact processing.
+`PreCompact` runs once before an actual manual or automatic compact attempt and can stop it with `continue: false`. `PostCompact` runs once after a successful compact checkpoint has installed replacement model history; compaction never replaces the append-only human transcript. A failed compact does not run `PostCompact` and does not install a checkpoint.
 
 ```json
 {

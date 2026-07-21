@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
 #include "commands/compact.hpp"
-#include "commands/micro_compact.hpp"
+#include "commands/compact_prompt.hpp"
+
+#include <deque>
+#include <stdexcept>
 
 namespace {
 
@@ -10,11 +13,21 @@ public:
     acecode::ChatResponse chat(
         const std::vector<acecode::ChatMessage>& messages,
         const std::vector<acecode::ToolDef>&) override {
-        last_messages = messages;
-        acecode::ChatResponse resp;
-        resp.content = response_content;
-        resp.finish_reason = finish_reason;
-        return resp;
+        calls.push_back(messages);
+        if (!exceptions.empty()) {
+            const std::string error = exceptions.front();
+            exceptions.pop_front();
+            throw std::runtime_error(error);
+        }
+        if (!responses.empty()) {
+            auto response = responses.front();
+            responses.pop_front();
+            return response;
+        }
+        acecode::ChatResponse response;
+        response.content = "Important retained context.";
+        response.finish_reason = "stop";
+        return response;
     }
 
     void chat_stream(const std::vector<acecode::ChatMessage>&,
@@ -26,13 +39,27 @@ public:
     bool is_authenticated() override { return true; }
     std::string model() const override { return "stub"; }
     void set_model(const std::string&) override {}
+    bool supports_native_compaction() const override {
+        return native_capability;
+    }
 
-    std::vector<acecode::ChatMessage> last_messages;
-    std::string response_content = "<summary>Important retained context.</summary>";
-    std::string finish_reason = "stop";
+    static acecode::ChatResponse response(std::string content,
+                                          std::string finish_reason = "stop") {
+        acecode::ChatResponse out;
+        out.content = std::move(content);
+        out.finish_reason = std::move(finish_reason);
+        return out;
+    }
+
+    std::vector<std::vector<acecode::ChatMessage>> calls;
+    std::deque<acecode::ChatResponse> responses;
+    std::deque<std::string> exceptions;
+    bool native_capability = false;
 };
 
-acecode::ChatMessage msg(std::string role, std::string content, std::string uuid = {}) {
+acecode::ChatMessage msg(std::string role,
+                         std::string content,
+                         std::string uuid = {}) {
     acecode::ChatMessage out;
     out.role = std::move(role);
     out.content = std::move(content);
@@ -40,302 +67,306 @@ acecode::ChatMessage msg(std::string role, std::string content, std::string uuid
     return out;
 }
 
-std::string long_text(char c) {
-    return std::string(900, c);
+acecode::ChatMessage tool_call_message(const std::string& id) {
+    auto out = msg("assistant", "");
+    out.tool_calls = nlohmann::json::array({
+        {
+            {"id", id},
+            {"type", "function"},
+            {"function", {{"name", "probe"}, {"arguments", "{}"}}},
+        },
+    });
+    return out;
+}
+
+acecode::ChatMessage tool_output_message(const std::string& id) {
+    auto out = msg("tool", "probe output");
+    out.tool_call_id = id;
+    return out;
 }
 
 } // namespace
 
-TEST(CompactCore, SuccessfulCompactionReturnsReplacementMessages) {
+TEST(CompactCore, UsesExactCodexPromptAndSummaryShape) {
     ChatStubProvider provider;
+    std::vector<acecode::ChatMessage> initial_context{
+        msg("system", "stable base instructions"),
+    };
     std::vector<acecode::ChatMessage> messages{
-        msg("user", long_text('a'), "u-old"),
-        msg("assistant", long_text('b')),
-        msg("user", "keep this", "u-keep"),
-        msg("assistant", "kept response"),
+        msg("user", "first request", "u1"),
+        msg("assistant", "first answer"),
+        msg("tool", "tool output"),
+        msg("user", "latest request", "u2"),
     };
 
-    auto result = acecode::compact_messages(provider, messages, "/tmp/project", 1);
+    auto result = acecode::compact_messages(
+        provider, messages, initial_context, false, nullptr);
 
     ASSERT_TRUE(result.performed) << result.error;
-    EXPECT_EQ(result.messages_compressed, 2);
-    EXPECT_GT(result.estimated_tokens_saved, 0);
-    ASSERT_GE(result.compacted_messages.size(), 5u);
-    EXPECT_EQ(result.compacted_messages[0].subtype, "compact_boundary");
-    EXPECT_TRUE(result.compacted_messages[1].is_compact_summary);
-    EXPECT_NE(result.compacted_messages[1].content.find("Important retained context"), std::string::npos);
-    EXPECT_TRUE(result.compacted_messages[2].is_meta);
-    EXPECT_NE(result.compacted_messages[2].content.find("/tmp/project"), std::string::npos);
-    EXPECT_EQ(result.compacted_messages[3].content, "keep this");
-    EXPECT_EQ(provider.last_messages.size(), 2u);
+    ASSERT_EQ(provider.calls.size(), 1u);
+    const auto& request = provider.calls.front();
+    ASSERT_EQ(request.size(), initial_context.size() + messages.size() + 1);
+    EXPECT_EQ(request.front().content, "stable base instructions");
+    EXPECT_EQ(request.back().role, "user");
+    EXPECT_EQ(request.back().content, acecode::get_compact_prompt());
+    EXPECT_EQ(request[2].role, "assistant");
+    EXPECT_EQ(request[3].role, "tool");
+
+    ASSERT_EQ(result.compacted_messages.size(), 3u);
+    EXPECT_EQ(result.compacted_messages[0].content, "first request");
+    EXPECT_EQ(result.compacted_messages[1].content, "latest request");
+    EXPECT_EQ(result.compacted_messages[2].role, "user");
+    EXPECT_TRUE(result.compacted_messages[2].is_compact_summary);
+    EXPECT_EQ(
+        result.compacted_messages[2].content,
+        acecode::get_compact_summary_prefix() +
+            "\nImportant retained context.");
+    EXPECT_EQ(result.summary_text, "Important retained context.");
 }
 
-TEST(CompactCore, InsufficientHistoryDoesNotCallProvider) {
+TEST(CompactCore, EmptyHistoryStillRunsCheckpointPrompt) {
     ChatStubProvider provider;
+
+    auto result = acecode::compact_messages(provider, {});
+
+    ASSERT_TRUE(result.performed) << result.error;
+    ASSERT_EQ(provider.calls.size(), 1u);
+    ASSERT_EQ(provider.calls[0].size(), 1u);
+    EXPECT_EQ(provider.calls[0][0].content, acecode::get_compact_prompt());
+    ASSERT_EQ(result.compacted_messages.size(), 1u);
+    EXPECT_EQ(result.compacted_messages[0].content,
+              acecode::get_compact_summary_prefix() +
+                  "\nImportant retained context.");
+}
+
+TEST(CompactCore, IncompleteNativeCapabilityFallsBackToValidatedLocalPath) {
+    ChatStubProvider provider;
+    provider.native_capability = true;
+
+    auto result = acecode::compact_messages(
+        provider, {msg("user", "keep this request")});
+
+    ASSERT_TRUE(result.performed) << result.error;
+    ASSERT_EQ(provider.calls.size(), 1u);
+    EXPECT_EQ(provider.calls[0].back().content, acecode::get_compact_prompt());
+    EXPECT_EQ(result.compacted_messages.back().content,
+              acecode::get_compact_summary_prefix() +
+                  "\nImportant retained context.");
+}
+
+TEST(CompactCore, RetainsNewestUserTextWithinTwentyThousandTokenBudget) {
+    const std::string old_user(40000, 'a');   // 10,000 approximate tokens
+    const std::string new_user(60000, 'b');   // 15,000 approximate tokens
     std::vector<acecode::ChatMessage> messages{
-        msg("user", "short", "u1"),
-        msg("assistant", "short"),
+        msg("user", old_user, "old"),
+        msg("assistant", "answer"),
+        msg("user", new_user, "new"),
     };
 
-    auto result = acecode::compact_messages(provider, messages, "/tmp/project", 4);
+    auto compacted = acecode::build_compacted_history(messages, "summary");
+
+    ASSERT_EQ(compacted.size(), 3u);
+    EXPECT_EQ(compacted[0].uuid, "old");
+    EXPECT_NE(compacted[0].content.find("5000 tokens truncated"),
+              std::string::npos);
+    EXPECT_EQ(compacted[0].content.substr(0, 32), std::string(32, 'a'));
+    EXPECT_EQ(compacted[0].content.substr(compacted[0].content.size() - 32),
+              std::string(32, 'a'));
+    EXPECT_EQ(compacted[1].uuid, "new");
+    EXPECT_EQ(compacted[1].content, new_user);
+    EXPECT_EQ(compacted[2].content,
+              acecode::get_compact_summary_prefix() + "\nsummary");
+}
+
+TEST(CompactCore, ExcludesPriorSummaryAndNonUserItems) {
+    auto previous_summary = msg(
+        "user",
+        acecode::get_compact_summary_prefix() + "\nold summary");
+    previous_summary.is_compact_summary = true;
+    auto structured_user = msg("user", "real request", "real");
+    structured_user.content_parts = nlohmann::json::array({
+        {{"type", "text"}, {"text", "real request"}},
+        {{"type", "image_url"}, {"image_url", "data:image/png;base64,abc"}},
+    });
+    std::vector<acecode::ChatMessage> messages{
+        std::move(previous_summary),
+        msg("assistant", "assistant detail"),
+        msg("tool", "tool detail"),
+        std::move(structured_user),
+    };
+
+    auto compacted = acecode::build_compacted_history(messages, "new summary");
+
+    ASSERT_EQ(compacted.size(), 2u);
+    EXPECT_EQ(compacted[0].content, "real request");
+    EXPECT_TRUE(compacted[0].content_parts.empty());
+    EXPECT_EQ(compacted[1].content,
+              acecode::get_compact_summary_prefix() + "\nnew summary");
+}
+
+TEST(CompactCore, ExcludesInternalUserContextRows) {
+    auto internal = [](const char* key, const char* content) {
+        auto message = msg("user", content);
+        message.metadata = nlohmann::json{{key, true}};
+        return message;
+    };
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "real request", "real"),
+        internal("hidden_goal_context", "goal steering"),
+        internal("hidden_plan_mode_context", "plan instructions"),
+        internal("hidden_todo_context", "todo injection"),
+        internal("hidden_hook_stop_continuation", "hook continuation"),
+        internal("compact_initial_context", "rebuilt session context"),
+        internal("transcript_only", "human transcript marker"),
+    };
+
+    auto compacted = acecode::build_compacted_history(messages, "summary");
+
+    ASSERT_EQ(compacted.size(), 2u);
+    EXPECT_EQ(compacted[0].uuid, "real");
+    EXPECT_EQ(compacted[0].content, "real request");
+    EXPECT_EQ(compacted[1].content,
+              acecode::get_compact_summary_prefix() + "\nsummary");
+}
+
+TEST(CompactCore, ContextOverflowRemovesOneOldestHistoryItemPerRetry) {
+    ChatStubProvider provider;
+    provider.responses.push_back(ChatStubProvider::response(
+        "maximum context length exceeded", "error"));
+    provider.responses.push_back(ChatStubProvider::response("summary"));
+    std::vector<acecode::ChatMessage> initial_context{
+        msg("system", "stable"),
+    };
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "oldest"),
+        msg("assistant", "middle"),
+        msg("user", "newest"),
+    };
+
+    auto result = acecode::compact_messages(
+        provider, messages, initial_context, true, nullptr);
+
+    ASSERT_TRUE(result.performed) << result.error;
+    ASSERT_EQ(provider.calls.size(), 2u);
+    EXPECT_EQ(provider.calls[0].size(), 5u);
+    EXPECT_EQ(provider.calls[1].size(), 4u);
+    EXPECT_EQ(provider.calls[0][0].content, "stable");
+    EXPECT_EQ(provider.calls[1][0].content, "stable");
+    EXPECT_EQ(provider.calls[0].back().content, acecode::get_compact_prompt());
+    EXPECT_EQ(provider.calls[1].back().content, acecode::get_compact_prompt());
+    EXPECT_EQ(provider.calls[0][1].content, "oldest");
+    EXPECT_EQ(provider.calls[1][1].content, "middle");
+    EXPECT_EQ(result.compaction_request_items_removed, 1);
+}
+
+TEST(CompactCore, OverflowWithOnlyPromptFailsWithoutReplacement) {
+    ChatStubProvider provider;
+    provider.responses.push_back(ChatStubProvider::response(
+        "context_length_exceeded", "error"));
+
+    auto result = acecode::compact_messages(provider, {});
 
     EXPECT_FALSE(result.performed);
-    EXPECT_EQ(result.error, "Not enough conversation history to compact.");
-    EXPECT_TRUE(provider.last_messages.empty());
+    EXPECT_TRUE(result.compacted_messages.empty());
+    EXPECT_NE(result.error.find("no removable history item"), std::string::npos);
 }
 
-TEST(CompactCore, ProviderFailureReturnsError) {
+TEST(CompactCore, ContextOverflowExceptionUsesSameOneItemRetry) {
     ChatStubProvider provider;
-    provider.finish_reason = "error";
-    provider.response_content = "provider unavailable";
+    provider.exceptions.push_back("prompt is too long");
+    provider.responses.push_back(ChatStubProvider::response("summary"));
     std::vector<acecode::ChatMessage> messages{
-        msg("user", long_text('a'), "u-old"),
-        msg("assistant", long_text('b')),
-        msg("user", "keep this", "u-keep"),
-        msg("assistant", "kept response"),
+        msg("user", "oldest"),
+        msg("assistant", "newest"),
     };
 
-    auto result = acecode::compact_messages(provider, messages, "/tmp/project", 1);
+    auto result = acecode::compact_messages(provider, messages);
+
+    ASSERT_TRUE(result.performed) << result.error;
+    ASSERT_EQ(provider.calls.size(), 2u);
+    EXPECT_EQ(provider.calls[0].size(), 3u);
+    EXPECT_EQ(provider.calls[1].size(), 2u);
+    EXPECT_EQ(provider.calls[1][0].content, "newest");
+}
+
+TEST(CompactCore, OverflowRetryRemovesMatchingToolOutputWithOldestCall) {
+    ChatStubProvider provider;
+    provider.responses.push_back(ChatStubProvider::response(
+        "maximum context length exceeded", "error"));
+    provider.responses.push_back(ChatStubProvider::response(
+        "maximum context length exceeded", "error"));
+    provider.responses.push_back(ChatStubProvider::response("summary"));
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "old turn"),
+        tool_call_message("call-old"),
+        tool_output_message("call-old"),
+        msg("user", "new turn"),
+    };
+
+    auto result = acecode::compact_messages(provider, messages);
+
+    ASSERT_TRUE(result.performed) << result.error;
+    ASSERT_EQ(provider.calls.size(), 3u);
+    EXPECT_EQ(provider.calls[0].size(), 5u);
+    EXPECT_EQ(provider.calls[1].size(), 4u);
+    ASSERT_EQ(provider.calls[2].size(), 2u);
+    EXPECT_EQ(provider.calls[2][0].content, "new turn");
+    EXPECT_EQ(provider.calls[2][1].content, acecode::get_compact_prompt());
+    EXPECT_EQ(result.compaction_request_items_removed, 3);
+}
+
+TEST(CompactCore, TerminalFailureDoesNotInstallHistory) {
+    ChatStubProvider provider;
+    provider.responses.push_back(
+        ChatStubProvider::response("provider unavailable", "error"));
+    std::vector<acecode::ChatMessage> messages{msg("user", "request")};
+
+    auto result = acecode::compact_messages(provider, messages);
 
     EXPECT_FALSE(result.performed);
     EXPECT_EQ(result.error, "Summarization failed: provider unavailable");
     EXPECT_TRUE(result.compacted_messages.empty());
 }
 
-TEST(CompactCore, AutoCompactTriggersWhenProviderHistoryExceedsMessageLimit) {
-    std::vector<acecode::ChatMessage> messages;
-    for (int i = 0; i <= acecode::AUTOCOMPACT_MAX_PROVIDER_MESSAGES; ++i) {
-        messages.push_back(msg("user", "x"));
-    }
+TEST(CompactCore, UsesCodexByteTokenEstimateAndUtf8SafeTruncation) {
+    EXPECT_EQ(acecode::approx_token_count(""), 0u);
+    EXPECT_EQ(acecode::approx_token_count("a"), 1u);
+    EXPECT_EQ(acecode::approx_token_count("abcd"), 1u);
+    EXPECT_EQ(acecode::approx_token_count("abcde"), 2u);
 
-    EXPECT_TRUE(acecode::should_auto_compact(messages, 1000000, 1));
+    const std::string chinese = u8"甲乙丙丁戊己庚辛壬癸";
+    const std::string truncated =
+        acecode::truncate_text_to_token_budget(chinese, 2);
+    EXPECT_NE(truncated.find("tokens truncated"), std::string::npos);
+    EXPECT_NO_THROW({
+        nlohmann::json value = truncated;
+        (void)value.dump();
+    });
 }
 
-TEST(CompactCore, AutoCompactStillTriggersFromTokensWithinMessageLimit) {
-    std::vector<acecode::ChatMessage> messages{
-        msg("user", "small history"),
-    };
-    const int context_window = 128000;
-    const int threshold = acecode::get_auto_compact_threshold(context_window);
-
-    EXPECT_TRUE(acecode::should_auto_compact(
-        messages, context_window, threshold + 1));
+TEST(CompactCore, AutomaticThresholdsMatchCodexPercentages) {
+    EXPECT_EQ(acecode::get_effective_context_window(100000), 95000);
+    EXPECT_EQ(acecode::get_auto_compact_threshold(100000), 90000);
+    EXPECT_FALSE(acecode::should_auto_compact(100000, 89999, 100));
+    EXPECT_TRUE(acecode::should_auto_compact(100000, 90000, 100));
+    EXPECT_TRUE(acecode::should_auto_compact(100000, 100, 90000));
 }
 
-TEST(CompactCore, AutoCompactStaysOffWhenTokensAndProviderHistoryAreWithinBounds) {
-    std::vector<acecode::ChatMessage> messages;
-    for (int i = 0; i < acecode::AUTOCOMPACT_MAX_PROVIDER_MESSAGES; ++i) {
-        messages.push_back(msg("assistant", "ok"));
-    }
-    auto transcript_only = msg("system", "not sent to provider");
-    transcript_only.metadata = {{"transcript_only", true}};
-    messages.push_back(std::move(transcript_only));
-
-    EXPECT_FALSE(acecode::should_auto_compact(messages, 1000000, 1));
-}
-
-TEST(CompactCore, ContextOverflowClassificationHandlesCommonProviderShapes) {
+TEST(CompactCore, ContextOverflowClassificationHandlesProviderShapes) {
     acecode::ProviderErrorInfo explicit_code;
     explicit_code.kind = acecode::ProviderErrorKind::Http;
     explicit_code.status_code = 400;
-    explicit_code.raw_body = R"({"error":{"code":"context_length_exceeded"}})";
+    explicit_code.raw_body =
+        R"({"error":{"code":"context_length_exceeded"}})";
     EXPECT_TRUE(acecode::is_context_overflow_error(explicit_code));
-    EXPECT_TRUE(acecode::should_attempt_context_overflow_rescue(
-        explicit_code, 1000, 128000, false));
 
     acecode::ProviderErrorInfo payload_too_large;
     payload_too_large.kind = acecode::ProviderErrorKind::Http;
     payload_too_large.status_code = 413;
     EXPECT_TRUE(acecode::is_context_overflow_error(payload_too_large));
 
-    acecode::ProviderErrorInfo ambiguous_large_request;
-    ambiguous_large_request.kind = acecode::ProviderErrorKind::Http;
-    ambiguous_large_request.status_code = 400;
-    ambiguous_large_request.display_message = "Bad Request";
-    EXPECT_TRUE(acecode::should_attempt_context_overflow_rescue(
-        ambiguous_large_request, 64000, 64000, false));
-    EXPECT_TRUE(acecode::should_attempt_context_overflow_rescue(
-        ambiguous_large_request, 64000, 200000, false));
-    EXPECT_FALSE(acecode::should_attempt_context_overflow_rescue(
-        ambiguous_large_request, 1000, 200000, false));
-
     acecode::ProviderErrorInfo network;
     network.kind = acecode::ProviderErrorKind::Network;
     network.display_message = "connection reset";
-    EXPECT_FALSE(acecode::should_attempt_context_overflow_rescue(
-        network, 64000, 64000, false));
-    EXPECT_FALSE(acecode::should_attempt_context_overflow_rescue(
-        explicit_code, 64000, 64000, true));
-}
-
-TEST(CompactCore, RescueCompactPreservesRecentTailWithoutProviderCall) {
-    std::vector<acecode::ChatMessage> messages{
-        msg("user", "old user 0 " + long_text('a'), "u-old-0"),
-        msg("assistant", "old assistant 0 " + long_text('b')),
-        msg("user", "old user 1 " + long_text('c'), "u-old-1"),
-        msg("assistant", "old assistant 1 " + long_text('d')),
-        msg("user", "latest user", "u-latest"),
-        msg("assistant", "latest assistant"),
-    };
-
-    auto result = acecode::rescue_compact_messages(messages, "/tmp/project", 1);
-
-    ASSERT_TRUE(result.performed) << result.error;
-    EXPECT_TRUE(result.can_retry);
-    EXPECT_EQ(result.messages_removed, 4);
-    EXPECT_EQ(result.protected_user_turns, 1);
-    EXPECT_LT(result.estimated_tokens_after, result.estimated_tokens_before);
-    ASSERT_GE(result.compacted_messages.size(), 5u);
-    EXPECT_EQ(result.compacted_messages[0].subtype, "compact_boundary");
-    EXPECT_TRUE(result.compacted_messages[1].is_compact_summary);
-    EXPECT_NE(result.compacted_messages[1].content.find("detailed summary was not generated"),
-              std::string::npos);
-    EXPECT_TRUE(result.compacted_messages[2].is_meta);
-    EXPECT_NE(result.compacted_messages[2].content.find("/tmp/project"), std::string::npos);
-    EXPECT_EQ(result.compacted_messages[3].content, "latest user");
-    EXPECT_EQ(result.compacted_messages[4].content, "latest assistant");
-}
-
-TEST(CompactCore, RescueCompactReturnsClearErrorWhenSingleTurnCannotShrink) {
-    std::vector<acecode::ChatMessage> messages{
-        msg("user", long_text('x'), "u-only"),
-    };
-
-    auto result = acecode::rescue_compact_messages(messages, "/tmp/project", 4);
-
-    EXPECT_FALSE(result.performed);
-    EXPECT_FALSE(result.can_retry);
-    EXPECT_TRUE(result.compacted_messages.empty());
-    EXPECT_NE(result.error.find("too large"), std::string::npos);
-    EXPECT_EQ(result.estimated_tokens_after, result.estimated_tokens_before);
-}
-
-TEST(CompactCore, CountableUserTurnIgnoresHiddenGoalContext) {
-    auto real = msg("user", "real question");
-    auto goal = msg("user", "<goal_context>continue</goal_context>");
-    goal.metadata = {{"hidden_goal_context", true}};
-    auto todo = msg("user", "<todo_context>");
-    todo.metadata = {{"hidden_todo_context", true}};
-
-    EXPECT_TRUE(acecode::is_countable_user_turn(real));
-    EXPECT_FALSE(acecode::is_countable_user_turn(goal));
-    EXPECT_FALSE(acecode::is_countable_user_turn(todo));
-}
-
-TEST(CompactCore, CompactKeepTurnsSkipsHiddenGoalContext) {
-    ChatStubProvider provider;
-    std::vector<acecode::ChatMessage> messages{
-        msg("user", long_text('a'), "u-old"),
-        msg("assistant", long_text('b')),
-        msg("user", "keep this real user", "u-keep"),
-        msg("assistant", "kept response"),
-    };
-    auto goal = msg("user", "<goal_context>continue work</goal_context>", "u-goal");
-    goal.metadata = {{"hidden_goal_context", true}};
-    messages.push_back(std::move(goal));
-    messages.push_back(msg("assistant", "goal turn response"));
-
-    // keep_turns=1 must retain the real user turn, not treat goal injection as
-    // the only protected user message (which would drop "keep this real user").
-    auto result = acecode::compact_messages(provider, messages, "/tmp/project", 1);
-
-    ASSERT_TRUE(result.performed) << result.error;
-    bool saw_real_keep = false;
-    bool saw_goal = false;
-    for (const auto& m : result.compacted_messages) {
-        if (m.content == "keep this real user") saw_real_keep = true;
-        if (m.metadata.is_object() &&
-            m.metadata.value("hidden_goal_context", false)) {
-            saw_goal = true;
-        }
-    }
-    EXPECT_TRUE(saw_real_keep);
-    EXPECT_TRUE(saw_goal);
-}
-
-acecode::ChatMessage tool_call(const std::string& id, const std::string& name) {
-    acecode::ChatMessage out;
-    out.role = "assistant";
-    out.content = "";
-    out.tool_calls = nlohmann::json::array({
-        {
-            {"id", id},
-            {"type", "function"},
-            {"function", {{"name", name}, {"arguments", "{}"}}},
-        },
-    });
-    return out;
-}
-
-acecode::ChatMessage tool_result(const std::string& id, const std::string& content) {
-    acecode::ChatMessage out;
-    out.role = "tool";
-    out.tool_call_id = id;
-    out.content = content;
-    return out;
-}
-
-TEST(MicroCompact, ProtectsRecentUserTurnToolResults) {
-    std::vector<acecode::ChatMessage> messages{
-        msg("user", "old"),
-        tool_call("c-old", "file_read"),
-        tool_result("c-old", std::string(2000, 'O')),
-        msg("user", "recent"),
-        tool_call("c-new", "file_read"),
-        tool_result("c-new", std::string(2000, 'N')),
-    };
-
-    auto result = acecode::run_micro_compact(messages, 0, 1);
-
-    ASSERT_TRUE(result.performed);
-    EXPECT_EQ(result.tool_results_cleared, 1);
-    EXPECT_EQ(messages[2].content, "[Older tool output omitted from context]");
-    EXPECT_EQ(messages[5].content, std::string(2000, 'N'));
-}
-
-TEST(MicroCompact, NeverClearsFileEditOrWriteResults) {
-    std::vector<acecode::ChatMessage> messages{
-        msg("user", "old edit"),
-        tool_call("c-edit", "file_edit"),
-        tool_result("c-edit", std::string(2000, 'E')),
-        tool_call("c-write", "file_write"),
-        tool_result("c-write", std::string(2000, 'W')),
-        msg("user", "later"),
-        msg("assistant", "ok"),
-        msg("user", "later2"),
-        msg("assistant", "ok2"),
-        msg("user", "later3"),
-        msg("assistant", "ok3"),
-        msg("user", "later4"),
-        msg("assistant", "ok4"),
-    };
-
-    auto result = acecode::run_micro_compact(messages, 0, 4);
-
-    EXPECT_FALSE(result.performed);
-    EXPECT_EQ(messages[2].content, std::string(2000, 'E'));
-    EXPECT_EQ(messages[4].content, std::string(2000, 'W'));
-}
-
-TEST(MicroCompact, ProtectsEverythingWhenFewerThanKeepUserTurns) {
-    // Previously, not reaching keep_assistant_turns left cutoff at end and
-    // wiped *all* tool results. With insufficient real user turns we must
-    // clear nothing.
-    std::vector<acecode::ChatMessage> messages{
-        msg("user", "only one real turn"),
-        tool_call("c1", "bash"),
-        tool_result("c1", std::string(2000, 'x')),
-        msg("assistant", "done"),
-    };
-    auto goal = msg("user", "<goal_context>continue</goal_context>");
-    goal.metadata = {{"hidden_goal_context", true}};
-    messages.push_back(std::move(goal));
-    messages.push_back(tool_call("c2", "bash"));
-    messages.push_back(tool_result("c2", std::string(2000, 'y')));
-
-    auto result = acecode::run_micro_compact(messages, 0, 4);
-
-    EXPECT_FALSE(result.performed);
-    EXPECT_EQ(messages[2].content, std::string(2000, 'x'));
-    EXPECT_EQ(messages[6].content, std::string(2000, 'y'));
+    EXPECT_FALSE(acecode::is_context_overflow_error(network));
 }
