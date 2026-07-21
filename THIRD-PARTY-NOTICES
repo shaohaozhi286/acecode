@@ -1,0 +1,22 @@
+# Third-Party Notices
+
+## Grok Build terminal Mermaid renderer
+
+Portions of `src/markdown/mermaid_renderer.cpp` are adapted from the
+terminal Mermaid renderer in xAI Grok Build:
+
+https://github.com/xai-org/grok-build
+
+Upstream repository revision:
+`ba76b0a683fa52e4e60685017b85905451be17bc`
+
+Copyright 2023-2026 SpaceXAI
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this component except in compliance with the License. A copy of the
+License is included at `LICENSES/Apache-2.0.txt`.
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations.

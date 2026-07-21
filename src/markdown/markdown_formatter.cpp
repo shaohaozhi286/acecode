@@ -1,5 +1,6 @@
 #include "markdown_formatter.hpp"
 #include "markdown_lexer.hpp"
+#include "mermaid_renderer.hpp"
 #include "syntax_highlight.hpp"
 #include "tui/text_style.hpp"
 #include "tui/theme_palette.hpp"
@@ -399,6 +400,38 @@ struct FormatContext {
 
 static Element format_block_token(const Token& token, const FormatContext& ctx);
 
+static Color mermaid_role_color(MermaidRole role) {
+    const auto& palette = acecode::tui::theme();
+    switch (role) {
+        case MermaidRole::Border: return palette.ui.border;
+        case MermaidRole::NodeText: return palette.markdown.block_code_text;
+        case MermaidRole::Edge: return palette.ui.text_dim;
+        case MermaidRole::EdgeLabel: return palette.markdown.italic;
+        case MermaidRole::Title: return palette.markdown.heading;
+        case MermaidRole::Hint: return palette.ui.text_secondary;
+    }
+    return palette.markdown.block_code_text;
+}
+
+static Element format_mermaid_art(const MermaidArt& art) {
+    Elements rows;
+    rows.reserve(art.lines.size());
+    for (const auto& line : art.lines) {
+        Elements spans;
+        spans.reserve(line.spans.size());
+        for (const auto& span : line.spans) {
+            Element element = text(span.text) | color(mermaid_role_color(span.role));
+            if (span.italic) element = element | italic;
+            spans.push_back(std::move(element));
+        }
+        rows.push_back(spans.empty() ? text("") : hbox(std::move(spans)));
+    }
+    return vbox({
+        hbox({text("  "), vbox(std::move(rows))}),
+        text("")
+    });
+}
+
 // Format a list of block tokens
 static Element format_blocks(const std::vector<Token>& tokens, const FormatContext& ctx) {
     Elements elems;
@@ -436,6 +469,19 @@ static Element format_block_token(const Token& token, const FormatContext& ctx) 
 
     // -- Code block --
     case TokenType::Code: {
+        if (token.lang == "mermaid" &&
+            token.text.find_first_not_of(" \t\r\n") != std::string::npos) {
+            try {
+                const int width = std::max(8, ctx.opts.terminal_width - 2);
+                if (auto art = render_mermaid_terminal(token.text, width)) {
+                    return format_mermaid_art(*art);
+                }
+            } catch (...) {
+                // Untrusted diagram input must never break message rendering.
+                // Continue through the ordinary fenced-code presentation.
+            }
+        }
+
         Elements code_elements;
 
         // Language label
