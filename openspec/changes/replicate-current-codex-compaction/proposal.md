@@ -11,6 +11,8 @@ ACECode currently compacts with a custom keep-last-turns summarizer, a separate 
 - When a compaction request itself exceeds context, retry by removing the oldest model-history item one at a time while always retaining the compaction prompt; remove a matching tool call/output counterpart with that item when required to keep the request valid, matching Codex's local fallback behavior.
 - Preserve the append-only human transcript while storing the Codex-shaped replacement model history in compact checkpoints for resume and fork.
 - Track compact-window generations and token state so each successful compact starts a fresh model-history epoch and subsequent usage is recomputed from the installed replacement history.
+- Preserve Codex's handoff boundary in the next normal model request: estimate a pending pre-turn user input without summarizing it, compact the old history before recording that input, and insert rebuilt mutable context before the last real user message or fallback summary without rewriting or trailing the summary.
+- Carry structured errors through non-streaming provider responses and retry retryable non-context compaction failures with the provider's stream retry budget and exponential backoff; trim history only for explicitly classified context-window overflow.
 - Keep provider-native remote compaction capability-gated. ACECode's current providers expose chat-message turns rather than Responses API items, so unsupported providers use the Codex local algorithm instead of fabricating an incompatible remote-compaction payload.
 
 ## Capabilities
@@ -25,7 +27,7 @@ None.
 
 ## Impact
 
-- Core implementation: `src/commands/compact.*`, `src/commands/compact_prompt.*`, `src/agent_loop.*`, and compact-sensitive runtime guards.
+- Core implementation: `src/commands/compact.*`, `src/commands/compact_prompt.*`, `src/agent_loop.*`, provider response/error plumbing, and compact-sensitive runtime guards.
 - Session lifecycle: `src/session/compact_checkpoint.*`, resume/registry/fork reconstruction, and compact checkpoint metadata.
 - Tests: compact core, agent-loop compaction lifecycle, checkpoint round trips, resume, registry, and fork coverage.
 - Documentation: user manual, daemon API, and hook descriptions that currently describe the old replacement shape or micro/rescue behavior.

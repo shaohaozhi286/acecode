@@ -4,6 +4,7 @@
 - [x] 1.2 Implement real-user-message selection, prior-summary filtering, model-aware 20,000-token retention, and oldest-boundary truncation
 - [x] 1.3 Replace grouped prompt trimming with oldest-item-at-a-time context-overflow retries that preserve the checkpoint prompt
 - [x] 1.4 Add compact-core tests for empty history, exact request/summary shape, retention boundaries, prior summaries, and terminal failures
+- [x] 1.5 Carry structured errors through non-streaming providers and add bounded abort-aware retries with strict context-overflow classification
 
 ## 2. Runtime Lifecycle and Accounting
 
@@ -11,6 +12,8 @@
 - [x] 2.2 Run the same non-destructive compact lifecycle before initial and tool-follow-up sampling without consuming one-shot request context
 - [x] 2.3 Remove micro-compaction, failure circuit breaking, grouped trimming, and summary-free provider-overflow rescue from the active runtime
 - [x] 2.4 Update agent-loop tests for pre-turn, mid-turn, hook ordering, stale server usage, many small messages, success resets, and failure atomicity
+- [x] 2.5 Estimate pending pre-turn input without compacting it and inject mutable context at the Codex handoff boundary
+- [x] 2.6 Add exact-order agent-loop regressions for pre-turn pending input and mid-turn summary finality
 
 ## 3. Persistence and Reconstruction
 
@@ -22,3 +25,4 @@
 
 - [x] 4.1 Update compact command, hook, session, and daemon documentation to describe the Codex-compatible behavior and removed legacy paths
 - [x] 4.2 Run strict OpenSpec validation, focused compaction/session tests, the full unit suite, code-quality checks, and release build gates
+- [x] 4.3 Document and validate handoff-boundary and transient-retry parity, then rebuild the runnable test instance

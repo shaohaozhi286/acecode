@@ -107,6 +107,7 @@ ChatResponse CodexProvider::chat(
         } else if (evt.type == StreamEventType::Error) {
             response.content = "[Error] " + evt.error;
             response.finish_reason = "error";
+            response.provider_error = evt.provider_error;
         }
     });
     return response;

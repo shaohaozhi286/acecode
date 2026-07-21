@@ -18,6 +18,7 @@ struct CompactResult {
     int messages_compressed = 0;
     int estimated_tokens_saved = 0;
     int compaction_request_items_removed = 0;
+    int compaction_request_retries = 0;
     std::string summary_text;
     std::vector<ChatMessage> compacted_messages;
     std::string error;
@@ -62,6 +63,14 @@ TokenWarningState calculate_token_warning_state(int estimated_tokens,
 
 bool is_context_overflow_error(const ProviderErrorInfo& info);
 bool is_context_overflow_error(const std::string& error_message);
+bool is_retryable_compaction_error(const ProviderErrorInfo& info);
+
+// Insert rebuilt request-local context at Codex's handoff boundary: before the
+// last real user message, or before the compact summary when no real user
+// message remains. Existing history content is never rewritten.
+void insert_context_before_last_real_user_or_summary(
+    std::vector<ChatMessage>& messages,
+    std::vector<ChatMessage> context);
 
 // Run Codex-compatible local compaction. initial_context contains stable
 // base/session instructions that are always retained during overflow retries.

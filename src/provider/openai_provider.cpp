@@ -565,6 +565,14 @@ ProviderErrorInfo make_provider_error(ProviderErrorKind kind,
     return info;
 }
 
+ChatResponse make_chat_error_response(ProviderErrorInfo info) {
+    ChatResponse response;
+    response.content = "[Error] " + info.display_message;
+    response.finish_reason = "error";
+    response.provider_error = std::move(info);
+    return response;
+}
+
 void emit_provider_error(const StreamCallback& callback, const ProviderErrorInfo& info) {
     StreamEvent evt;
     evt.type = StreamEventType::Error;
@@ -1075,10 +1083,15 @@ ChatResponse OpenAiCompatProvider::chat(
     std::string header_error;
     auto resolved_headers = resolve_request_headers(request_headers_, header_error);
     if (!resolved_headers.has_value()) {
-        ChatResponse resp;
-        resp.content = "[Error] " + header_error;
-        resp.finish_reason = "error";
-        return resp;
+        return make_chat_error_response(make_provider_error(
+            ProviderErrorKind::Unknown,
+            0,
+            name(),
+            model_,
+            std::string{},
+            std::string{},
+            header_error,
+            false));
     }
     for (const auto& [k, v] : *resolved_headers) {
         headers[k] = v;
@@ -1096,17 +1109,29 @@ ChatResponse OpenAiCompatProvider::chat(
     );
 
     if (r.status_code == 0) {
-        ChatResponse resp;
-        resp.content = "[Error] Connection failed: " + r.error.message;
-        resp.finish_reason = "error";
-        return resp;
+        const ProviderErrorKind kind = classify_cpr_error(r.error);
+        return make_chat_error_response(make_provider_error(
+            kind,
+            0,
+            name(),
+            model_,
+            extract_request_id(r.header),
+            r.text,
+            r.error.message,
+            kind == ProviderErrorKind::Timeout ||
+                kind == ProviderErrorKind::Network));
     }
 
     if (r.status_code != 200) {
-        ChatResponse resp;
-        resp.content = "[Error] HTTP " + std::to_string(r.status_code) + ": " + r.text;
-        resp.finish_reason = "error";
-        return resp;
+        return make_chat_error_response(make_provider_error(
+            ProviderErrorKind::Http,
+            static_cast<int>(r.status_code),
+            name(),
+            model_,
+            extract_request_id(r.header),
+            r.text,
+            std::string{},
+            is_retryable_http_status(static_cast<int>(r.status_code), r.text)));
     }
 
     try {
@@ -1131,10 +1156,15 @@ ChatResponse OpenAiCompatProvider::chat(
         }
         return resp;
     } catch (const nlohmann::json::parse_error& e) {
-        ChatResponse resp;
-        resp.content = "[Error] Failed to parse response JSON: " + std::string(e.what());
-        resp.finish_reason = "error";
-        return resp;
+        return make_chat_error_response(make_provider_error(
+            ProviderErrorKind::MalformedJson,
+            200,
+            name(),
+            model_,
+            extract_request_id(r.header),
+            r.text,
+            e.what(),
+            false));
     }
 }
 

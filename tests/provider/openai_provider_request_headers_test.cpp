@@ -212,5 +212,31 @@ TEST(OpenAiProviderRequestHeadersTest, MissingEnvFailsBeforeNetwork) {
     auto response = provider.chat(one_user_message(), {});
     EXPECT_EQ(response.finish_reason, "error");
     EXPECT_NE(response.content.find("ACE_PROVIDER_MISSING_HEADER"), std::string::npos);
+    EXPECT_TRUE(response.provider_error.has_error());
+    EXPECT_FALSE(response.provider_error.retryable);
     EXPECT_EQ(hit_count.load(), 0);
+}
+
+TEST(OpenAiProviderRequestHeadersTest, NonStreamingHttpErrorIsStructured) {
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/chat/completions", [&](const httplib::Request&, httplib::Response& res) {
+            res.status = 429;
+            res.set_header("x-request-id", "req-compact-retry");
+            res.set_content(
+                R"({"error":{"code":"rate_limit_exceeded","message":"slow down"}})",
+                "application/json");
+        });
+    });
+    OpenAiCompatProvider provider(
+        server.base_url(), "sk-test", "test-model");
+
+    auto response = provider.chat(one_user_message(), {});
+
+    EXPECT_EQ(response.finish_reason, "error");
+    EXPECT_EQ(response.provider_error.kind, acecode::ProviderErrorKind::Http);
+    EXPECT_EQ(response.provider_error.status_code, 429);
+    EXPECT_EQ(response.provider_error.request_id, "req-compact-retry");
+    EXPECT_TRUE(response.provider_error.retryable);
+    EXPECT_NE(response.provider_error.raw_body.find("rate_limit_exceeded"),
+              std::string::npos);
 }

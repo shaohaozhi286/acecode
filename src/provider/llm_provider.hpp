@@ -72,17 +72,6 @@ struct TokenUsage {
     bool has_data = false; // true if server returned usage info
 };
 
-struct ChatResponse {
-    std::string content;               // text reply (empty if tool_calls present)
-    nlohmann::json content_parts = nlohmann::json::array(); // optional structured output parts
-    std::string reasoning_content;     // chain-of-thought (DeepSeek thinking etc.)
-    std::vector<ToolCall> tool_calls;  // empty if pure text reply
-    std::string finish_reason;         // "stop", "tool_calls", etc.
-    TokenUsage usage;
-
-    bool has_tool_calls() const { return !tool_calls.empty(); }
-};
-
 struct ToolDef {
     std::string name;
     std::string description;
@@ -116,6 +105,20 @@ struct ProviderErrorInfo {
     int retry_delay_ms = 0;
 
     bool has_error() const { return kind != ProviderErrorKind::None; }
+};
+
+struct ChatResponse {
+    std::string content;               // text reply (empty if tool_calls present)
+    nlohmann::json content_parts = nlohmann::json::array(); // optional structured output parts
+    std::string reasoning_content;     // chain-of-thought (DeepSeek thinking etc.)
+    std::vector<ToolCall> tool_calls;  // empty if pure text reply
+    std::string finish_reason;         // "stop", "tool_calls", etc.
+    TokenUsage usage;
+    // Non-streaming calls preserve the same structured failure contract as
+    // StreamEvent::provider_error. It is populated when finish_reason == "error".
+    ProviderErrorInfo provider_error;
+
+    bool has_tool_calls() const { return !tool_calls.empty(); }
 };
 
 // 400/401 视为「认证形态」HTTP 错误 —— 连接器自动恢复(on_auth_error 钩子)
@@ -185,6 +188,10 @@ public:
 
     virtual std::string model() const = 0;
     virtual void set_model(const std::string& m) = 0;
+
+    // Sampling-class retry budget. Codex defaults stream_max_retries to five;
+    // providers and tests may override their effective policy.
+    virtual int stream_max_retries() const { return 5; }
 
     // Native Responses-style compaction requires provider-specific trigger and
     // response-item support. Chat providers remain on local compaction. A

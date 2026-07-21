@@ -176,6 +176,8 @@ TEST(AnthropicProviderTest, MissingApiKeyFailsBeforeNetwork) {
     auto response = provider.chat({user_message("hi")}, {});
     EXPECT_EQ(response.finish_reason, "error");
     EXPECT_NE(response.content.find("missing Anthropic API key"), std::string::npos);
+    EXPECT_EQ(response.provider_error.kind, ProviderErrorKind::Unknown);
+    EXPECT_FALSE(response.provider_error.retryable);
     EXPECT_EQ(hits.load(), 0);
 
     int error_events = 0;
@@ -192,6 +194,30 @@ TEST(AnthropicProviderTest, MissingApiKeyFailsBeforeNetwork) {
     EXPECT_EQ(kind, ProviderErrorKind::Unknown);
     EXPECT_NE(error.find("missing Anthropic API key"), std::string::npos);
     EXPECT_EQ(hits.load(), 0);
+}
+
+TEST(AnthropicProviderTest, NonStreamingHttpErrorIsStructured) {
+    LocalHttpServer server([&](httplib::Server& s) {
+        s.Post("/messages", [&](const httplib::Request&, httplib::Response& res) {
+            res.status = 503;
+            res.set_header("request-id", "req-anthropic-compact");
+            res.set_content(
+                R"({"type":"error","error":{"type":"overloaded_error","message":"overloaded"}})",
+                "application/json");
+        });
+    });
+    AnthropicProvider provider(
+        server.base_url(), "sk-ant-test", "claude-test", 5000);
+
+    auto response = provider.chat({user_message("hi")}, {});
+
+    EXPECT_EQ(response.finish_reason, "error");
+    EXPECT_EQ(response.provider_error.kind, ProviderErrorKind::Http);
+    EXPECT_EQ(response.provider_error.status_code, 503);
+    EXPECT_EQ(response.provider_error.request_id, "req-anthropic-compact");
+    EXPECT_TRUE(response.provider_error.retryable);
+    EXPECT_NE(response.provider_error.raw_body.find("overloaded_error"),
+              std::string::npos);
 }
 
 TEST(AnthropicProviderTest, StreamParsesTextToolUseUsageAndDone) {

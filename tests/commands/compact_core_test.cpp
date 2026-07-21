@@ -5,6 +5,7 @@
 
 #include <deque>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -42,6 +43,7 @@ public:
     bool supports_native_compaction() const override {
         return native_capability;
     }
+    int stream_max_retries() const override { return retry_budget; }
 
     static acecode::ChatResponse response(std::string content,
                                           std::string finish_reason = "stop") {
@@ -55,6 +57,7 @@ public:
     std::deque<acecode::ChatResponse> responses;
     std::deque<std::string> exceptions;
     bool native_capability = false;
+    int retry_budget = 5;
 };
 
 acecode::ChatMessage msg(std::string role,
@@ -83,6 +86,34 @@ acecode::ChatMessage tool_output_message(const std::string& id) {
     auto out = msg("tool", "probe output");
     out.tool_call_id = id;
     return out;
+}
+
+acecode::ChatResponse provider_error_response(
+    acecode::ProviderErrorKind kind,
+    int status_code,
+    std::string message,
+    bool retryable,
+    std::string raw_body = {}) {
+    auto response = ChatStubProvider::response(message, "error");
+    response.provider_error.kind = kind;
+    response.provider_error.status_code = status_code;
+    response.provider_error.display_message = std::move(message);
+    response.provider_error.raw_body = std::move(raw_body);
+    response.provider_error.retryable = retryable;
+    return response;
+}
+
+void expect_same_request(const std::vector<acecode::ChatMessage>& lhs,
+                         const std::vector<acecode::ChatMessage>& rhs) {
+    ASSERT_EQ(lhs.size(), rhs.size());
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        EXPECT_EQ(lhs[i].role, rhs[i].role) << "message index " << i;
+        EXPECT_EQ(lhs[i].content, rhs[i].content) << "message index " << i;
+        EXPECT_EQ(lhs[i].tool_call_id, rhs[i].tool_call_id)
+            << "message index " << i;
+        EXPECT_EQ(lhs[i].tool_calls, rhs[i].tool_calls)
+            << "message index " << i;
+    }
 }
 
 } // namespace
@@ -229,6 +260,47 @@ TEST(CompactCore, ExcludesInternalUserContextRows) {
               acecode::get_compact_summary_prefix() + "\nsummary");
 }
 
+TEST(CompactCore, InsertsMutableContextBeforeLastRealUserAndKeepsSummaryFinal) {
+    auto summary = msg(
+        "user", acecode::get_compact_summary_prefix() + "\nsummary");
+    summary.is_compact_summary = true;
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "older request"),
+        msg("user", "active request"),
+        std::move(summary),
+    };
+    std::vector<acecode::ChatMessage> context{
+        msg("user", "session context"),
+        msg("user", "request context"),
+    };
+
+    acecode::insert_context_before_last_real_user_or_summary(
+        messages, std::move(context));
+
+    ASSERT_EQ(messages.size(), 5u);
+    EXPECT_EQ(messages[0].content, "older request");
+    EXPECT_EQ(messages[1].content, "session context");
+    EXPECT_EQ(messages[2].content, "request context");
+    EXPECT_EQ(messages[3].content, "active request");
+    EXPECT_EQ(messages[4].content,
+              acecode::get_compact_summary_prefix() + "\nsummary");
+}
+
+TEST(CompactCore, InsertsMutableContextBeforeSummaryWhenNoRealUserRemains) {
+    auto summary = msg(
+        "user", acecode::get_compact_summary_prefix() + "\nsummary");
+    summary.is_compact_summary = true;
+    std::vector<acecode::ChatMessage> messages{std::move(summary)};
+
+    acecode::insert_context_before_last_real_user_or_summary(
+        messages, {msg("user", "session context")});
+
+    ASSERT_EQ(messages.size(), 2u);
+    EXPECT_EQ(messages[0].content, "session context");
+    EXPECT_EQ(messages[1].content,
+              acecode::get_compact_summary_prefix() + "\nsummary");
+}
+
 TEST(CompactCore, ContextOverflowRemovesOneOldestHistoryItemPerRetry) {
     ChatStubProvider provider;
     provider.responses.push_back(ChatStubProvider::response(
@@ -328,6 +400,105 @@ TEST(CompactCore, TerminalFailureDoesNotInstallHistory) {
     EXPECT_TRUE(result.compacted_messages.empty());
 }
 
+TEST(CompactCore, RetriesStructuredTransientErrorWithoutRemovingHistory) {
+    ChatStubProvider provider;
+    provider.retry_budget = 1;
+    provider.responses.push_back(provider_error_response(
+        acecode::ProviderErrorKind::Http,
+        429,
+        "rate limited",
+        true,
+        R"({"error":{"code":"rate_limit_exceeded"}})"));
+    provider.responses.push_back(ChatStubProvider::response("summary"));
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "oldest"),
+        msg("assistant", "newest"),
+    };
+
+    auto result = acecode::compact_messages(provider, messages);
+
+    ASSERT_TRUE(result.performed) << result.error;
+    ASSERT_EQ(provider.calls.size(), 2u);
+    expect_same_request(provider.calls[0], provider.calls[1]);
+    EXPECT_EQ(result.compaction_request_retries, 1);
+    EXPECT_EQ(result.compaction_request_items_removed, 0);
+}
+
+TEST(CompactCore, ExhaustedTransientRetryBudgetFailsAtomically) {
+    ChatStubProvider provider;
+    provider.retry_budget = 1;
+    provider.responses.push_back(provider_error_response(
+        acecode::ProviderErrorKind::Http, 503, "overloaded", true));
+    provider.responses.push_back(provider_error_response(
+        acecode::ProviderErrorKind::Http, 503, "still overloaded", true));
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "oldest"),
+        msg("assistant", "newest"),
+    };
+
+    auto result = acecode::compact_messages(provider, messages);
+
+    EXPECT_FALSE(result.performed);
+    EXPECT_EQ(provider.calls.size(), 2u);
+    expect_same_request(provider.calls[0], provider.calls[1]);
+    EXPECT_EQ(result.compaction_request_retries, 1);
+    EXPECT_EQ(result.compaction_request_items_removed, 0);
+    EXPECT_TRUE(result.compacted_messages.empty());
+    EXPECT_NE(result.error.find("still overloaded"), std::string::npos);
+}
+
+TEST(CompactCore, CancellationInterruptsTransientRetryBackoff) {
+    ChatStubProvider provider;
+    provider.retry_budget = 5;
+    provider.responses.push_back(provider_error_response(
+        acecode::ProviderErrorKind::Timeout, 0, "timed out", true));
+    std::atomic<bool> abort_flag{false};
+    std::thread canceller([&abort_flag] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(75));
+        abort_flag.store(true);
+    });
+
+    auto result = acecode::compact_messages(
+        provider, {msg("user", "request")}, {}, false, &abort_flag);
+    canceller.join();
+
+    EXPECT_FALSE(result.performed);
+    EXPECT_EQ(provider.calls.size(), 1u);
+    EXPECT_EQ(result.compaction_request_retries, 1);
+    EXPECT_EQ(result.error, "Compaction cancelled.");
+}
+
+TEST(CompactCore, ContextRemovalResetsTransientRetryBudget) {
+    ChatStubProvider provider;
+    provider.retry_budget = 1;
+    provider.responses.push_back(provider_error_response(
+        acecode::ProviderErrorKind::Timeout, 0, "timed out", true));
+    provider.responses.push_back(provider_error_response(
+        acecode::ProviderErrorKind::Http,
+        400,
+        "maximum context length exceeded",
+        false,
+        R"({"error":{"code":"context_length_exceeded"}})"));
+    provider.responses.push_back(provider_error_response(
+        acecode::ProviderErrorKind::Http, 503, "overloaded", true));
+    provider.responses.push_back(ChatStubProvider::response("summary"));
+    std::vector<acecode::ChatMessage> messages{
+        msg("user", "oldest"),
+        msg("assistant", "newest"),
+    };
+
+    auto result = acecode::compact_messages(provider, messages);
+
+    ASSERT_TRUE(result.performed) << result.error;
+    ASSERT_EQ(provider.calls.size(), 4u);
+    expect_same_request(provider.calls[0], provider.calls[1]);
+    EXPECT_EQ(provider.calls[0].size(), 3u);
+    EXPECT_EQ(provider.calls[2].size(), 2u);
+    expect_same_request(provider.calls[2], provider.calls[3]);
+    EXPECT_EQ(result.compaction_request_retries, 2);
+    EXPECT_EQ(result.compaction_request_items_removed, 1);
+}
+
 TEST(CompactCore, UsesCodexByteTokenEstimateAndUtf8SafeTruncation) {
     EXPECT_EQ(acecode::approx_token_count(""), 0u);
     EXPECT_EQ(acecode::approx_token_count("a"), 1u);
@@ -360,13 +531,28 @@ TEST(CompactCore, ContextOverflowClassificationHandlesProviderShapes) {
         R"({"error":{"code":"context_length_exceeded"}})";
     EXPECT_TRUE(acecode::is_context_overflow_error(explicit_code));
 
-    acecode::ProviderErrorInfo payload_too_large;
-    payload_too_large.kind = acecode::ProviderErrorKind::Http;
-    payload_too_large.status_code = 413;
-    EXPECT_TRUE(acecode::is_context_overflow_error(payload_too_large));
+    acecode::ProviderErrorInfo ambiguous_payload_too_large;
+    ambiguous_payload_too_large.kind = acecode::ProviderErrorKind::Http;
+    ambiguous_payload_too_large.status_code = 413;
+    ambiguous_payload_too_large.raw_body =
+        R"({"error":{"code":"payload_too_large","message":"upload too large"}})";
+    EXPECT_FALSE(acecode::is_context_overflow_error(
+        ambiguous_payload_too_large));
+
+    acecode::ProviderErrorInfo strong_anthropic_shape;
+    strong_anthropic_shape.kind = acecode::ProviderErrorKind::Http;
+    strong_anthropic_shape.status_code = 400;
+    strong_anthropic_shape.raw_body =
+        R"({"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}})";
+    EXPECT_TRUE(acecode::is_context_overflow_error(strong_anthropic_shape));
 
     acecode::ProviderErrorInfo network;
     network.kind = acecode::ProviderErrorKind::Network;
     network.display_message = "connection reset";
     EXPECT_FALSE(acecode::is_context_overflow_error(network));
+
+    acecode::ProviderErrorInfo retryable_timeout;
+    retryable_timeout.kind = acecode::ProviderErrorKind::Timeout;
+    retryable_timeout.retryable = true;
+    EXPECT_TRUE(acecode::is_retryable_compaction_error(retryable_timeout));
 }

@@ -359,7 +359,8 @@ private:
     bool drain_active_turn_inputs(bool close_if_empty);
     std::size_t close_active_turn_and_discard();
     bool maybe_run_auto_compact();
-    bool active_estimate_exceeds_auto_threshold() const;
+    bool active_estimate_exceeds_auto_threshold(
+        const UserInput* pending_input = nullptr) const;
     std::vector<ChatMessage> build_compaction_initial_context() const;
     void initialize_compact_window_state();
     void apply_compact_result(const CompactResult& result,

@@ -674,6 +674,19 @@ UUIDv7 window zero, so later compactions form a fork-local chain. Version 1
 checkpoints without window metadata remain readable. Visible transcript rows
 before compaction are not removed.
 
+Pre-turn automatic compaction estimates the pending user input for threshold
+purposes but compacts only already-recorded model history; the input is appended
+exactly once after the compact attempt. Normal request construction keeps mutable
+session/time/CWD, hook, plan, and todo context as separate user-role items and
+inserts them before the last real user message (or fallback summary), so it never
+rewrites the compact summary prefix or trails a mid-turn summary.
+
+Non-streaming provider failures carry structured `ProviderErrorInfo`. Retryable
+non-context failures use the provider `stream_max_retries` budget with bounded,
+abort-aware exponential backoff and preserve the same request history. History
+trimming is reserved for explicitly classified context-window overflow; a generic
+HTTP 413 or ambiguous payload-size message is terminal and does not delete items.
+
 When `since>0`, returns an event array directly:
 
 ```json

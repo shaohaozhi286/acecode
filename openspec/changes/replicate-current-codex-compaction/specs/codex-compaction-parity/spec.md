@@ -80,11 +80,49 @@ The system SHALL evaluate automatic compaction before every internal model sampl
 - **THEN** the current sampling path ends with the error and no unsummarized history is discarded
 
 ### Requirement: Stable context without one-shot consumption
-The system SHALL provide stable base/system instructions to the compaction summary request without draining or persisting one-shot hook/request context. Normal provider request construction SHALL continue to inject current session/request context after compacted history is installed.
+The system SHALL provide stable base/system instructions to the compaction summary request without draining or persisting one-shot hook/request context. Normal provider request construction SHALL inject current session/request context as separate messages immediately before the last real user message, or before the compact summary when no real user message remains. It SHALL NOT merge context into a compact summary or append context after a mid-turn compact summary.
 
 #### Scenario: Pending hook request context
 - **WHEN** one-shot hook context is pending while compaction runs
 - **THEN** building the summary request does not consume it and the next normal model request still receives it
+
+#### Scenario: Mid-turn handoff boundary
+- **WHEN** a tool-follow-up compaction installs retained real user messages followed by a compact summary
+- **THEN** rebuilt session, request, hook, plan, and todo context is inserted before the last real user message and the untouched prefixed summary remains the final request item
+
+#### Scenario: No retained real user message
+- **WHEN** compacted replacement history contains only a compact summary
+- **THEN** rebuilt mutable context is inserted before that summary and the summary content still begins with the exact Codex prefix
+
+### Requirement: Pending pre-turn input is estimate-only
+The system SHALL include a pending initial user input in automatic-threshold estimation but SHALL compact only previously recorded model history. It SHALL record the pending input exactly once after the pre-turn compact attempt and SHALL not reevaluate compaction during the same first sampling iteration. Later tool-follow-up iterations SHALL continue to evaluate active history normally.
+
+#### Scenario: Pending input crosses the threshold
+- **WHEN** old active history is below the automatic threshold but the pending user input would cross it
+- **THEN** pre-turn compaction runs without that pending input in the summary request, then the normal request contains the new compact summary followed by the pending input
+
+#### Scenario: Pre-turn compact fails
+- **WHEN** pending input triggers pre-turn compaction and the compact attempt exhausts retries
+- **THEN** the pending user input is still recorded exactly once, no compact checkpoint is installed, and the turn ends without sending a normal model request
+
+### Requirement: Structured transient compaction retry
+Non-streaming provider responses SHALL preserve structured provider failures. The compactor SHALL retry structured retryable non-context failures up to the provider's `stream_max_retries` budget with abort-aware exponential backoff. A successful retry SHALL use the identical history and checkpoint prompt. Exhaustion SHALL fail atomically without installing replacement history.
+
+#### Scenario: Retryable HTTP or transport failure recovers
+- **WHEN** a compaction request receives a structured retryable 429, 5xx, timeout, or network failure and a later attempt succeeds within the retry budget
+- **THEN** the compactor retries without removing history and installs the successful summary
+
+#### Scenario: Retry budget is exhausted
+- **WHEN** every attempt returns a structured retryable non-context failure through the configured retry budget
+- **THEN** compaction fails without deleting history, appending a checkpoint, or advancing compact state
+
+#### Scenario: Explicit context overflow after a transient retry
+- **WHEN** a retryable transient failure is followed by an explicitly classified context-window overflow
+- **THEN** the compactor removes one oldest logical history item, resets the transient retry counter, and retries with the checkpoint prompt preserved
+
+#### Scenario: Ambiguous payload-size error
+- **WHEN** a provider returns a generic 413 or payload-size message without a recognized context-overflow code or strong context-length phrase
+- **THEN** the error does not trigger history removal
 
 ### Requirement: Append-only checkpoint persistence
 The system SHALL append a hidden compact checkpoint containing the complete replacement model history while preserving the entire user-visible transcript. A successful compact SHALL replace only active model history, append a visible compact marker/summary, reset compact-sensitive read guards, and recompute active token state from the installed history. A failed compact SHALL perform none of those mutations.

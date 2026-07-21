@@ -82,6 +82,20 @@ Micro-compaction, compact failure circuit-breaking, grouped 20-percent trimming,
 
 Leaving the reducers dormant was rejected because later code paths could reactivate incompatible behavior and their tests would continue asserting obsolete contracts.
 
+### 10. Keep pending pre-turn input outside the compactor and preserve the handoff boundary
+
+Before the first sampling iteration, ACECode SHALL estimate the request with the pending user input included, but SHALL run compaction against only the already-recorded model history. The pending input is recorded after a successful or failed pre-turn compact attempt and is never copied into that attempt's summary request. The first sampling iteration reuses that completed preflight decision; only later tool-follow-up iterations may compact the active turn.
+
+For every normal provider request, rebuilt session, time/CWD, hook, plan-mode, and todo context SHALL remain separate messages. They SHALL be inserted immediately before the last real user message, or before the compact summary when no real user message remains. They SHALL never be merged into the summary text or appended after a mid-turn summary. This preserves the exact summary prefix and keeps the summary as the final model-history item after mid-turn compaction, while pre-turn compaction naturally leaves the newly recorded user input last.
+
+Temporarily removing an already-persisted pending input during compaction was rejected because the checkpoint would then be appended after that input and resume could not replay the input as a post-checkpoint suffix without duplication.
+
+### 11. Make compaction retries consume structured non-streaming errors
+
+`ChatResponse` SHALL carry the same `ProviderErrorInfo` used by streaming errors. OpenAI-compatible and Anthropic non-streaming calls SHALL populate the error kind, HTTP status, response body, request id, and retryability instead of exposing only an `[Error]` string. The compactor SHALL retry structured retryable non-context errors up to `stream_max_retries`, using abort-aware exponential backoff. Removing an item for an explicit context overflow resets the transient retry counter, matching Codex's retry loop.
+
+Context overflow classification SHALL require a structured HTTP error at a plausible status plus a recognized provider code or strong context-length phrase. A generic 413, generic mentions of token limits, or unrelated payload-size text SHALL NOT delete history. Legacy string-only responses remain terminal except for the narrow context-overflow fallback needed by third-party provider implementations.
+
 ## Risks / Trade-offs
 
 - [A summary request may itself be expensive] -> Trigger from active-context usage, preserve the prompt, and trim only one oldest item per overflow retry as Codex does.
@@ -90,6 +104,8 @@ Leaving the reducers dormant was rejected because later code paths could reactiv
 - [A malformed or weak model summary loses assistant/tool detail] -> Use the exact Codex handoff contract and keep the full append-only transcript for human inspection and recovery.
 - [Old checkpoints lack window metadata] -> Decode them as legacy window zero and initialize the next window deterministically at resume.
 - [Provider error classification may vary] -> Centralize context-window-exceeded detection and cover representative provider errors with focused tests.
+- [Backoff makes synchronous compaction take longer during outages] -> Bound it by the provider stream retry budget, honor cancellation between short sleep slices, and leave history/checkpoint state unchanged on exhaustion.
+- [Moving pre-turn compaction before persistence changes transcript event ordering] -> Keep the user input visible through the normal accepted-input UI path, then persist it exactly once after the compact attempt so checkpoint replay order remains authoritative.
 
 ## Migration Plan
 
@@ -97,7 +113,8 @@ Leaving the reducers dormant was rejected because later code paths could reactiv
 2. Replace the compact execution and overflow retry while retaining the existing provider abstraction.
 3. Replace automatic threshold accounting and remove legacy micro/rescue/circuit-breaker paths.
 4. Extend checkpoint metadata and update resume/fork round-trip tests with legacy fixtures.
-5. Update user and daemon/hook documentation, then run focused compaction/session tests, the full unit suite, code-quality checks, and build gates.
+5. Preserve the normal-request handoff boundary and add structured non-streaming retry behavior.
+6. Update user and daemon/hook documentation, then run focused compaction/session tests, the full unit suite, code-quality checks, and build gates.
 
 Rollback is a normal source revert: existing v1 checkpoints remain readable, and new metadata is optional to older readers that already ignore unknown JSON fields.
 

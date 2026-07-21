@@ -539,9 +539,9 @@ TEST(AgentLoopTermination, TextOnlyEndsTurnUnconditionally) {
               std::string::npos);  // 正常退出,无 cap 消息
 }
 
-// 场景:动态时间/CWD 只进入发给 provider 的 API 消息尾部,
-// 不写入会话历史,避免 system prompt 前缀每轮变化。
-TEST(AgentLoopTermination, RequestContextIsApiOnlyAndAtMessageTail) {
+// 场景:动态时间/CWD 只进入发给 provider 的 API 消息，并位于最后一个
+// 真实 user 消息之前；不合并或写入会话历史。
+TEST(AgentLoopTermination, RequestContextIsApiOnlyAtHandoffBoundary) {
     AgentLoopHarness h;
     h.push_text("ok");
 
@@ -549,14 +549,16 @@ TEST(AgentLoopTermination, RequestContextIsApiOnlyAndAtMessageTail) {
     ASSERT_EQ(h.turn_count(), 1);
 
     auto request = h.request_messages_for_turn(0);
-    ASSERT_GE(request.size(), 2u);
+    ASSERT_GE(request.size(), 3u);
     EXPECT_EQ(request.front().role, "system");
     EXPECT_EQ(request.back().role, "user");
-    EXPECT_NE(request.back().content.find("[当前环境状态]"), std::string::npos);
-    EXPECT_NE(request.back().content.find("时间："), std::string::npos);
-    EXPECT_NE(request.back().content.find("工作目录：."), std::string::npos);
-    EXPECT_NE(request.back().content.find("[用户输入]"), std::string::npos);
-    EXPECT_NE(request.back().content.find("what time is it?"), std::string::npos);
+    EXPECT_EQ(request.back().content, "what time is it?");
+    const auto& request_context = request[request.size() - 2];
+    EXPECT_EQ(request_context.role, "user");
+    EXPECT_NE(request_context.content.find("[当前环境状态]"), std::string::npos);
+    EXPECT_NE(request_context.content.find("时间："), std::string::npos);
+    EXPECT_NE(request_context.content.find("工作目录：."), std::string::npos);
+    EXPECT_EQ(request_context.content.find("[用户输入]"), std::string::npos);
 
     auto persisted = h.persisted_messages();
     ASSERT_GE(persisted.size(), 2u);
@@ -614,8 +616,12 @@ TEST(AgentLoopTermination, SessionContextIsApiOnlyAndStaticPromptStaysClean) {
     }
     EXPECT_TRUE(saw_project);
     EXPECT_TRUE(saw_memory);
-    EXPECT_NE(request.back().content.find("[当前环境状态]"), std::string::npos);
-    EXPECT_NE(request.back().content.find("[用户输入]"), std::string::npos);
+    EXPECT_EQ(request.back().content, "what should I do?");
+    ASSERT_GE(request.size(), 2u);
+    EXPECT_NE(request[request.size() - 2].content.find("[当前环境状态]"),
+              std::string::npos);
+    EXPECT_EQ(request[request.size() - 2].content.find("[用户输入]"),
+              std::string::npos);
 
     auto persisted = h.persisted_messages();
     for (const auto& msg : persisted) {

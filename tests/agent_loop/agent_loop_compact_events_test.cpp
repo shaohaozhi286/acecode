@@ -37,6 +37,7 @@ public:
     bool stream_saw_summary = false;
     int stream_message_count = 0;
     std::vector<std::vector<acecode::ChatMessage>> compact_requests;
+    std::vector<std::vector<acecode::ChatMessage>> stream_requests;
 
     acecode::ChatResponse chat(
         const std::vector<acecode::ChatMessage>& messages,
@@ -65,6 +66,7 @@ public:
                      std::atomic<bool>* = nullptr) override {
         ++stream_calls;
         stream_message_count = static_cast<int>(messages.size());
+        stream_requests.push_back(messages);
         for (const auto& message : messages) {
             if (message.content.find(acecode::get_compact_summary_prefix()) !=
                 std::string::npos) {
@@ -349,6 +351,41 @@ TEST(AgentLoopCompactEvents, AutoCompactRunsBeforeInitialModelRequest) {
     EXPECT_TRUE(has_system_event(events, "--- [Compact Checkpoint] ---"));
 }
 
+TEST(AgentLoopCompactEvents, PendingInputTriggersPreTurnCompactButIsNotSummarized) {
+    auto provider = std::make_shared<CompactEventProvider>();
+    acecode::ToolExecutor tools;
+    acecode::PermissionManager permissions;
+    acecode::AgentLoop loop(
+        [&]() -> std::shared_ptr<acecode::LlmProvider> { return provider; },
+        tools, {}, "/tmp/pending-input-compact-boundary", permissions);
+    loop.set_context_window(100000);
+    add_history(loop, 1);
+
+    const std::string marker = "PENDING_INPUT_MUST_NOT_BE_SUMMARIZED";
+    const std::string pending_input = marker + std::string(400000, 'p');
+    wait_for_done(loop, [&] { loop.submit(pending_input); });
+
+    ASSERT_EQ(provider->chat_calls, 1);
+    ASSERT_EQ(provider->compact_requests.size(), 1u);
+    EXPECT_FALSE(request_contains(provider->compact_requests.front(), marker));
+
+    ASSERT_EQ(provider->stream_requests.size(), 1u);
+    const auto& normal_request = provider->stream_requests.front();
+    ASSERT_FALSE(normal_request.empty());
+    EXPECT_EQ(normal_request.back().content, pending_input);
+
+    const std::string expected_summary =
+        acecode::get_compact_summary_prefix() +
+        "\nCompacted event summary.";
+    const auto summary = std::find_if(
+        normal_request.begin(), normal_request.end(),
+        [&](const acecode::ChatMessage& message) {
+            return message.content == expected_summary;
+        });
+    ASSERT_NE(summary, normal_request.end());
+    EXPECT_LT(summary, normal_request.end() - 1);
+}
+
 TEST(AgentLoopCompactEvents, LegacyCheckpointSeedsNextCompactWindow) {
     auto provider = std::make_shared<CompactEventProvider>();
     acecode::ToolExecutor tools;
@@ -488,6 +525,13 @@ TEST(AgentLoopCompactEvents, ToolFollowUpUsesFullCompactWithoutMicroCompaction) 
         << "the summarizer must see full tool output; no micro-compaction may clear it first";
     EXPECT_TRUE(provider->stream_saw_summary);
     EXPECT_FALSE(has_system_event(events, "[Micro-compact]"));
+    ASSERT_EQ(provider->stream_requests.size(), 2u);
+    ASSERT_FALSE(provider->stream_requests[1].empty());
+    EXPECT_EQ(
+        provider->stream_requests[1].back().content,
+        acecode::get_compact_summary_prefix() +
+            "\nCompacted event summary.")
+        << "mid-turn mutable context must stay before the untouched final summary";
 }
 
 TEST(AgentLoopCompactEvents, ManySmallMessagesDoNotTriggerStructuralCompaction) {

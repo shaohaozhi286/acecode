@@ -334,43 +334,10 @@ void append_request_context_for_api(std::vector<ChatMessage>& messages,
                                     const std::string& context) {
     if (context.empty()) return;
 
-    if (!messages.empty() && messages.back().role == "user") {
-        ChatMessage& tail = messages.back();
-        const std::string merged = context + "\n\n[用户输入]\n" + tail.content;
-        if (tail.content_parts.is_array() && !tail.content_parts.empty()) {
-            bool updated_text_part = false;
-            for (auto& part : tail.content_parts) {
-                if (part.is_object() && part.value("type", std::string{}) == "text") {
-                    const std::string text = part.value("text", std::string{});
-                    part["text"] = context + "\n\n[用户输入]\n" + text;
-                    updated_text_part = true;
-                    break;
-                }
-            }
-            if (!updated_text_part) {
-                tail.content_parts.insert(
-                    tail.content_parts.begin(),
-                    nlohmann::json{{"type", "text"}, {"text", merged}});
-            }
-        }
-        tail.content = merged;
-        return;
-    }
-
     ChatMessage msg;
     msg.role = "user";
     msg.content = context;
     messages.push_back(std::move(msg));
-}
-
-void prepend_session_context_for_api(std::vector<ChatMessage>& messages,
-                                     const std::string& context) {
-    if (context.empty()) return;
-
-    ChatMessage msg;
-    msg.role = "user";
-    msg.content = context;
-    messages.insert(messages.begin(), std::move(msg));
 }
 
 std::string cached_context_for_api(const PromptContextBlock& block,
@@ -807,9 +774,18 @@ void AgentLoop::emit_transcript_system_message(const std::string& content,
     events_.emit(SessionEventKind::Message, std::move(payload));
 }
 
-bool AgentLoop::active_estimate_exceeds_auto_threshold() const {
+bool AgentLoop::active_estimate_exceeds_auto_threshold(
+    const UserInput* pending_input) const {
     auto request = build_compaction_initial_context();
-    const auto history = provider_relevant_messages(messages_);
+    auto history = provider_relevant_messages(messages_);
+    if (pending_input && !pending_input->empty()) {
+        ChatMessage pending;
+        pending.role = "user";
+        pending.content = pending_input->text;
+        pending.content_parts = pending_input->content_parts;
+        pending.metadata = pending_input->metadata;
+        history.push_back(std::move(pending));
+    }
     request.insert(request.end(), history.begin(), history.end());
     return should_auto_compact(
         context_window_.load(std::memory_order_relaxed),
@@ -1686,19 +1662,22 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
             custom_instructions_cfg_,
             *git_snapshot_cache_),
         session_context_cache_key_, session_context_cache_content_);
-    prepend_session_context_for_api(api_messages, session_context);
+    std::vector<ChatMessage> mutable_context_messages;
+    append_request_context_for_api(mutable_context_messages, session_context);
     std::string request_context = build_request_context_prompt(cwd_);
-    append_request_context_for_api(api_messages, request_context);
+    append_request_context_for_api(mutable_context_messages, request_context);
     std::string hook_context = drain_hook_request_context();
-    append_request_context_for_api(api_messages, hook_context);
+    append_request_context_for_api(mutable_context_messages, hook_context);
     std::string plan_mode_context =
         permissions_.mode() == PermissionMode::Plan
             ? build_plan_mode_context_prompt(session_manager_)
             : std::string{};
-    append_plan_mode_context_for_api(api_messages, plan_mode_context);
+    append_plan_mode_context_for_api(mutable_context_messages, plan_mode_context);
     std::vector<TodoItem> todo_context_items =
         session_manager_ ? session_manager_->current_todos() : std::vector<TodoItem>{};
-    append_todo_context_for_api(api_messages, todo_context_items);
+    append_todo_context_for_api(mutable_context_messages, todo_context_items);
+    insert_context_before_last_real_user_or_summary(
+        api_messages, std::move(mutable_context_messages));
 
     ChatMessage sys_msg;
     sys_msg.role = "system";
@@ -3015,9 +2994,21 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         }
     }
 
-    // Phase 1: Build and persist user message, emit events
+    // Codex pre-turn compaction estimates the pending input but summarizes only
+    // already-recorded history. Persisting first would put the new request into
+    // the summary and append the checkpoint after the input, breaking replay.
+    bool preturn_compaction_failed = false;
+    if (active_estimate_exceeds_auto_threshold(&input)) {
+        preturn_compaction_failed = !maybe_run_auto_compact();
+    }
+
+    // Phase 1: Build and persist user message after the pre-turn compact attempt.
     auto turn_info = prepare_user_turn(input, hidden_goal_context);
     std::string turn_timing_status = "completed";
+    if (preturn_compaction_failed) {
+        turn_timing_status = "error";
+        stop_active_goal_after_turn_error(ProviderErrorInfo{});
+    }
 
     // Loop state
     int total_iterations = 0;
@@ -3135,7 +3126,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
     };
 
     // Main agent loop
-    while (!abort_requested_ && !terminator_fired &&
+    while (!preturn_compaction_failed && !abort_requested_ && !terminator_fired &&
            (!has_max_iterations || total_iterations < max_iter)) {
         ++total_iterations;
         {
@@ -3155,7 +3146,7 @@ void AgentLoop::run_agent_with_input(const UserInput& input,
         // The top of every sampling iteration covers both pre-turn and
         // post-tool follow-up compaction. A failed compact aborts this sampling
         // path without silently deleting unsummarized history.
-        if (active_estimate_exceeds_auto_threshold()) {
+        if (total_iterations > 1 && active_estimate_exceeds_auto_threshold()) {
             if (!maybe_run_auto_compact()) {
                 turn_timing_status = "error";
                 stop_active_goal_after_turn_error(ProviderErrorInfo{});

@@ -7,6 +7,7 @@
 #include "stub_provider.hpp"
 #include "tool/tool_executor.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -182,15 +183,18 @@ TEST(AgentLoopTurnSteering, CommitsStructuredInputsInFifoAndContinuesSameTurn) {
     ASSERT_EQ(h.provider().turn_count(), 2);
     const auto user_texts = request_user_texts(h.provider().messages_for_turn(1));
     ASSERT_GE(user_texts.size(), 3u);
-    EXPECT_NE(
-        user_texts[user_texts.size() - 3].find("start"),
-        std::string::npos);
-    EXPECT_NE(
-        user_texts[user_texts.size() - 2].find("first guidance"),
-        std::string::npos);
-    EXPECT_NE(
-        user_texts[user_texts.size() - 1].find("second guidance"),
-        std::string::npos);
+    const auto start = std::find(user_texts.begin(), user_texts.end(), "start");
+    const auto first_guidance =
+        std::find(user_texts.begin(), user_texts.end(), "first guidance");
+    const auto second_guidance =
+        std::find(user_texts.begin(), user_texts.end(), "second guidance");
+    ASSERT_NE(start, user_texts.end());
+    ASSERT_NE(first_guidance, user_texts.end());
+    ASSERT_NE(second_guidance, user_texts.end());
+    EXPECT_LT(start, first_guidance);
+    EXPECT_LT(first_guidance, second_guidance);
+    EXPECT_EQ(second_guidance, user_texts.end() - 1)
+        << "mutable API-only context must be inserted before the final real user input";
 
     std::vector<acecode::ChatMessage> guided;
     for (const auto& message : h.loop().messages()) {

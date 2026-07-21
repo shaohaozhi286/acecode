@@ -4,10 +4,13 @@
 #include "../utils/logger.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -71,6 +74,66 @@ std::size_t message_payload_bytes(const acecode::ChatMessage& msg) {
 std::string provider_error_search_text(const acecode::ProviderErrorInfo& info) {
     return ascii_lower(info.display_message + "\n" + info.raw_body + "\n" +
                        info.pretty_json);
+}
+
+bool has_context_overflow_code(const nlohmann::json& value) {
+    if (value.is_object()) {
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            if ((it.key() == "code" || it.key() == "type") &&
+                it.value().is_string()) {
+                const std::string marker = ascii_lower(it.value().get<std::string>());
+                static const std::set<std::string> kCodes = {
+                    "context_length_exceeded",
+                    "context_window_exceeded",
+                    "input_too_long",
+                    "prompt_too_long",
+                };
+                if (kCodes.find(marker) != kCodes.end()) return true;
+            }
+            if (has_context_overflow_code(it.value())) return true;
+        }
+    } else if (value.is_array()) {
+        for (const auto& item : value) {
+            if (has_context_overflow_code(item)) return true;
+        }
+    }
+    return false;
+}
+
+bool raw_body_has_context_overflow_code(const std::string& body) {
+    if (body.empty()) return false;
+    try {
+        return has_context_overflow_code(nlohmann::json::parse(body));
+    } catch (const nlohmann::json::parse_error&) {
+        return false;
+    }
+}
+
+constexpr int kCompactRetryBaseDelayMs = 200;
+constexpr int kCompactRetryMaxDelayMs = 15000;
+constexpr int kCompactRetrySleepSliceMs = 50;
+constexpr int kCompactRetryLimitCap = 100;
+
+int compact_retry_delay_ms(int retry_number) {
+    int delay_ms = kCompactRetryBaseDelayMs;
+    const int doublings = (std::min)((std::max)(0, retry_number - 1), 16);
+    for (int i = 0; i < doublings; ++i) {
+        delay_ms = (std::min)(kCompactRetryMaxDelayMs, delay_ms * 2);
+    }
+    return delay_ms;
+}
+
+bool sleep_compact_retry_or_aborted(int delay_ms,
+                                    std::atomic<bool>* abort_flag) {
+    int slept_ms = 0;
+    while (slept_ms < delay_ms) {
+        if (abort_flag && abort_flag->load()) return true;
+        const int slice =
+            (std::min)(kCompactRetrySleepSliceMs, delay_ms - slept_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+        slept_ms += slice;
+    }
+    return abort_flag && abort_flag->load();
 }
 
 std::string compact_trigger_name(bool is_auto) {
@@ -321,33 +384,60 @@ bool is_context_overflow_error(const std::string& error_message) {
     const std::string text = ascii_lower(error_message);
     static const std::vector<std::string> needles = {
         "context_length_exceeded",
+        "context_window_exceeded",
         "maximum context length",
         "max context length",
-        "context window",
-        "context limit",
-        "context is too long",
-        "context too long",
+        "context length exceeded",
+        "context window exceeded",
+        "exceeds the context window",
+        "exceeded the context window",
         "prompt is too long",
-        "prompt too long",
-        "token limit",
-        "too many tokens",
-        "tokens in the messages",
         "input is too long",
-        "input too long",
-        "input tokens",
-        "input too large",
-        "request too large",
-        "payload too large",
-        "reduce the length of the messages",
-        "exceeds the model",
-        "exceeded model",
+        "too many input tokens",
     };
     return contains_any(text, needles);
 }
 
 bool is_context_overflow_error(const ProviderErrorInfo& info) {
-    return info.status_code == 413 ||
+    if (info.kind != ProviderErrorKind::Http) return false;
+    if (info.status_code != 400 && info.status_code != 413 &&
+        info.status_code != 422) {
+        return false;
+    }
+    return raw_body_has_context_overflow_code(info.raw_body) ||
            is_context_overflow_error(provider_error_search_text(info));
+}
+
+bool is_retryable_compaction_error(const ProviderErrorInfo& info) {
+    return info.has_error() && info.retryable &&
+           info.kind != ProviderErrorKind::UserCancelled &&
+           !is_context_overflow_error(info);
+}
+
+void insert_context_before_last_real_user_or_summary(
+    std::vector<ChatMessage>& messages,
+    std::vector<ChatMessage> context) {
+    if (context.empty()) return;
+
+    auto fallback_summary = messages.end();
+    auto insertion = messages.end();
+    for (auto it = messages.end(); it != messages.begin();) {
+        --it;
+        if (it->role != "user") continue;
+        if (is_compact_summary_message(*it)) {
+            if (fallback_summary == messages.end()) fallback_summary = it;
+            continue;
+        }
+        if (is_real_user_message(*it)) {
+            insertion = it;
+            break;
+        }
+    }
+    if (insertion == messages.end()) insertion = fallback_summary;
+    messages.insert(
+        insertion,
+        std::make_move_iterator(context.begin()),
+        std::make_move_iterator(context.end()));
 }
 
 CompactResult compact_messages(
@@ -371,6 +461,10 @@ CompactResult compact_messages(
              " initial_context_items=" + std::to_string(initial_context.size()));
 
     std::string summary_suffix;
+    int transient_retries = 0;
+    const int max_transient_retries = (std::min)(
+        kCompactRetryLimitCap,
+        (std::max)(0, provider.stream_max_retries()));
     for (;;) {
         if (abort_flag && abort_flag->load()) {
             result.error = "Compaction cancelled.";
@@ -404,18 +498,46 @@ CompactResult compact_messages(
             }
 
             if (response.finish_reason == "error") {
-                if (is_context_overflow_error(response.content) &&
+                const bool has_structured_error = response.provider_error.has_error();
+                const bool context_overflow = has_structured_error
+                    ? is_context_overflow_error(response.provider_error)
+                    : is_context_overflow_error(response.content);
+                if (context_overflow &&
                     !request_history.empty()) {
                     const int removed =
                         remove_oldest_history_item(request_history);
                     result.compaction_request_items_removed += removed;
+                    transient_retries = 0;
                     LOG_WARN("Context window exceeded while compacting; removed one oldest "
                              "history item and any paired tool item");
                     continue;
                 }
-                result.error = is_context_overflow_error(response.content)
+
+                if (has_structured_error &&
+                    is_retryable_compaction_error(response.provider_error) &&
+                    transient_retries < max_transient_retries) {
+                    ++transient_retries;
+                    ++result.compaction_request_retries;
+                    const int delay_ms = compact_retry_delay_ms(transient_retries);
+                    LOG_WARN("Retrying compaction request after transient provider error; "
+                             "retry=" + std::to_string(transient_retries) + "/" +
+                             std::to_string(max_transient_retries) +
+                             " delay_ms=" + std::to_string(delay_ms));
+                    if (sleep_compact_retry_or_aborted(delay_ms, abort_flag)) {
+                        result.error = "Compaction cancelled.";
+                        return result;
+                    }
+                    continue;
+                }
+
+                const std::string provider_message =
+                    has_structured_error &&
+                            !response.provider_error.display_message.empty()
+                        ? response.provider_error.display_message
+                        : response.content;
+                result.error = context_overflow
                     ? "Context window exceeded while compacting with no removable history item."
-                    : "Summarization failed: " + response.content;
+                    : "Summarization failed: " + provider_message;
                 return result;
             }
 
@@ -426,6 +548,7 @@ CompactResult compact_messages(
             if (is_context_overflow_error(message) && !request_history.empty()) {
                 const int removed = remove_oldest_history_item(request_history);
                 result.compaction_request_items_removed += removed;
+                transient_retries = 0;
                 LOG_WARN("Context window exceeded while compacting; removed one oldest "
                          "history item and any paired tool item");
                 continue;

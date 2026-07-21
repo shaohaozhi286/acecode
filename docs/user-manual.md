@@ -416,6 +416,10 @@ acecode: session <id> saved. Resume with: acecode --resume <id>
 
 压缩行为与 Codex 的本地 checkpoint 算法一致：模型会看到完整的有效历史和固定的 handoff prompt；生成摘要后，新的模型历史只保留最近的真实 user 消息（总计最多约 20,000 token）以及位于最后的、带 Codex 固定前缀的 summary user 消息。assistant、tool call、tool output 和 reasoning 的关键信息由摘要承接，不会原样复制到新模型历史。如果摘要请求本身超出上下文，acecode 每次只移除最旧的一条逻辑历史消息后重试，并始终保留 checkpoint prompt；若该项属于 tool call/output 对，会同步移除对应项，避免产生无效的孤立 tool 消息。
 
+首次模型请求前，自动阈值估算会计入尚未写入历史的本轮 user 输入，但 compactor 只压缩此前已经记录的历史；压缩完成后才把本轮输入追加到 summary 后面。工具调用后的中途压缩则把 session、时间/CWD、hook、plan 和 todo 等动态上下文作为独立消息插在最后一个真实 user 消息之前，绝不会合并进 summary 或追加到 summary 后面。因此 pre-turn 请求以本轮 user 输入收尾，mid-turn 请求仍以原样的 Codex summary 收尾。
+
+非流式压缩请求会保留 provider 的结构化错误。429、5xx、timeout、network 等标记为 retryable 的非上下文错误会按 provider 的 `stream_max_retries` 预算指数退避重试，重试时不会删除历史；只有明确的 context-overflow code 或强上下文长度错误才会移除最旧逻辑项。普通 413 或含糊的 payload/token 文本不会触发历史删除。
+
 Desktop、Web 和 TUI 使用同一条串行压缩路径。压缩不会改写或截短人类可见 transcript；JSONL 会追加一个隐藏 checkpoint，记录替换后的模型历史和 compact-window 编号/标识，之后的消息继续追加。刷新、恢复和 fork 会从最新有效 checkpoint 恢复模型历史，再按顺序回放其后的消息。压缩失败时不会写 checkpoint，也不会通过无摘要截断来“抢救”请求。
 
 压缩期间，TUI 会显示 `Compacting conversation...`：整段文字先使用高亮背景，然后默认背景从左右两端对称向中间收缩并循环。压缩产生的进度、checkpoint、摘要和警告仍会完整追加到 transcript；成功完成后，TUI 和 Web 会把同一次操作收成一条 `Context compacted`，可用 TUI 的 `Ctrl+E` / `Ctrl+O` 或 Web 的展开按钮查看全部原文。失败的压缩没有成功完成标记，因此进度和错误会保持展开可见。
