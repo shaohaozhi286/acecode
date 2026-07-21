@@ -1199,6 +1199,34 @@ body {
 .ace-copyable-code {
   position: relative;
 }
+.ace-mermaid-diagram {
+  overflow: hidden;
+  border: 1px solid var(--ace-border);
+  border-radius: 7px;
+  background: var(--ace-surface-alt);
+}
+.ace-mermaid-render-target {
+  display: none;
+  max-width: 100%;
+  padding: 18px 16px;
+  overflow: auto;
+}
+.ace-mermaid-diagram[data-mermaid-diagram="ready"] .ace-mermaid-render-target {
+  display: block;
+}
+.ace-mermaid-diagram[data-mermaid-diagram="ready"] .ace-mermaid-source {
+  display: none;
+}
+.ace-mermaid-svg {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: none;
+  margin: 0 auto;
+}
+.ace-mermaid-source {
+  border-radius: 0 !important;
+}
 .ace-md .ace-copyable-code {
   margin: 6px 0;
 }

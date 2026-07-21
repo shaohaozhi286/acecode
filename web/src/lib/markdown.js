@@ -70,6 +70,26 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+const SOURCE_LINES_ENV = '__acecodeSourceLines';
+
+function markdownEnv(source) {
+  return {
+    [SOURCE_LINES_ENV]: String(source || '').replace(/\r\n?/g, '\n').split('\n'),
+  };
+}
+
+function isCompleteFence(token, env) {
+  const lines = env?.[SOURCE_LINES_ENV];
+  if (!Array.isArray(lines) || !Array.isArray(token?.map) || token.map.length < 2) return false;
+  const closingLine = lines[token.map[1] - 1];
+  const marker = String(token.markup || '');
+  if (!closingLine || marker.length < 3) return false;
+  const trimmed = closingLine.trimStart();
+  let count = 0;
+  while (count < trimmed.length && trimmed[count] === marker[0]) count += 1;
+  return count >= marker.length && trimmed.slice(count).trim() === '';
+}
+
 // 高亮结果缓存:流式渲染每个 delta 都会重渲全部块,已定稿代码块的内容
 // 不再变化,直接复用上次高亮结果,避免大代码块被反复重新高亮。
 const HIGHLIGHT_CACHE_MAX = 128;
@@ -115,10 +135,21 @@ const md = new MarkdownIt({
 
 md.use(taskLists, { enabled: false, label: false });
 
-md.renderer.rules.fence = (tokens, idx) => {
+md.renderer.rules.fence = (tokens, idx, _options, env) => {
   const token = tokens[idx];
   const info = String(token.info || '').trim();
   const lang = info ? info.split(/\s+/g)[0] : '';
+  const normalizedLang = normalizeLang(lang);
+  if (normalizedLang === 'mermaid'
+      && String(token.content || '').trim()
+      && isCompleteFence(token, env)) {
+    const source = escapeHtml(token.content);
+    return `<div class="ace-copyable-code ace-mermaid-diagram" data-code-copy-frame="true" data-code-lang="mermaid" data-mermaid-diagram="source">`
+      + `<button type="button" class="ace-code-copy-btn" data-code-copy-button="true" title="复制 Mermaid 源码" aria-label="复制 Mermaid 源码"><span class="ace-icon" style="width:14px;height:14px;--ace-icon-url:url('/vs-icons/Copy.svg')" data-monochrome="true" aria-hidden="true"></span></button>`
+      + `<div class="ace-mermaid-render-target" data-mermaid-render-target="true" aria-busy="false"></div>`
+      + `<pre class="ace-mermaid-source"><code data-code-copy-source="true" data-mermaid-source="true">${source}</code></pre>`
+      + `</div>\n`;
+  }
   const highlighted = highlightCode(token.content, lang);
   const preClass = highlighted.lang ? ' class="hljs"' : '';
   const codeClass = highlighted.lang ? ` class="hljs language-${escapeHtml(highlighted.lang)}"` : '';
@@ -160,7 +191,8 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
 export function renderMarkdown(src) {
   if (!src) return '';
   try {
-    return md.render(String(src));
+    const text = String(src);
+    return md.render(text, markdownEnv(text));
   } catch {
     // 任何 markdown-it 内部异常 → 退化到 escape-only,绝不返回未转义 HTML
     return `<p>${escapeHtml(String(src))}</p>`;
@@ -180,7 +212,7 @@ export function renderMarkdownBlocks(src) {
   if (!src) return [];
   const text = String(src);
   try {
-    const env = {};
+    const env = markdownEnv(text);
     const tokens = md.parse(text, env);
     const groups = [];
     let group = [];
