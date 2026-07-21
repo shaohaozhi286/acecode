@@ -18,5 +18,5 @@
 ## 4. Publication
 
 - [x] 4.1 Commit and push only the npm publishing and OpenSpec changes
-- [ ] 4.2 Retry the 0.7.7 npm backfill with the scoped CLI package and wait for the workflow to finish
-- [ ] 4.3 Verify npm registry metadata and a clean `npm i @aceagent/acecode` installation
+- [x] 4.2 Retry the 0.7.7 npm backfill with the scoped CLI package and wait for the workflow to finish
+- [x] 4.3 Verify npm registry metadata and a clean `npm i @aceagent/acecode` installation
