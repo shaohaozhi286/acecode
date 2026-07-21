@@ -2,6 +2,11 @@ name: package
 
 on:
   workflow_dispatch:
+    inputs:
+      npm_version:
+        description: npm version to backfill after a full package build (must match CMakeLists.txt)
+        required: false
+        type: string
   pull_request:
   push:
     branches:
@@ -652,7 +657,7 @@ jobs:
 
   publish-npm:
     name: publish npm
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.npm_version != '')
     needs:
       - build-and-package
     runs-on: ubuntu-latest
@@ -663,8 +668,40 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Resolve npm version
+        id: npm-version
+        shell: bash
+        env:
+          INPUT_NPM_VERSION: ${{ inputs.npm_version }}
+        run: |
+          declared_version="$(awk '$1 == "project(acecode" && $2 == "VERSION" { print $3; exit }' CMakeLists.txt)"
+          if [ -z "$declared_version" ]; then
+            echo "::error::无法从 CMakeLists.txt 读取 ACECode 版本"
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$INPUT_NPM_VERSION"
+            if [ "$version" != "$declared_version" ]; then
+              echo "::error::手动 npm 版本 $version 与 CMakeLists.txt 版本 $declared_version 不一致"
+              exit 1
+            fi
+          fi
+
+          if [ -z "$version" ]; then
+            echo "::error::npm 版本不能为空"
+            exit 1
+          fi
+
+          dist_tag=latest
+          case "$version" in *-*) dist_tag=next ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -681,14 +718,16 @@ jobs:
             tar -xzf "artifacts/acecode-$id/acecode-$id.tar.gz" -C extracted
           done
           # Windows zip 打包时没有顶层目录(Compress-Archive $dir/*),解到显式目录
-          mkdir -p extracted/acecode-windows-x64
-          unzip -q "artifacts/acecode-windows-x64/acecode-windows-x64.zip" -d extracted/acecode-windows-x64
+          for id in windows-x64 windows-arm64; do
+            mkdir -p "extracted/acecode-$id"
+            unzip -q "artifacts/acecode-$id/acecode-$id.zip" -d "extracted/acecode-$id"
+          done
 
       - name: Prepare npm packages
         shell: bash
         run: |
           node scripts/npm/prepare-npm-packages.mjs \
-            --version "${GITHUB_REF_NAME#v}" \
+            --version "${{ steps.npm-version.outputs.version }}" \
             --input extracted \
             --output npm-staging
 
@@ -696,21 +735,20 @@ jobs:
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_VERSION: ${{ steps.npm-version.outputs.version }}
+          NPM_DIST_TAG: ${{ steps.npm-version.outputs.dist_tag }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::warning::NPM_TOKEN secret 未配置,跳过 npm 发布"
-            exit 0
+            echo "::error::NPM_TOKEN secret 未配置,无法发布 npm 包"
+            exit 1
           fi
-          version="${GITHUB_REF_NAME#v}"
-          dist_tag=latest
-          case "$GITHUB_REF_NAME" in *-*) dist_tag=next ;; esac
           # 顺序:先平台二进制包,再 cli / desktop 主包,主包才引用得到平台包
           for dir in npm-staging/platform/*/ npm-staging/cli npm-staging/desktop; do
             name="$(node -p "require('./$dir/package.json').name")"
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "skip $name@$version (already published)"
+            if npm view "$name@$NPM_VERSION" version >/dev/null 2>&1; then
+              echo "skip $name@$NPM_VERSION (already published)"
               continue
             fi
-            echo "publishing $name@$version (dist-tag: $dist_tag)"
-            (cd "$dir" && npm publish --access public --tag "$dist_tag")
+            echo "publishing $name@$NPM_VERSION (dist-tag: $NPM_DIST_TAG)"
+            (cd "$dir" && npm publish --access public --tag "$NPM_DIST_TAG")
           done

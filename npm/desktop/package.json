@@ -1,5 +1,5 @@
 {
-  "name": "@acecode/desktop",
+  "name": "@aceagent/desktop",
   "version": "0.0.0-dev",
   "description": "ACECode Desktop — multi-workspace desktop shell for the ACECode AI coding agent",
   "keywords": [
@@ -15,6 +15,9 @@
     "url": "git+https://github.com/shaohaozhi286/acecode.git"
   },
   "license": "SEE LICENSE IN README.md",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "acecode-desktop": "bin/acecode-desktop.js"
   },

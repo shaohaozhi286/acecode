@@ -27,6 +27,19 @@ ACECode is a C++17 AI coding agent for the terminal. It provides an FTXUI-based 
 - Optional desktop shell that can manage multiple workspaces through separate daemon processes.
 - Cross-platform build support for macOS, Linux, and Windows.
 
+## Install From npm
+
+Install the terminal CLI globally:
+
+```bash
+npm install -g acecode
+acecode
+```
+
+For a project-local installation, run `npm install acecode` and launch it with
+`npx acecode`. The optional desktop shell is available as
+`npm install -g @aceagent/desktop`.
+
 ## Build From Source
 
 ### Prerequisites

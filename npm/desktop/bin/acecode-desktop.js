@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// @acecode/desktop 启动垫片:定位当前平台的 @acecode/<os>-<cpu> 平台包,
+// @aceagent/desktop 启动垫片:定位当前平台的 @aceagent/<os>-<cpu> 平台包,
 // 以「分离进程」方式启动桌面壳(Windows/Linux: acecode-desktop;macOS: ACECode.app),
 // 随后本进程立即退出。
 //
@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const SCOPE = '@acecode';
+const SCOPE = '@aceagent';
 const RELEASES_URL = 'https://github.com/shaohaozhi286/acecode/releases';
 const SUPPORTED = new Set([
   'linux-x64',
@@ -19,6 +19,7 @@ const SUPPORTED = new Set([
   'darwin-x64',
   'darwin-arm64',
   'win32-x64',
+  'win32-arm64',
 ]);
 
 function fail(message) {

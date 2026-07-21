@@ -1,11 +1,11 @@
-# @acecode/cli
+# acecode
 
 ACECode — AI coding agent，单二进制自带终端 TUI、后台 daemon 与浏览器 Web UI。
 
 ## 安装
 
 ```bash
-npm install -g @acecode/cli
+npm install -g acecode
 ```
 
 安装后可直接使用 `acecode` 命令：
@@ -19,15 +19,16 @@ acecode daemon start # 后台 daemon + Web UI (http://localhost:28080)
 ## 工作方式
 
 本包只包含一个很小的 Node 启动器；真实的原生二进制按平台放在
-`@acecode/<os>-<cpu>` 平台包中，通过 `optionalDependencies` 在安装时自动选择：
+`@aceagent/<os>-<cpu>` 平台包中，通过 `optionalDependencies` 在安装时自动选择：
 
 | 平台 | 包 |
 |---|---|
-| Linux x64 | `@acecode/linux-x64` |
-| Linux arm64 | `@acecode/linux-arm64` |
-| macOS x64 | `@acecode/darwin-x64` |
-| macOS arm64 | `@acecode/darwin-arm64` |
-| Windows x64 | `@acecode/win32-x64` |
+| Linux x64 | `@aceagent/linux-x64` |
+| Linux arm64 | `@aceagent/linux-arm64` |
+| macOS x64 | `@aceagent/darwin-x64` |
+| macOS arm64 | `@aceagent/darwin-arm64` |
+| Windows x64 | `@aceagent/win32-x64` |
+| Windows arm64 | `@aceagent/win32-arm64` |
 
 注意：
 
@@ -38,7 +39,7 @@ acecode daemon start # 后台 daemon + Web UI (http://localhost:28080)
 
 ## 桌面版
 
-图形界面外壳见 [`@acecode/desktop`](https://www.npmjs.com/package/@acecode/desktop)。
+图形界面外壳见 [`@aceagent/desktop`](https://www.npmjs.com/package/@aceagent/desktop)。
 
 ## 许可
 

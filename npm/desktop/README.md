@@ -1,4 +1,4 @@
-# @acecode/desktop
+# @aceagent/desktop
 
 ACECode Desktop — ACECode AI coding agent 的多 workspace 桌面外壳
 （系统托盘、OS 通知、每个 workspace 独立 daemon）。
@@ -6,7 +6,7 @@ ACECode Desktop — ACECode AI coding agent 的多 workspace 桌面外壳
 ## 安装与启动
 
 ```bash
-npm install -g @acecode/desktop
+npm install -g @aceagent/desktop
 acecode-desktop
 ```
 
@@ -20,11 +20,11 @@ acecode-desktop
 | macOS x64 / arm64 | 系统 WebKit，无额外依赖 |
 | Linux x64 / arm64 | 需要 `libwebkit2gtk-4.1`（如 `sudo apt install libwebkit2gtk-4.1-0`） |
 
-真实二进制由 `@acecode/<os>-<cpu>` 平台包按平台自动安装（`optionalDependencies`），
+真实二进制由 `@aceagent/<os>-<cpu>` 平台包按平台自动安装（`optionalDependencies`），
 其中同时包含 daemon 主程序 `acecode`，桌面壳按同目录关系自动找到它。
 安装时**不要**使用 `--omit=optional` / `--no-optional`。
 
-终端 CLI 版本见 [`@acecode/cli`](https://www.npmjs.com/package/@acecode/cli)。
+终端 CLI 版本见 [`acecode`](https://www.npmjs.com/package/acecode)。
 
 ## 许可
 

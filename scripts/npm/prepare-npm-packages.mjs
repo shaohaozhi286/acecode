@@ -10,9 +10,9 @@
 //   extracted/acecode-macos-arm64/{acecode,ace-browser-host,ACECode.app/,...}
 //
 // 输出布局(发布顺序:先 platform/* 再 cli / desktop):
-//   npm-staging/platform/<os>-<cpu>/   五个平台二进制包 @acecode/<os>-<cpu>
-//   npm-staging/cli/                   @acecode/cli(模板拷贝 + 版本/optionalDependencies 盖章)
-//   npm-staging/desktop/               @acecode/desktop(同上)
+//   npm-staging/platform/<os>-<cpu>/   六个平台二进制包 @aceagent/<os>-<cpu>
+//   npm-staging/cli/                   acecode(模板拷贝 + 版本/optionalDependencies 盖章)
+//   npm-staging/desktop/               @aceagent/desktop(同上)
 //
 // 设计约束:
 // - 平台包同时装下 acecode / ace-browser-host / acecode-desktop(或 ACECode.app):
@@ -25,7 +25,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-const SCOPE = '@acecode';
+const SCOPE = '@aceagent';
+const CLI_PACKAGE = 'acecode';
+const DESKTOP_PACKAGE = `${SCOPE}/desktop`;
 const REPO_URL = 'https://github.com/shaohaozhi286/acecode';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -50,6 +52,13 @@ const PLATFORMS = [
     ciId: 'windows-x64',
     os: 'win32',
     cpu: 'x64',
+    files: ['acecode.exe', 'ace-browser-host.exe', 'acecode-desktop.exe'],
+    executables: [],
+  },
+  {
+    ciId: 'windows-arm64',
+    os: 'win32',
+    cpu: 'arm64',
     files: ['acecode.exe', 'ace-browser-host.exe', 'acecode-desktop.exe'],
     executables: [],
   },
@@ -137,7 +146,7 @@ function buildPlatformPackage(platform, version, inputRoot, outputRoot) {
   writeJson(path.join(outDir, 'package.json'), {
     name: pkgName,
     version,
-    description: `ACECode prebuilt binaries for ${platform.os}-${platform.cpu} (installed automatically by ${SCOPE}/cli and ${SCOPE}/desktop)`,
+    description: `ACECode prebuilt binaries for ${platform.os}-${platform.cpu} (installed automatically by ${CLI_PACKAGE} and ${DESKTOP_PACKAGE})`,
     homepage: REPO_URL,
     repository: { type: 'git', url: `git+${REPO_URL}.git` },
     license: 'SEE LICENSE IN README.md',
@@ -148,8 +157,8 @@ function buildPlatformPackage(platform, version, inputRoot, outputRoot) {
   fs.writeFileSync(
     path.join(outDir, 'README.md'),
     `# ${pkgName}\n\nACECode ${platform.os}-${platform.cpu} 预编译二进制。` +
-      `请不要直接安装本包,安装 [${SCOPE}/cli](https://www.npmjs.com/package/${SCOPE}/cli) 或 ` +
-      `[${SCOPE}/desktop](https://www.npmjs.com/package/${SCOPE}/desktop) 即可按平台自动获取。\n\n` +
+      `请不要直接安装本包,安装 [${CLI_PACKAGE}](https://www.npmjs.com/package/${CLI_PACKAGE}) 或 ` +
+      `[${DESKTOP_PACKAGE}](https://www.npmjs.com/package/${DESKTOP_PACKAGE}) 即可按平台自动获取。\n\n` +
       `源码与许可: <${REPO_URL}>\n`
   );
   return pkgName;

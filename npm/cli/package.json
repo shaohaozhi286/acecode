@@ -1,5 +1,5 @@
 {
-  "name": "@acecode/cli",
+  "name": "acecode",
   "version": "0.0.0-dev",
   "description": "ACECode — AI coding agent with terminal TUI, web UI and daemon (prebuilt native binary)",
   "keywords": [
@@ -16,6 +16,9 @@
     "url": "git+https://github.com/shaohaozhi286/acecode.git"
   },
   "license": "SEE LICENSE IN README.md",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "acecode": "bin/acecode.js"
   },
