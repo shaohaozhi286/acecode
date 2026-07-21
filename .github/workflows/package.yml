@@ -42,6 +42,14 @@ jobs:
             msvc_arch: amd64
             build_desktop: true
             cmake_extra_args: -DACECODE_BUILD_DESKTOP=ON
+          - id: windows-arm64
+            os: windows-11-arm
+            triplet: arm64-windows-static
+            executable: acecode.exe
+            archive_extension: zip
+            msvc_arch: amd64_arm64
+            build_desktop: true
+            cmake_extra_args: -DACECODE_BUILD_DESKTOP=ON
           - id: macos-x64
             os: macos-15
             triplet: x64-osx
