@@ -26,7 +26,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const SCOPE = '@aceagent';
-const CLI_PACKAGE = 'acecode';
+const CLI_PACKAGE = '@aceagent/acecode';
 const DESKTOP_PACKAGE = `${SCOPE}/desktop`;
 const REPO_URL = 'https://github.com/shaohaozhi286/acecode';
 

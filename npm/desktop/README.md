@@ -24,7 +24,7 @@ acecode-desktop
 其中同时包含 daemon 主程序 `acecode`，桌面壳按同目录关系自动找到它。
 安装时**不要**使用 `--omit=optional` / `--no-optional`。
 
-终端 CLI 版本见 [`acecode`](https://www.npmjs.com/package/acecode)。
+终端 CLI 版本见 [`@aceagent/acecode`](https://www.npmjs.com/package/@aceagent/acecode)。
 
 ## 许可
 

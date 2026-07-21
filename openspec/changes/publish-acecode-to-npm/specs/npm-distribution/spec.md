@@ -1,21 +1,21 @@
 ## ADDED Requirements
 
-### Requirement: Short CLI package name
-The npm distribution SHALL publish the ACECode CLI launcher as the public unscoped package `acecode`.
+### Requirement: Organization-owned CLI package
+The npm distribution SHALL publish the ACECode CLI launcher as the public scoped package `@aceagent/acecode` and SHALL expose the executable name `acecode`.
 
 #### Scenario: Local CLI installation
-- **WHEN** a user runs `npm i acecode` on a supported platform
+- **WHEN** a user runs `npm i @aceagent/acecode` on a supported platform
 - **THEN** npm installs the CLI launcher and the matching native platform package
 
 #### Scenario: Global CLI installation
-- **WHEN** a user runs `npm i -g acecode` on a supported platform
+- **WHEN** a user runs `npm i -g @aceagent/acecode` on a supported platform
 - **THEN** the `acecode` command is available on the user's command path
 
 ### Requirement: Organization-owned native packages
 The npm distribution SHALL publish the desktop launcher and native platform packages under the `@aceagent` scope.
 
 #### Scenario: Native dependency selection
-- **WHEN** npm resolves `acecode` or `@aceagent/desktop`
+- **WHEN** npm resolves `@aceagent/acecode` or `@aceagent/desktop`
 - **THEN** exact-version optional dependencies identify the supported `@aceagent/<os>-<cpu>` packages
 
 #### Scenario: Supported platform set

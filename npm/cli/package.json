@@ -1,5 +1,5 @@
 {
-  "name": "acecode",
+  "name": "@aceagent/acecode",
   "version": "0.0.0-dev",
   "description": "ACECode — AI coding agent with terminal TUI, web UI and daemon (prebuilt native binary)",
   "keywords": [

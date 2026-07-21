@@ -40,7 +40,7 @@ function resolvePlatformDir() {
     fail(
       `平台包 ${pkg} 未安装。\n` +
         `若安装时使用了 --omit=optional / --no-optional,请去掉该参数重新安装;\n` +
-        '否则请尝试重新安装 acecode。'
+        '否则请尝试重新安装 @aceagent/acecode。'
     );
   }
   return path.dirname(manifestPath);
@@ -52,7 +52,7 @@ const exe = path.join(
   process.platform === 'win32' ? 'acecode.exe' : 'acecode'
 );
 if (!fs.existsSync(exe)) {
-  fail(`平台包不完整:找不到 ${exe},请重新安装 acecode。`);
+  fail(`平台包不完整:找不到 ${exe},请重新安装 @aceagent/acecode。`);
 }
 
 const result = spawnSync(exe, process.argv.slice(2), { stdio: 'inherit' });

@@ -1,6 +1,6 @@
 ## 1. Package Layout
 
-- [x] 1.1 Rename the CLI package to `acecode` and move desktop/platform resolution to `@aceagent`
+- [x] 1.1 Rename the CLI package to `@aceagent/acecode` and move desktop/platform resolution to `@aceagent`
 - [x] 1.2 Add the Windows ARM64 native npm package and exact optional dependency
 - [x] 1.3 Update npm package documentation and repository publishing notes
 
@@ -12,11 +12,11 @@
 ## 3. Verification
 
 - [x] 3.1 Generate all package manifests from synthetic artifacts and run npm pack checks
-- [x] 3.2 Install the packed Windows package plus `acecode` launcher in a clean temporary project and run the launcher
+- [x] 3.2 Install the packed Windows package plus `@aceagent/acecode` launcher in a clean temporary project and run the launcher
 - [x] 3.3 Run strict OpenSpec validation, workflow checks, and `git diff --check`
 
 ## 4. Publication
 
-- [ ] 4.1 Commit and push only the npm publishing and OpenSpec changes
-- [ ] 4.2 Dispatch the 0.7.7 npm backfill and wait for the workflow to finish
-- [ ] 4.3 Verify npm registry metadata and a clean `npm i acecode` installation
+- [x] 4.1 Commit and push only the npm publishing and OpenSpec changes
+- [ ] 4.2 Retry the 0.7.7 npm backfill with the scoped CLI package and wait for the workflow to finish
+- [ ] 4.3 Verify npm registry metadata and a clean `npm i @aceagent/acecode` installation

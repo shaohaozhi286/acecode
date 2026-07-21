@@ -1,10 +1,10 @@
 ## Why
 
-ACECode tag builds currently report success even when npm publishing is skipped, and the generated package scope does not match the existing `aceagent` npm organization. Users also cannot install the CLI with the desired `npm i acecode` command because the main package is generated as a scoped package.
+ACECode tag builds previously reported success even when npm publishing was skipped, and the generated package scope did not match the existing `aceagent` npm organization. An attempted public backfill then established that npm rejects the unscoped name `acecode` as too similar to the active `ace-code` package, so the user selected the organization-owned `@aceagent/acecode` name.
 
 ## What Changes
 
-- Publish the CLI launcher as the public unscoped package `acecode` so local installs use `npm i acecode` and global installs use `npm i -g acecode`.
+- Publish the CLI launcher as the public scoped package `@aceagent/acecode`, while retaining the `acecode` executable name.
 - Publish the desktop launcher and native platform packages under the existing `@aceagent` scope.
 - Include Windows ARM64 in the npm platform-package set alongside the existing supported platforms.
 - Make a missing npm publishing credential fail visibly instead of silently succeeding.
@@ -24,5 +24,5 @@ None.
 ## Impact
 
 - Affects npm launcher templates under `npm/`, the staging generator in `scripts/npm/prepare-npm-packages.mjs`, and `.github/workflows/package.yml`.
-- Publishes public registry packages named `acecode`, `@aceagent/desktop`, and `@aceagent/<platform>`.
+- Publishes public registry packages named `@aceagent/acecode`, `@aceagent/desktop`, and `@aceagent/<platform>`.
 - Uses the repository `NPM_TOKEN` secret for the initial publication and retries.

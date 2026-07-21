@@ -1,11 +1,11 @@
-# acecode
+# @aceagent/acecode
 
 ACECode — AI coding agent，单二进制自带终端 TUI、后台 daemon 与浏览器 Web UI。
 
 ## 安装
 
 ```bash
-npm install -g acecode
+npm install -g @aceagent/acecode
 ```
 
 安装后可直接使用 `acecode` 命令：

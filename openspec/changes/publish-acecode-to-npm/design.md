@@ -1,12 +1,12 @@
 ## Context
 
-The existing tag workflow already assembles one small JavaScript launcher package for each user-facing command and native packages selected through `optionalDependencies`. The implementation currently hard-codes the nonexistent `@acecode` scope, omits the newly supported Windows ARM64 artifact, and treats an absent `NPM_TOKEN` as a successful no-op. The public `aceagent` npm organization and repository `NPM_TOKEN` now exist, while the requested CLI install name is the unscoped package `acecode`.
+The existing tag workflow already assembles one small JavaScript launcher package for each user-facing command and native packages selected through `optionalDependencies`. The implementation originally hard-coded the nonexistent `@acecode` scope, omitted the newly supported Windows ARM64 artifact, and treated an absent `NPM_TOKEN` as a successful no-op. The public `aceagent` npm organization and repository `NPM_TOKEN` now exist. The first real backfill published all six platform packages but npm rejected unscoped `acecode` because it is too similar to the active `ace-code` package; the user then selected `@aceagent/acecode`.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Make `npm i acecode` install the CLI launcher and exactly one compatible native package.
+- Make `npm i @aceagent/acecode` install the CLI launcher and exactly one compatible native package.
 - Keep desktop and native binary packages in the controlled `@aceagent` namespace.
 - Publish tag builds automatically and permit an explicit version backfill from a manual workflow run.
 - Fail publishing visibly when authentication or registry publication fails.
@@ -20,11 +20,11 @@ The existing tag workflow already assembles one small JavaScript launcher packag
 
 ## Decisions
 
-### Separate the CLI name from the native-package scope
+### Keep the CLI in the organization-owned scope
 
-The CLI template will use the unscoped name `acecode`, while the generator and both launchers will use `@aceagent` when resolving native packages. The desktop template will use `@aceagent/desktop`. This keeps the requested short install command without placing large platform artifacts in the global namespace.
+The CLI template will use `@aceagent/acecode`, the desktop template will use `@aceagent/desktop`, and both launchers will resolve native packages under `@aceagent`. The CLI package still exposes a binary named `acecode`, so global installs and `npx acecode` keep the product command unchanged.
 
-Alternative considered: keep `@aceagent/cli`. This avoids possible registry similarity checks but does not satisfy `npm i acecode`.
+Alternative considered: publish unscoped `acecode`. The registry authoritatively rejected that name as too similar to `ace-code`, so the scoped name is required. `@aceagent/acecode` was preferred over `@aceagent/cli` because it preserves the product name in the package coordinate.
 
 ### Publish one native package per npm-supported OS/CPU pair
 
@@ -38,7 +38,7 @@ Alternative considered: download artifacts from an older workflow run. A fresh m
 
 ### Preserve idempotent ordered publication
 
-Native packages publish first, followed by `acecode` and `@aceagent/desktop`. Before each publish, the job checks whether the exact package version exists and skips it when present. A retry can therefore finish after a partial registry publication without attempting to overwrite immutable versions.
+Native packages publish first, followed by `@aceagent/acecode` and `@aceagent/desktop`. Before each publish, the job checks whether the exact package version exists and skips it when present. A retry can therefore finish after a partial registry publication without attempting to overwrite immutable versions.
 
 ### Treat absent credentials as failure
 
@@ -46,7 +46,7 @@ Until trusted publishing is configured, an empty `NPM_TOKEN` will emit an Action
 
 ## Risks / Trade-offs
 
-- [The registry may reject `acecode` as too similar to `ace-code`] -> Publish the real package to obtain the authoritative result; retain already-published `@aceagent` platform versions for an idempotent retry or request npm name review if rejected.
+- [Users must include the scope when installing] -> Document `npm i @aceagent/acecode`; keep the installed executable and `npx` command as `acecode`.
 - [A manual backfill could publish the wrong source version] -> Require the input version to match `project(acecode VERSION ...)` in `CMakeLists.txt`.
 - [A later platform matrix addition could be omitted from npm] -> Keep the generator platform table and workflow extraction list explicit and validate all expected inputs.
 - [A publish can stop after some packages succeed] -> Check exact versions before every publish and keep platform-first ordering.
@@ -57,7 +57,7 @@ Until trusted publishing is configured, an empty `NPM_TOKEN` will emit an Action
 2. Validate generated manifests and local installation with synthetic platform artifacts.
 3. Commit and push only the npm/OpenSpec files, preserving unrelated working-tree edits.
 4. Dispatch `package.yml` with `npm_version=0.7.7` and wait for the npm job.
-5. Verify registry metadata and install/run `acecode` from a clean temporary project.
+5. Verify registry metadata and install/run `@aceagent/acecode` from a clean temporary project.
 
 Rollback consists of reverting the repository configuration before any successful publish. Published npm versions are immutable; after publication, corrections require a new version rather than overwriting 0.7.7.
 
