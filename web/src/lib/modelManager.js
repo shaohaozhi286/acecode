@@ -237,14 +237,18 @@ export function canDeleteSavedModel({ name = '', busy = false } = {}) {
   return true;
 }
 
+export function isIntegerContextWindowKInput(value) {
+  return /^\d*$/.test(String(value ?? ''));
+}
+
 export function parseContextWindowK(value) {
   const raw = String(value ?? '').trim();
   if (!raw) return { ok: true, tokens: null };
-  if (!/^\d+(?:\.\d{1,3})?$/.test(raw)) {
+  if (!/^\d+$/.test(raw)) {
     return { ok: false, code: 'INVALID_CONTEXT_WINDOW' };
   }
   const k = Number(raw);
-  const tokens = Math.round(k * 1000);
+  const tokens = k * 1000;
   if (!Number.isFinite(k) || k <= 0 || tokens <= 0 || tokens > 2147483647) {
     return { ok: false, code: 'INVALID_CONTEXT_WINDOW' };
   }
@@ -254,8 +258,8 @@ export function parseContextWindowK(value) {
 export function formatContextWindowK(tokens) {
   const value = Number(tokens);
   if (!Number.isFinite(value) || value <= 0) return '';
-  const k = value / 1000;
-  return Number.isInteger(k) ? String(k) : String(Number(k.toFixed(3)));
+  const k = Math.floor(value / 1000);
+  return k > 0 ? String(k) : '';
 }
 
 function positiveContextWindow(value) {

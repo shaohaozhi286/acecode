@@ -40,6 +40,7 @@ import {
   filterModelIds,
   formatRequestHeadersJson,
   formatContextWindowK,
+  isIntegerContextWindowKInput,
   normalizeModelCapabilities,
   normalizeModelProbeResult,
   parseContextWindowK,
@@ -200,7 +201,7 @@ export function SettingsPage({
                 <div
                   id={headingId}
                   className={clsx(
-                    'px-4 pb-1 text-[11px] font-medium text-fg-mute',
+                    'px-4 pb-1 text-[11px] font-medium text-fg-mute opacity-75',
                     groupIndex === 0 ? 'pt-1' : 'pt-4',
                   )}
                 >
@@ -4052,11 +4053,18 @@ function ModelFormPreview({
         <input
           type="number"
           min="0"
-          step="0.001"
+          step="1"
           className={clsx(fieldClass, 'text-[12px]')}
           placeholder="例如: 128"
           value={data.context_window_k || ''}
-          onChange={(e) => setData({ context_window_k: e.target.value })}
+          onKeyDown={(e) => {
+            if (['.', ',', 'e', 'E', '+', '-'].includes(e.key)) e.preventDefault();
+          }}
+          onChange={(e) => {
+            if (isIntegerContextWindowKInput(e.target.value)) {
+              setData({ context_window_k: e.target.value });
+            }
+          }}
         />
       </div>
 

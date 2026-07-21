@@ -11,6 +11,7 @@ import {
   filterModelIds,
   formatRequestHeadersJson,
   formatContextWindowK,
+  isIntegerContextWindowKInput,
   modelNameSlug,
   normalizeModelCapabilities,
   parseContextWindowK,
@@ -242,21 +243,28 @@ run('canDeleteSavedModel 仅在缺少 name 或 busy 时拒绝', () => {
   assert.equal(canDeleteSavedModel({ name: 'fast', busy: true }), false);
 });
 
-run('parseContextWindowK 把 K 单位换算为 token 数', () => {
+run('上下文窗口 K 输入只接受整数或空值', () => {
+  assert.equal(isIntegerContextWindowKInput('128'), true);
+  assert.equal(isIntegerContextWindowKInput(''), true);
+  assert.equal(isIntegerContextWindowKInput('131.072'), false);
+  assert.equal(isIntegerContextWindowKInput('1e3'), false);
+});
+
+run('parseContextWindowK 把整数 K 单位换算为 token 数', () => {
   assert.deepEqual(parseContextWindowK('128'), { ok: true, tokens: 128000 });
-  assert.deepEqual(parseContextWindowK('131.072'), { ok: true, tokens: 131072 });
   assert.deepEqual(parseContextWindowK(''), { ok: true, tokens: null });
 });
 
-run('parseContextWindowK 拒绝非正数或超精度小数', () => {
+run('parseContextWindowK 拒绝非正整数', () => {
   assert.equal(parseContextWindowK('0').code, 'INVALID_CONTEXT_WINDOW');
   assert.equal(parseContextWindowK('abc').code, 'INVALID_CONTEXT_WINDOW');
+  assert.equal(parseContextWindowK('131.072').code, 'INVALID_CONTEXT_WINDOW');
   assert.equal(parseContextWindowK('1.2345').code, 'INVALID_CONTEXT_WINDOW');
 });
 
-run('formatContextWindowK 把 token 数显示为 K', () => {
+run('formatContextWindowK 把 token 数显示为不带小数的 K', () => {
   assert.equal(formatContextWindowK(128000), '128');
-  assert.equal(formatContextWindowK(131072), '131.072');
+  assert.equal(formatContextWindowK(131072), '131');
   assert.equal(formatContextWindowK(0), '');
 });
 

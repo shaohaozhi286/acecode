@@ -92,4 +92,5 @@ test('SettingsPage renders accessible groups inside the scrollable navigation', 
   assert.match(source, /aria-labelledby=\{headingId\}/);
   assert.match(source, /aria-current=\{active \? 'page' : undefined\}/);
   assert.match(source, /<nav className="[^"]*overflow-y-auto/);
+  assert.match(source, /text-fg-mute opacity-75/);
 });
