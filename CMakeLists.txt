@@ -243,6 +243,10 @@ endforeach()
 # renderer state and are used by main.cpp plus unit tests, so compile them once
 # in acecode_testable and remove them from the TUI-only source group.
 set(ACECODE_TESTABLE_TUI_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/markdown/markdown_formatter.cpp
+    ${CMAKE_SOURCE_DIR}/src/markdown/markdown_lexer.cpp
+    ${CMAKE_SOURCE_DIR}/src/markdown/mermaid_renderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/markdown/syntax_highlight.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/ask_question_overlay.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/text_truncation.cpp
     ${CMAKE_SOURCE_DIR}/src/tui/paste_handler.cpp
