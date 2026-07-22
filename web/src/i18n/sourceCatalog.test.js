@@ -17,6 +17,9 @@ function sourceFiles(folder) {
 
 const sourceRoot = path.resolve(process.cwd(), 'src');
 const catalogCopy = new Set(Object.values(sourceCatalogs['zh-CN']));
+const catalogKeyByCopy = new Map(
+  Object.entries(sourceCatalogs['zh-CN']).map(([key, text]) => [text, key]),
+);
 const opaqueCopy = new Set(OPAQUE_STATIC_COPY);
 const uncovered = sourceFiles(sourceRoot).flatMap((file) =>
   collectStaticCopy(fs.readFileSync(file, 'utf8'), file)
@@ -62,4 +65,44 @@ assert.match(
   /__acecodeT\("source\.[^"]+"\) \+ " "/,
   'inline JSX space after localized copy must survive compilation',
 );
+
+const moduleScopeFixtures = [
+  {
+    file: 'lib/topBarQuickActions.js',
+    copy: ['新对话', '循环任务', '查找内容', '设置', '关于 ACECode', '检查更新', '退出 ACECode'],
+  },
+  {
+    file: 'lib/sidebarNavigation.js',
+    copy: ['新建任务', '循环任务', '搜索任务', '置顶任务', '任务', '工作区', 'MCP 服务器', '模型', '技能'],
+  },
+  {
+    file: 'lib/permissionMode.js',
+    copy: ['默认权限', '写/执行操作前确认', '自动接收编辑', '文件编辑自动通过,命令仍确认', '完全访问权限', '跳过所有工具权限确认'],
+  },
+  {
+    file: 'lib/settingsNavigation.js',
+    copy: ['个人', '常规', '外观', '配置', '个性化', '使用情况', '集成', '连接器', '编码', '工具', '钩子', '已归档', '已归档会话', '支持', '问题反馈', '关于'],
+  },
+  { file: 'components/SettingsPage.jsx', copy: ['小', '中', '大'] },
+  { file: 'components/SidePanel.jsx', copy: ['变更'] },
+];
+
+for (const fixture of moduleScopeFixtures) {
+  const filename = path.join(sourceRoot, fixture.file);
+  const compiled = transformSync(fs.readFileSync(filename, 'utf8'), {
+    filename,
+    configFile: false,
+    babelrc: false,
+    parserOpts: { plugins: ['jsx'] },
+    plugins: [localizeStaticCopyBabelPlugin],
+  }).code;
+  for (const text of fixture.copy) {
+    const key = catalogKeyByCopy.get(text);
+    assert.ok(key, `${fixture.file}: missing source catalog entry for ${text}`);
+    assert.ok(
+      compiled.includes(`__acecodeT("source.${key}")`),
+      `${fixture.file}: module-scope product copy was not compiled: ${text}`,
+    );
+  }
+}
 console.log('[pass] static-copy compiler coverage and opaque-content boundary');

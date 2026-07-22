@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import { applyLocalePreference, localePreference } from '../i18n/index.js';
+import { GUI_LOCALE_RELOAD_STORAGE_KEY } from '../i18n/locale.js';
 import { loadUiLocale, persistUiLocale, syncNativeLocale } from './uiLocale.js';
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+}
 
 await applyLocalePreference('zh-CN', { cache: false });
 
@@ -32,6 +42,24 @@ const saved = await persistUiLocale('auto', {
 });
 assert.deepEqual(saved, { preference: 'auto', locale: 'en-US' });
 assert.deepEqual(savedValues, ['auto']);
+
+const sessionStorage = memoryStorage();
+let reloadCount = 0;
+await persistUiLocale('en-US', {
+  setUiLocale: async (value) => ({ locale: value }),
+}, {
+  scope: {
+    aceDesktop_applyLocale: async () => ({ ok: true, locale: 'en-US' }),
+    location: { reload: () => { reloadCount += 1; } },
+    sessionStorage,
+  },
+});
+assert.deepEqual(
+  JSON.parse(sessionStorage.getItem(GUI_LOCALE_RELOAD_STORAGE_KEY)),
+  { preference: 'en-US', locale: 'en-US' },
+);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(reloadCount, 1);
 
 await applyLocalePreference('zh-CN', { cache: false });
 await assert.rejects(

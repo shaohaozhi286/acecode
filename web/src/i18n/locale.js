@@ -1,4 +1,5 @@
 export const GUI_LOCALE_STORAGE_KEY = 'acecode.guiLocale.v1';
+export const GUI_LOCALE_RELOAD_STORAGE_KEY = 'acecode.guiLocale.reload.v1';
 
 export const GUI_LOCALE_PREFERENCES = Object.freeze([
   'auto',
@@ -23,7 +24,48 @@ export function resolveLocalePreference(preference, systemLocale = '') {
   return normalized === 'auto' ? systemLocaleToSupported(systemLocale) : normalized;
 }
 
+export function cacheLocaleReloadOverride(preference, locale, scope = globalThis) {
+  const normalizedPreference = normalizeLocalePreference(preference);
+  const normalizedLocale = GUI_LOCALES.includes(locale)
+    ? locale
+    : resolveLocalePreference(normalizedPreference, scope?.navigator?.language || '');
+  const state = { preference: normalizedPreference, locale: normalizedLocale };
+  try {
+    scope?.sessionStorage?.setItem(
+      GUI_LOCALE_RELOAD_STORAGE_KEY,
+      JSON.stringify(state),
+    );
+  } catch {
+    // A disabled/private sessionStorage must not prevent locale switching.
+  }
+  return state;
+}
+
+export function consumeLocaleReloadOverride(scope = globalThis) {
+  let raw = '';
+  try {
+    raw = scope?.sessionStorage?.getItem(GUI_LOCALE_RELOAD_STORAGE_KEY) || '';
+    scope?.sessionStorage?.removeItem(GUI_LOCALE_RELOAD_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    const state = JSON.parse(raw);
+    const preference = normalizeLocalePreference(state?.preference, '');
+    const locale = GUI_LOCALES.includes(state?.locale) ? state.locale : '';
+    return preference && locale ? { preference, locale } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function initialLocaleState(scope = globalThis) {
+  // The native Desktop init script is registered when the WebView is created.
+  // A same-run page reload therefore still injects the locale that was active
+  // at process start. Prefer this one-shot handoff after a successful Settings
+  // change so module-scope translated metadata is evaluated in the new locale.
+  const reloadOverride = consumeLocaleReloadOverride(scope);
   const injectedPreference = normalizeLocalePreference(
     scope?.__ACECODE_LOCALE_PREFERENCE__,
     '',
@@ -37,7 +79,10 @@ export function initialLocaleState(scope = globalThis) {
   })();
   // A missing ui.locale belongs to pre-localization configurations. Preserve
   // their historical Chinese UI until the daemon explicitly returns a value.
-  const preference = injectedPreference || storedPreference || 'zh-CN';
+  const preference = reloadOverride?.preference
+    || injectedPreference
+    || storedPreference
+    || 'zh-CN';
   const injectedLocale = GUI_LOCALES.includes(scope?.__ACECODE_LOCALE__)
     ? scope.__ACECODE_LOCALE__
     : '';
@@ -46,7 +91,9 @@ export function initialLocaleState(scope = globalThis) {
     || '';
   return {
     preference,
-    locale: injectedLocale || resolveLocalePreference(preference, browserLocale),
+    locale: reloadOverride?.locale
+      || injectedLocale
+      || resolveLocalePreference(preference, browserLocale),
   };
 }
 

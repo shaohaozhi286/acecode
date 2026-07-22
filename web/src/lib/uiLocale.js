@@ -3,7 +3,10 @@ import {
   effectiveLocale,
   localePreference,
 } from '../i18n/index.js';
-import { normalizeLocalePreference } from '../i18n/locale.js';
+import {
+  cacheLocaleReloadOverride,
+  normalizeLocalePreference,
+} from '../i18n/locale.js';
 
 function parseBridgeResult(raw) {
   if (!raw) return null;
@@ -44,6 +47,7 @@ export async function persistUiLocale(preference, apiClient, options = {}) {
     const scope = options.scope || globalThis;
     if (options.reloadStaticCopy !== false
         && typeof scope?.location?.reload === 'function') {
+      cacheLocaleReloadOverride(applied.preference, applied.locale, scope);
       setTimeout(() => scope.location.reload(), 0);
     }
     return applied;
