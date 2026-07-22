@@ -13,6 +13,6 @@
 ## 3. Validation
 
 - [x] 3.1 Run YAML/workflow checks, production and test manifest checks, strict OpenSpec validation, and `git diff --check`
-- [ ] 3.2 Push the isolated validation branch and complete a first full manual package run
-- [ ] 3.3 Complete a second full manual package run on the same commit and verify supported vcpkg cache restoration with no `x-gha` warning
-- [ ] 3.4 Compare critical-path timing with the 24-minute baseline and audit all expected package/debug artifacts
+- [x] 3.2 Push the isolated validation branch and complete a first full manual package run
+- [x] 3.3 Complete a second full manual package run on the same commit and verify supported vcpkg cache restoration with no `x-gha` warning
+- [x] 3.4 Compare critical-path timing with the 24-minute baseline and audit all expected package/debug artifacts
