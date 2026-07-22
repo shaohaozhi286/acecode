@@ -140,6 +140,11 @@ TEST(AskQuestionOverlayTest, TwoColumnLayoutWrapsHeaderAndOptionsWithinMainColum
     EXPECT_EQ(single_column_width, 120);
     EXPECT_EQ(two_column_width, 76);
     EXPECT_LT(two_column_width, single_column_width);
+    // 切换到双栏的第一帧仍可能拿到上一帧 128 列的单栏 reflect box；
+    // 当前 sidebar 组合必须立即成为上限，不能等下一帧才开始换行。
+    EXPECT_EQ(acecode::tui::ask_overlay_content_width_for_frame(
+                  kTerminalWidth, 128, true, kSidebarWidth),
+              two_column_width);
 
     AskQuestion q = make_question();
     q.header =

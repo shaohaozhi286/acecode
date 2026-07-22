@@ -215,15 +215,22 @@ int ask_overlay_content_width_for_frame(int terminal_width,
     terminal_width = std::max(1, terminal_width);
     regular_sidebar_width = std::max(0, regular_sidebar_width);
 
+    int estimated_main_column_width =
+        terminal_width - kOuterFrameHorizontalChromeWidth;
+    if (regular_sidebar_visible) {
+        estimated_main_column_width -=
+            regular_sidebar_width + kSidebarSeparatorWidth;
+    }
+
     // reflect(chat_box) contains the previous rendered main-column width. On
-    // the first frame Box{} reports one cell, so estimate the column from the
-    // same outer-frame/sidebar composition instead of treating it as valid.
-    int main_column_width = measured_main_column_width;
-    if (main_column_width <= kAskOverlayMainColumnChromeWidth) {
-        main_column_width = terminal_width - kOuterFrameHorizontalChromeWidth;
-        if (regular_sidebar_visible) {
-            main_column_width -= regular_sidebar_width + kSidebarSeparatorWidth;
-        }
+    // the first frame Box{} reports one cell; after a resize it can also still
+    // contain the wider, single-column box. The current composition estimate
+    // is therefore always an upper bound, while a valid narrower measurement
+    // can keep wrapping conservative until the next frame catches up.
+    int main_column_width = estimated_main_column_width;
+    if (measured_main_column_width > kAskOverlayMainColumnChromeWidth) {
+        main_column_width = std::min(
+            measured_main_column_width, estimated_main_column_width);
     }
 
     const int terminal_bound = std::max(
