@@ -5,7 +5,6 @@
                          "cpr",
                          "crow",
                          "ftxui",
-                         "gtest",
                          "libzip",
                          "nlohmann-json",
                          "sqlite3",
@@ -13,5 +12,13 @@
                              "name":  "wintoast",
                              "platform":  "windows \u0026 !mingw"
                          }
-                     ]
+                     ],
+    "features":  {
+                     "tests":  {
+                                   "description":  "Dependencies required only by ACECode unit tests",
+                                   "dependencies":  [
+                                                        "gtest"
+                                                    ]
+                               }
+                 }
 }

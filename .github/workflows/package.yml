@@ -7,20 +7,57 @@ on:
         description: npm version to backfill after a full package build (must match CMakeLists.txt)
         required: false
         type: string
-  pull_request:
   push:
-    branches:
-      - master
     tags:
       - "v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
 jobs:
+  build-web-ui:
+    name: web-dist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build web UI
+        shell: bash
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Upload web UI
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
   build-and-package:
     name: ${{ matrix.id }}
+    needs: build-web-ui
     runs-on: ${{ matrix.os }}
+    env:
+      VCPKG_BINARY_SOURCES: clear;default,readwrite
     strategy:
       fail-fast: false
       matrix:
@@ -48,7 +85,7 @@ jobs:
             build_desktop: true
             cmake_extra_args: -DACECODE_BUILD_DESKTOP=ON
           - id: windows-arm64
-            os: windows-11-arm
+            os: windows-2022
             triplet: arm64-windows-static
             executable: acecode.exe
             archive_extension: zip
@@ -85,6 +122,14 @@ jobs:
       - name: Run vcpkg
         uses: lukka/run-vcpkg@v11
 
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-v2-${{ matrix.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
+          restore-keys: |
+            vcpkg-v2-${{ matrix.os }}-${{ matrix.triplet }}-
+
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux' && matrix.build_desktop
         shell: bash
@@ -92,22 +137,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Download web UI
+        uses: actions/download-artifact@v4
         with:
-          node-version: '20'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: '9'
-
-      - name: Build web UI
-        shell: bash
-        run: |
-          cd web
-          pnpm install --frozen-lockfile
-          pnpm build
+          name: web-dist
+          path: web/dist
 
       - name: Configure
         shell: bash
@@ -276,6 +310,28 @@ jobs:
           }
           Compress-Archive -Path "$packageDir/*" -DestinationPath "acecode-${{ matrix.id }}.zip" -Force
 
+      - name: Verify Windows ARM64 package
+        if: matrix.id == 'windows-arm64'
+        shell: pwsh
+        run: |
+          $packageDir = "dist/acecode-${{ matrix.id }}"
+          $expectedExecutables = @(
+            "acecode.exe",
+            "acecode-desktop.exe",
+            "ace-browser-host.exe"
+          )
+          foreach ($name in $expectedExecutables) {
+            $path = Join-Path $packageDir $name
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing ARM64 package executable: $path"
+            }
+            $headers = (& dumpbin /headers $path | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $headers -notmatch '(?im)\bAA64 machine\b') {
+              throw "$name is not an ARM64 PE executable"
+            }
+            Write-Host "${name}: ARM64"
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -335,12 +391,13 @@ jobs:
 
   build-linux-old-package:
     name: ${{ matrix.id }}
+    needs: build-web-ui
     runs-on: ${{ matrix.os }}
     container:
       image: buildpack-deps:buster
     env:
       DEBIAN_FRONTEND: noninteractive
-      VCPKG_BINARY_SOURCES: clear
+      VCPKG_BINARY_SOURCES: clear;default,readwrite
       VCPKG_FORCE_SYSTEM_BINARIES: 1
     strategy:
       fail-fast: false
@@ -400,22 +457,19 @@ jobs:
       - name: Run vcpkg
         uses: lukka/run-vcpkg@v11
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
         with:
-          node-version: '20'
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-v2-buster-${{ matrix.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
+          restore-keys: |
+            vcpkg-v2-buster-${{ matrix.os }}-${{ matrix.triplet }}-
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - name: Download web UI
+        uses: actions/download-artifact@v4
         with:
-          version: '9'
-
-      - name: Build web UI
-        shell: bash
-        run: |
-          cd web
-          pnpm install --frozen-lockfile
-          pnpm build
+          name: web-dist
+          path: web/dist
 
       - name: Configure
         shell: bash

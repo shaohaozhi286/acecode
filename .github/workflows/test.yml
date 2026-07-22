@@ -11,6 +11,8 @@ jobs:
   unit-tests:
     name: unit-tests (linux-x64)
     runs-on: ubuntu-22.04
+    env:
+      VCPKG_BINARY_SOURCES: clear;default,readwrite
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,6 +28,14 @@ jobs:
       - name: Run vcpkg
         uses: lukka/run-vcpkg@v11
 
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-v2-test-ubuntu-22.04-x64-linux-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
+          restore-keys: |
+            vcpkg-v2-test-ubuntu-22.04-x64-linux-
+
       - name: Configure
         shell: bash
         run: |
@@ -33,6 +43,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DVCPKG_MANIFEST_FEATURES=tests \
             -DBUILD_TESTING=ON
 
       - name: Build test binary
