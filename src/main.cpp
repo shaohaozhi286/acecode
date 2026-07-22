@@ -4228,7 +4228,12 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
             ? nullptr
             : &state.ask_questions[state.ask_current_question];
         const auto terminal_size = Terminal::Size();
-        const int content_width = std::max(20, terminal_size.dimx - 10);
+        const int content_width =
+            acecode::tui::ask_overlay_content_width_for_frame(
+                terminal_width,
+                current_message_width,
+                show_regular_sidebar,
+                kRegularSidebarWidthCols);
         const int max_visible_rows =
             acecode::tui::ask_overlay_visible_rows_for_terminal(
                 terminal_size.dimy);

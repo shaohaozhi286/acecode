@@ -12,6 +12,15 @@ namespace {
 
 constexpr int kAskOverlayReservedTerminalRows = 12;
 constexpr int kAskOverlayMinimumVisibleRows = 4;
+constexpr int kAskOverlayMinimumContentWidth = 8;
+// Full-width layout reserves the outer frame, overlay border, scrollbar, and
+// the existing breathing room around the overlay text.
+constexpr int kAskOverlayTerminalChromeWidth = 10;
+// A reflected main-column box is already inside the outer frame, so only the
+// overlay-local border, scrollbar, and breathing room remain.
+constexpr int kAskOverlayMainColumnChromeWidth = 8;
+constexpr int kOuterFrameHorizontalChromeWidth = 2;
+constexpr int kSidebarSeparatorWidth = 1;
 
 bool is_utf8_continuation(unsigned char c) {
     return (c & 0xC0) == 0x80;
@@ -199,13 +208,41 @@ int display_width_cells(const std::string& text) {
     return std::max(0, ftxui::string_width(text));
 }
 
+int ask_overlay_content_width_for_frame(int terminal_width,
+                                        int measured_main_column_width,
+                                        bool regular_sidebar_visible,
+                                        int regular_sidebar_width) {
+    terminal_width = std::max(1, terminal_width);
+    regular_sidebar_width = std::max(0, regular_sidebar_width);
+
+    // reflect(chat_box) contains the previous rendered main-column width. On
+    // the first frame Box{} reports one cell, so estimate the column from the
+    // same outer-frame/sidebar composition instead of treating it as valid.
+    int main_column_width = measured_main_column_width;
+    if (main_column_width <= kAskOverlayMainColumnChromeWidth) {
+        main_column_width = terminal_width - kOuterFrameHorizontalChromeWidth;
+        if (regular_sidebar_visible) {
+            main_column_width -= regular_sidebar_width + kSidebarSeparatorWidth;
+        }
+    }
+
+    const int terminal_bound = std::max(
+        kAskOverlayMinimumContentWidth,
+        terminal_width - kAskOverlayTerminalChromeWidth);
+    const int main_column_bound = std::max(
+        kAskOverlayMinimumContentWidth,
+        main_column_width - kAskOverlayMainColumnChromeWidth);
+    return std::min(terminal_bound, main_column_bound);
+}
+
 AskOverlayLayout build_ask_overlay_layout(const AskOverlayLayoutInput& input) {
     AskOverlayLayout layout;
     if (!input.submit_page && input.question == nullptr) {
         return layout;
     }
 
-    const int content_width = std::max(8, input.content_width);
+    const int content_width =
+        std::max(kAskOverlayMinimumContentWidth, input.content_width);
     const int question_count = std::max(1, input.total_questions);
     const int current_page = input.submit_page
         ? question_count

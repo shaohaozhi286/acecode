@@ -50,6 +50,11 @@ struct AskOverlayLayout {
 
 int display_width_cells(const std::string& text);
 
+int ask_overlay_content_width_for_frame(int terminal_width,
+                                        int measured_main_column_width,
+                                        bool regular_sidebar_visible,
+                                        int regular_sidebar_width);
+
 AskOverlayLayout build_ask_overlay_layout(const AskOverlayLayoutInput& input);
 
 int ask_overlay_visible_rows_for_terminal(int terminal_rows);

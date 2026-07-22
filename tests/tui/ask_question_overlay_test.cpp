@@ -125,6 +125,48 @@ TEST(AskQuestionOverlayTest, LongOptionContinuationAlignsUnderBody) {
     EXPECT_TRUE(saw_continuation);
 }
 
+// 场景:宽终端进入主栏 + sidebar 双栏布局后,ask overlay 必须按实际主栏
+// 宽度换行,不能继续用整屏宽度导致标题和选项在 sidebar 前被裁掉。
+TEST(AskQuestionOverlayTest, TwoColumnLayoutWrapsHeaderAndOptionsWithinMainColumn) {
+    constexpr int kTerminalWidth = 130;
+    constexpr int kSidebarWidth = 43;
+    const int single_column_width =
+        acecode::tui::ask_overlay_content_width_for_frame(
+            kTerminalWidth, 0, false, kSidebarWidth);
+    const int two_column_width =
+        acecode::tui::ask_overlay_content_width_for_frame(
+            kTerminalWidth, 0, true, kSidebarWidth);
+
+    EXPECT_EQ(single_column_width, 120);
+    EXPECT_EQ(two_column_width, 76);
+    EXPECT_LT(two_column_width, single_column_width);
+
+    AskQuestion q = make_question();
+    q.header =
+        "A deliberately long decision title that must wrap inside the narrower main column";
+    q.options[0].label =
+        "A deliberately long first option label for the two column layout";
+    q.options[0].description =
+        "Its description must also remain visible instead of being clipped by the sidebar.";
+
+    auto layout = acecode::tui::build_ask_overlay_layout(
+        input_for(q, two_column_width));
+    int header_rows = 0;
+    int first_option_rows = 0;
+    for (const auto& row : layout.rows) {
+        EXPECT_LE(acecode::tui::display_width_cells(row.text), two_column_width)
+            << row.text;
+        if (row.kind == AskOverlayRowKind::Header) {
+            ++header_rows;
+        }
+        if (row.kind == AskOverlayRowKind::Option && row.option_index == 0) {
+            ++first_option_rows;
+        }
+    }
+    EXPECT_GT(header_rows, 1);
+    EXPECT_GT(first_option_rows, 1);
+}
+
 // 场景:中文和中英文混排没有空格时也能按 UTF-8 边界换行。
 TEST(AskQuestionOverlayTest, ChineseAndMixedTextWrapsOnUtf8Boundaries) {
     AskQuestion q = make_question();
