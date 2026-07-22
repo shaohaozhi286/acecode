@@ -676,7 +676,6 @@ ChatResponse AnthropicProvider::parse_sse_stream(
     std::atomic<bool>* abort_flag
 ) {
     LOG_INFO("anthropic parse_sse_stream url=" + url);
-    LOG_DEBUG("Anthropic request body: " + log_truncate(body.dump(), 500));
 
     cpr::Header headers = {
         {"Content-Type", "application/json"},

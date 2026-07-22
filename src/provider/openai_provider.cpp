@@ -1178,7 +1178,6 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
     std::atomic<bool>* abort_flag
 ) {
     LOG_INFO("parse_sse_stream url=" + url);
-    LOG_DEBUG("Request body: " + log_truncate(body.dump(), 500));
 
     // Build cpr headers
     cpr::Header headers = {{"Content-Type", "application/json"}};
@@ -1423,7 +1422,6 @@ ChatResponse OpenAiCompatProvider::parse_sse_stream(
 
                     if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
                         for (const auto& tc_delta : delta["tool_calls"]) {
-                            LOG_DEBUG("tool_call delta: " + log_truncate(tc_delta.dump(), 300));
                             int index = tc_delta.value("index", 0);
                             auto& acc = pending_tools[index];
                             const std::string before_id = acc.id;

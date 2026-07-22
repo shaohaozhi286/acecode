@@ -1029,26 +1029,32 @@ static int display_width_utf8(const std::string& text) {
 static HWND get_ime_target_window(HWND fallback_hwnd) {
     HWND target = GetForegroundWindow();
     if (!target) {
+#if ACECODE_TUI_INPUT_TRACE
         LOG_DEBUG("IME: GetForegroundWindow returned null, fallback=" + ptr_to_hex(fallback_hwnd));
+#endif
         return fallback_hwnd;
     }
-
+#if ACECODE_TUI_INPUT_TRACE
     LOG_DEBUG("IME: foreground window=" + ptr_to_hex(target));
+#endif
 
     GUITHREADINFO gui_thread_info{};
     gui_thread_info.cbSize = sizeof(gui_thread_info);
 
     DWORD thread_id = GetWindowThreadProcessId(target, nullptr);
     if (thread_id != 0 && GetGUIThreadInfo(thread_id, &gui_thread_info) && gui_thread_info.hwndFocus) {
+#if ACECODE_TUI_INPUT_TRACE
         LOG_DEBUG("IME: GUI thread focus window=" + ptr_to_hex(gui_thread_info.hwndFocus) +
                   ", active=" + ptr_to_hex(gui_thread_info.hwndActive) +
                   ", capture=" + ptr_to_hex(gui_thread_info.hwndCapture));
+#endif
         return gui_thread_info.hwndFocus;
     }
-
+#if ACECODE_TUI_INPUT_TRACE
     LOG_DEBUG("IME: GetGUIThreadInfo unavailable, thread_id=" + std::to_string(thread_id) +
               ", last_error=" + dword_to_hex(GetLastError()) +
               ", using foreground window");
+#endif
 
     return target;
 }
@@ -1094,8 +1100,10 @@ static void update_ime_composition_window(const std::string& input_text,
     if (GetCurrentConsoleFontEx(hconsole, FALSE, &cfi)) {
         cell_width = max_int(1, static_cast<int>(cfi.dwFontSize.X));
         cell_height = max_int(1, static_cast<int>(cfi.dwFontSize.Y));
+#if ACECODE_TUI_INPUT_TRACE
         LOG_DEBUG("IME: font metrics width=" + std::to_string(cell_width) +
                   ", height=" + std::to_string(cell_height));
+#endif
     } else {
         RECT client{};
         if (!GetClientRect(hwnd, &client)) {
@@ -1114,8 +1122,10 @@ static void update_ime_composition_window(const std::string& input_text,
 
         cell_width = max_int(1, client_width / visible_cols);
         cell_height = max_int(1, client_height / visible_rows);
+#if ACECODE_TUI_INPUT_TRACE
         LOG_DEBUG("IME: fallback client metrics width=" + std::to_string(cell_width) +
                   ", height=" + std::to_string(cell_height));
+#endif
     }
 
     const int border_padding = 2;
@@ -1132,6 +1142,7 @@ static void update_ime_composition_window(const std::string& input_text,
     const int caret_col = clamp_int(1 + prefix_width + wrapped_col, 0, visible_cols - 1);
     const int caret_row = clamp_int(prompt_bottom_row + wrapped_row, 0, visible_rows - 1);
 
+#if ACECODE_TUI_INPUT_TRACE
     LOG_DEBUG("IME: input='" + log_truncate(input_text, 120) +
               "', confirm_pending=" + std::string(confirm_pending ? "true" : "false") +
               ", show_bottom_bar=" + std::string(show_bottom_bar ? "true" : "false") +
@@ -1147,6 +1158,7 @@ static void update_ime_composition_window(const std::string& input_text,
               ", caret_row=" + std::to_string(caret_row) +
               ", pixel_x=" + std::to_string(caret_col * cell_width) +
               ", pixel_y=" + std::to_string(caret_row * cell_height));
+#endif
 
     COMPOSITIONFORM composition{};
     composition.dwStyle = CFS_FORCE_POSITION;
@@ -1166,12 +1178,14 @@ static void update_ime_composition_window(const std::string& input_text,
         const DWORD composition_error = GetLastError();
         const BOOL candidate_ok = ImmSetCandidateWindow(himc, &candidate);
         const DWORD candidate_error = GetLastError();
+#if ACECODE_TUI_INPUT_TRACE
         LOG_DEBUG("IME: ImmGetContext success, target=" + ptr_to_hex(ime_target) +
                   ", himc=" + ptr_to_hex(himc) +
                   ", ImmSetCompositionWindow=" + std::to_string(composition_ok) +
                   ", comp_error=" + dword_to_hex(composition_error) +
                   ", ImmSetCandidateWindow=" + std::to_string(candidate_ok) +
                   ", cand_error=" + dword_to_hex(candidate_error));
+#endif
         ImmReleaseContext(ime_target, himc);
         return;
     }
@@ -1195,11 +1209,13 @@ static void update_ime_composition_window(const std::string& input_text,
                                                  IMC_SETCANDIDATEPOS,
                                                  reinterpret_cast<LPARAM>(&candidate));
     const DWORD candidate_send_error = GetLastError();
+#if ACECODE_TUI_INPUT_TRACE
     LOG_DEBUG("IME: default IME window=" + ptr_to_hex(default_ime_window) +
               ", SendMessage(comp)=" + std::to_string(static_cast<long long>(composition_result)) +
               ", comp_error=" + dword_to_hex(composition_send_error) +
               ", SendMessage(cand)=" + std::to_string(static_cast<long long>(candidate_result)) +
               ", cand_error=" + dword_to_hex(candidate_send_error));
+#endif
 }
 #endif
 

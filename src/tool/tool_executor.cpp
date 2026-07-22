@@ -123,11 +123,9 @@ ToolResult ToolExecutor::execute(const std::string& tool_name, const std::string
         }
         impl = it->second;
     }
-    LOG_DEBUG("execute: " + tool_name + " args=" + log_truncate(arguments_json, 300));
     ToolContext effective_ctx = ctx;
     effective_ctx.tool_executor = const_cast<ToolExecutor*>(this);
     auto result = impl.execute(arguments_json, effective_ctx);
-    LOG_DEBUG("execute result: success=" + std::string(result.success ? "true" : "false") + " len=" + std::to_string(result.output.size()));
     return result;
 }
 

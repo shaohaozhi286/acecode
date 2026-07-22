@@ -16,6 +16,10 @@
 #include <ftxui/screen/string.hpp>
 #include "utils/logger.hpp"
 
+#ifndef ACECODE_TUI_INPUT_TRACE
+#define ACECODE_TUI_INPUT_TRACE 0
+#endif
+
 namespace acecode { namespace tui {
 
 static int max_int(int a, int b) { return a > b ? a : b; }
@@ -45,22 +49,30 @@ static int display_width_utf8(const std::string& text) {
 static HWND get_ime_target_window(HWND fallback_hwnd) {
     HWND target = GetForegroundWindow();
     if (!target) {
+#if ACECODE_TUI_INPUT_TRACE
         LOG_DEBUG("IME: GetForegroundWindow returned null, fallback=" + ptr_to_hex(fallback_hwnd));
+#endif
         return fallback_hwnd;
     }
+#if ACECODE_TUI_INPUT_TRACE
     LOG_DEBUG("IME: foreground window=" + ptr_to_hex(target));
+#endif
 
     GUITHREADINFO gui_thread_info{};
     gui_thread_info.cbSize = sizeof(gui_thread_info);
     DWORD thread_id = GetWindowThreadProcessId(target, nullptr);
     if (thread_id != 0 && GetGUIThreadInfo(thread_id, &gui_thread_info) && gui_thread_info.hwndFocus) {
+#if ACECODE_TUI_INPUT_TRACE
         LOG_DEBUG("IME: GUI thread focus window=" + ptr_to_hex(gui_thread_info.hwndFocus) +
                   ", active=" + ptr_to_hex(gui_thread_info.hwndActive) +
                   ", capture=" + ptr_to_hex(gui_thread_info.hwndCapture));
+#endif
         return gui_thread_info.hwndFocus;
     }
+#if ACECODE_TUI_INPUT_TRACE
     LOG_DEBUG("IME: GetGUIThreadInfo unavailable, thread_id=" + std::to_string(thread_id) +
               ", last_error=" + dword_to_hex(GetLastError()) + ", using foreground window");
+#endif
     return target;
 }
 
