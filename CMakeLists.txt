@@ -7,7 +7,7 @@ if(CMAKE_HOST_WIN32 AND DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MA
     set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "Vcpkg target triplet" FORCE)
 endif()
 
-project(acecode VERSION 0.7.8 LANGUAGES C CXX)
+project(acecode VERSION 0.7.9 LANGUAGES C CXX)
 
 option(ACECODE_TUI_INPUT_TRACE "Enable verbose TUI input event trace logging." OFF)
 
