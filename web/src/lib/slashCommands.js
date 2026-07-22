@@ -7,65 +7,38 @@
 //   4. 同档内按 name 字典序
 // 完全不命中 → 过滤掉。空查询返回原顺序(builtin 在前 + skill 字典序),不打分。
 
+import { tr } from '../i18n/index.js';
+
 function lower(s) {
   return typeof s === 'string' ? s.toLowerCase() : '';
 }
 
-const FALLBACK_BUILTINS = Object.freeze([
-  Object.freeze({
-    kind: 'builtin',
-    name: 'init',
-    description: 'Analyze this codebase and generate (or improve) AGENT.md',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'compact',
-    description: 'Compress conversation history',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'goal',
-    description: 'Create, view, pause, resume, edit, or clear the thread goal',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'plan',
-    description: 'Enter plan mode or start planning a described task',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'turn',
-    description: 'Guide the active turn at its next model boundary',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'btw',
-    description: 'Ask a detached one-turn side question',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'side',
-    description: 'Alias for /btw',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'lsp',
-    description: 'Show LSP server status (connected/broken/not installed)',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'rc',
-    description: 'Alias for /remote-control',
-  }),
-  Object.freeze({
-    kind: 'builtin',
-    name: 'remote-control',
-    description: 'Activate a configured channel plugin or manage manual remote-control webhooks',
-  }),
-]);
+const BUILTIN_DESCRIPTION_KEYS = Object.freeze({
+  init: 'init',
+  compact: 'compact',
+  goal: 'goal',
+  plan: 'plan',
+  turn: 'turn',
+  btw: 'btw',
+  side: 'side',
+  lsp: 'lsp',
+  rc: 'rc',
+  'remote-control': 'remoteControl',
+});
+
+const FALLBACK_BUILTIN_NAMES = Object.freeze(Object.keys(BUILTIN_DESCRIPTION_KEYS));
+
+export function builtinCommandDescription(name, fallback = '') {
+  const key = BUILTIN_DESCRIPTION_KEYS[name];
+  return key ? tr(`commands.descriptions.${key}`) : fallback;
+}
 
 export function fallbackCommands() {
-  return FALLBACK_BUILTINS.map((c) => ({ ...c }));
+  return FALLBACK_BUILTIN_NAMES.map((name) => ({
+    kind: 'builtin',
+    name,
+    description: builtinCommandDescription(name),
+  }));
 }
 
 // 把后端返回的 {builtins, commands, skills} 拍平成统一项数组,加 kind 字段以备扩展。
@@ -74,7 +47,11 @@ export function flattenCommands(payload) {
   const out = [];
   if (payload && Array.isArray(payload.builtins)) {
     for (const c of payload.builtins) {
-      if (c && c.name) out.push({ kind: 'builtin', name: c.name, description: c.description || '' });
+      if (c && c.name) out.push({
+        kind: 'builtin',
+        name: c.name,
+        description: builtinCommandDescription(c.name, c.description || ''),
+      });
     }
   }
   if (payload && Array.isArray(payload.commands)) {
@@ -136,12 +113,12 @@ export function rankCommands(query, items) {
 
 export function slashCommandKindPresentation(item) {
   if (item && item.kind === 'builtin') {
-    return { icon: 'tool', label: '内置工具' };
+    return { icon: 'tool', label: tr('commands.kindBuiltin') };
   }
   if (item && item.kind === 'command') {
-    return { icon: 'command', label: 'Command' };
+    return { icon: 'command', label: tr('commands.kindCommand') };
   }
-  return { icon: 'lightbulb', label: 'Skill' };
+  return { icon: 'lightbulb', label: tr('commands.kindSkill') };
 }
 
 // 解析输入框值的首段命令名:从首字符 `/` 到第一个空白(或字符串末尾)之间的串,

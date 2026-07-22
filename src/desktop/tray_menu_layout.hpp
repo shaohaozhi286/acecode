@@ -10,6 +10,7 @@
 // 设计:openspec/changes/enhance-desktop-tray-menu/design.md 决策 3 + 6。
 
 #include "tray_icon_win.hpp"
+#include "strings.hpp"
 
 #include <cstddef>
 #include <string>
@@ -103,8 +104,11 @@ inline std::string truncate_subtitle(std::string s, std::size_t limit_bytes = kS
 }
 
 // 单条 session 渲染成菜单 label:"<title>  <subtitle>"(subtitle 空时只 title)。
-inline std::string format_session_label(const TrayMenuItem& it) {
-    std::string label = it.title.empty() ? std::string("新会话1") : it.title;
+inline std::string format_session_label(const TrayMenuItem& it,
+                                        const std::string& locale = "zh-CN") {
+    std::string label = it.title.empty()
+        ? std::string(desktop_string(DesktopStringId::NewSessionFallback, locale))
+        : it.title;
     if (!it.subtitle.empty()) {
         label += "  ";
         label += truncate_subtitle(it.subtitle);
@@ -115,8 +119,11 @@ inline std::string format_session_label(const TrayMenuItem& it) {
 inline void append_session_item(std::vector<TrayMenuEntry>& out,
                                 TrayMenuEntryKind kind,
                                 const TrayMenuItem& it,
-                                unsigned& next_session_id) {
-    const std::string title = it.title.empty() ? std::string("新会话1") : it.title;
+                                unsigned& next_session_id,
+                                const std::string& locale) {
+    const std::string title = it.title.empty()
+        ? std::string(desktop_string(DesktopStringId::NewSessionFallback, locale))
+        : it.title;
     const std::string subtitle = it.subtitle.empty() ? std::string{} : truncate_subtitle(it.subtitle);
     TrayMenuEntry e;
     e.kind = kind;
@@ -137,8 +144,10 @@ inline void append_section(std::vector<TrayMenuEntry>& out,
                            TrayMenuEntryKind header_kind,
                            TrayMenuEntryKind visible_kind,
                            const std::string& header_label,
+                           const std::string& more_label,
                            const std::vector<TrayMenuItem>& items,
-                           unsigned& next_session_id) {
+                           unsigned& next_session_id,
+                           const std::string& locale) {
     if (items.empty()) return;
     out.push_back({header_kind, 0, header_label, {}, {}});
 
@@ -146,13 +155,14 @@ inline void append_section(std::vector<TrayMenuEntry>& out,
         ? items.size()
         : kTraySectionVisibleLimit;
     for (std::size_t i = 0; i < visible; ++i) {
-        append_session_item(out, visible_kind, items[i], next_session_id);
+        append_session_item(out, visible_kind, items[i], next_session_id, locale);
     }
 
     if (items.size() > visible) {
-        out.push_back({TrayMenuEntryKind::MoreSubmenuRoot, 0, "More", {}, {}});
+        out.push_back({TrayMenuEntryKind::MoreSubmenuRoot, 0, more_label, {}, {}});
         for (std::size_t i = visible; i < items.size(); ++i) {
-            append_session_item(out, TrayMenuEntryKind::MoreSubmenuItem, items[i], next_session_id);
+            append_session_item(out, TrayMenuEntryKind::MoreSubmenuItem,
+                                items[i], next_session_id, locale);
         }
     }
 }
@@ -161,7 +171,8 @@ inline void append_section(std::vector<TrayMenuEntry>& out,
 
 // 纯函数:把 payload 翻译为 layout。空状态(pinned + recent 都空)直接产出
 // "新建会话 / 打开 / 退出" 极简菜单,没有空 header。
-inline TrayMenuLayout compute_menu_layout(const TrayMenuPayload& payload) {
+inline TrayMenuLayout compute_menu_layout(const TrayMenuPayload& payload,
+                                          const std::string& locale = "zh-CN") {
     TrayMenuLayout layout;
     auto& out = layout.entries;
     unsigned next_session_id = kMenuIdSessionBase;
@@ -175,9 +186,11 @@ inline TrayMenuLayout compute_menu_layout(const TrayMenuPayload& payload) {
         detail::append_section(out,
                                TrayMenuEntryKind::PinnedHeader,
                                TrayMenuEntryKind::PinnedItem,
-                               "Pinned",
+                               std::string(desktop_string(DesktopStringId::TrayPinned, locale)),
+                               std::string(desktop_string(DesktopStringId::TrayMore, locale)),
                                pinned,
-                               next_session_id);
+                               next_session_id,
+                               locale);
     }
 
     if (!recent.empty()) {
@@ -187,18 +200,23 @@ inline TrayMenuLayout compute_menu_layout(const TrayMenuPayload& payload) {
         detail::append_section(out,
                                TrayMenuEntryKind::RecentHeader,
                                TrayMenuEntryKind::RecentItem,
-                               "Recent",
+                               std::string(desktop_string(DesktopStringId::TrayRecent, locale)),
+                               std::string(desktop_string(DesktopStringId::TrayMore, locale)),
                                recent,
-                               next_session_id);
+                               next_session_id,
+                               locale);
     }
 
     if (!pinned.empty() || !recent.empty()) {
         out.push_back({TrayMenuEntryKind::Separator, 0, {}, {}, {}});
     }
-    out.push_back({TrayMenuEntryKind::NewChat, kMenuIdNewChat, "新建会话", {}, {}});
-    out.push_back({TrayMenuEntryKind::OpenApp, kMenuIdOpenApp, "打开 ACECode", {}, {}});
+    out.push_back({TrayMenuEntryKind::NewChat, kMenuIdNewChat,
+                   std::string(desktop_string(DesktopStringId::TrayNewSession, locale)), {}, {}});
+    out.push_back({TrayMenuEntryKind::OpenApp, kMenuIdOpenApp,
+                   std::string(desktop_string(DesktopStringId::TrayOpenApp, locale)), {}, {}});
     out.push_back({TrayMenuEntryKind::Separator, 0, {}, {}, {}});
-    out.push_back({TrayMenuEntryKind::Quit, kMenuIdQuit, "退出", {}, {}});
+    out.push_back({TrayMenuEntryKind::Quit, kMenuIdQuit,
+                   std::string(desktop_string(DesktopStringId::TrayQuit, locale)), {}, {}});
 
     return layout;
 }

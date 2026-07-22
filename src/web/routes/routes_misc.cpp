@@ -36,6 +36,10 @@ json desktop_notifications_to_json(const DesktopNotificationsConfig& config) {
     };
 }
 
+json ui_locale_to_json(const UiConfig& config) {
+    return json{{"locale", config.locale}};
+}
+
 bool update_job_is_active(const UpdateJobStatus& status) {
     return status.state == "pending" || status.state == "running";
 }
@@ -931,6 +935,10 @@ void WebServer::Impl::register_ui_preferences() {
         ([this](const crow::request& req) {
             return cors_preflight(req);
         });
+        CROW_ROUTE(app, "/api/config/ui-locale").methods(crow::HTTPMethod::Options)
+        ([this](const crow::request& req) {
+            return cors_preflight(req);
+        });
         CROW_ROUTE(app, "/api/config/custom-instructions").methods(crow::HTTPMethod::Options)
         ([this](const crow::request& req) {
             return cors_preflight(req);
@@ -1010,6 +1018,18 @@ void WebServer::Impl::register_ui_preferences() {
             crow::response r(200);
             r.add_header("Content-Type", "application/json");
             r.body = ui_preferences_to_json(deps.app_config->web_ui).dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // GET /api/config/ui-locale: persisted Desktop/WebUI locale preference.
+        CROW_ROUTE(app, "/api/config/ui-locale").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ui_locale_to_json(deps.app_config->ui).dump();
             return with_cors(req, std::move(r));
         });
 
@@ -1383,6 +1403,55 @@ void WebServer::Impl::register_ui_preferences() {
             r.add_header("Content-Type", "application/json");
             r.body = json{{"connectors", connectors_to_json(
                 deps.app_config->connectors)}}.dump();
+            return with_cors(req, std::move(r));
+        });
+
+        // PUT /api/config/ui-locale body {locale:string}.
+        CROW_ROUTE(app, "/api/config/ui-locale").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            if (auto rej = require_auth(req)) return std::move(*rej);
+            if (!deps.app_config) return crow::response(503);
+
+            auto json_err = [&](int status, const char* code, const std::string& msg) {
+                crow::response r(status);
+                r.body = json{{"error", code}, {"message", msg}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
+            };
+
+            json body;
+            try { body = json::parse(req.body); }
+            catch (const std::exception& e) {
+                return json_err(400, "BAD_JSON",
+                                std::string("invalid JSON body: ") + e.what());
+            }
+            if (!body.is_object() || !body.contains("locale") ||
+                !body["locale"].is_string()) {
+                return json_err(400, "BAD_REQUEST", "expected {locale: string}");
+            }
+            const std::string locale = body["locale"].get<std::string>();
+            if (!is_valid_ui_locale(locale)) {
+                return json_err(400, "INVALID_UI_LOCALE",
+                                "locale must be auto, zh-CN, or en-US");
+            }
+
+            std::lock_guard<std::mutex> config_lock(app_config_mu);
+            const std::string before = deps.app_config->ui.locale;
+            deps.app_config->ui.locale = locale;
+            try {
+                if (!deps.config_path.empty()) {
+                    save_config(*deps.app_config, deps.config_path);
+                } else {
+                    save_config(*deps.app_config);
+                }
+            } catch (const std::exception& e) {
+                deps.app_config->ui.locale = before;
+                return json_err(500, "PERSIST_FAILED", e.what());
+            }
+
+            crow::response r(200);
+            r.add_header("Content-Type", "application/json");
+            r.body = ui_locale_to_json(deps.app_config->ui).dump();
             return with_cors(req, std::move(r));
         });
 

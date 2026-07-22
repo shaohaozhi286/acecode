@@ -1,3 +1,6 @@
+import { effectiveLocale } from '../i18n/index.js';
+import { formatDateTime, formatNumber } from './format.js';
+
 export const LOOP_TEMPLATES = [
   {
     id: 'daily-review',
@@ -151,16 +154,22 @@ export function buildLoopPayload(form, workspaces = []) {
 }
 
 export function loopScheduleLabel(schedule = {}) {
+  const locale = effectiveLocale();
   const time = `${String(schedule.hour ?? 9).padStart(2, '0')}:${String(schedule.minute ?? 0).padStart(2, '0')}`;
   if (schedule.kind === 'once') return `单次 · ${formatDate(schedule.once_at_ms)}`;
   if (schedule.kind === 'interval') {
     const units = { minutes: '分钟', hours: '小时', days: '天' };
-    return `每 ${schedule.interval_value || 1} ${units[schedule.interval_unit] || '小时'}`;
+    return `每 ${formatNumber(schedule.interval_value || 1, {}, locale)} ${units[schedule.interval_unit] || '小时'}`;
   }
   if (schedule.period === 'workdays') return `工作日 ${time}`;
   if (schedule.period === 'weekly') {
-    const labels = ['日', '一', '二', '三', '四', '五', '六'];
-    return `每周${(schedule.weekdays || []).map((day) => labels[day]).join('、')} ${time}`;
+    const labels = Array.from({ length: 7 }, (_, day) =>
+      new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: 'UTC' })
+        .format(new Date(Date.UTC(2026, 5, 7 + day))));
+    const weekdays = (schedule.weekdays || []).map((day) => labels[day]);
+    const list = new Intl.ListFormat(locale, { style: 'short', type: 'conjunction' })
+      .format(weekdays);
+    return `每周${list} ${time}`;
   }
   return `每天 ${time}`;
 }
@@ -169,7 +178,12 @@ export function formatDate(value) {
   if (!value) return '—';
   const date = new Date(Number(value));
   if (!Number.isFinite(date.getTime())) return '—';
-  return date.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return formatDateTime(date, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 export function loopRunPresentation(run = {}) {

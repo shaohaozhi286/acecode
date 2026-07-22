@@ -4,9 +4,11 @@
 // 会话控制内嵌在聊天输入框。所有面板/弹框作为 overlay 渲染在主区之上。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api, ApiError, createApi } from './lib/api.js';
 import { setToken } from './lib/auth.js';
 import { connection } from './lib/connection.js';
+import { loadUiLocale } from './lib/uiLocale.js';
 import {
   createDesktopNotificationMonitor,
   notificationEventKey,
@@ -124,6 +126,10 @@ function parseDesktopBridgeResult(raw) {
 }
 
 export function App() {
+  // Static product copy is marked at build time. Subscribing the shell to the
+  // i18n instance refreshes mounted descendants immediately; a lightweight
+  // reload after persistence also re-evaluates module-scope presentation maps.
+  useTranslation();
   const [authState, setAuthState] = useState('checking'); // 'checking' | 'ok' | 'need-token'
   const [health,    setHealth]    = useState(null);
 
@@ -371,6 +377,16 @@ export function App() {
   }, []);
 
   useEffect(() => { probe(); }, [probe]);
+
+  useEffect(() => {
+    if (authState !== 'ok') return;
+    // Desktop has a pre-mount native injection for a flash-free first frame.
+    // Browser mode has no such bootstrap, so confirm the daemon preference as
+    // soon as authentication succeeds; localStorage is only a paint cache.
+    loadUiLocale(api).catch(() => {
+      // Older/offline daemons keep the injected or cached locale usable.
+    });
+  }, [authState]);
 
   const pollUpdateJob = useCallback((jobId) => {
     if (!jobId) return;

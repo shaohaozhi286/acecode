@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const srcRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function source(relativePath) {
-  return fs.readFileSync(path.join(srcRoot, relativePath), 'utf8');
+  return fs.readFileSync(path.join(srcRoot, relativePath), 'utf8').replace(/\r\n?/g, '\n');
 }
 
 function test(name, fn) {

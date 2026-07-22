@@ -1651,7 +1651,7 @@ void show_native_fallback_menu(HWND hwnd,
 void show_context_menu(HWND hwnd) {
     close_tray_popup();
     ScopedTrayPopupDpiContext dpi_context;
-    TrayMenuLayout layout = compute_menu_layout(snapshot_payload());
+    TrayMenuLayout layout = compute_menu_layout(snapshot_payload(), native_locale());
     POINT pt{};
     ::GetCursorPos(&pt);
     LOG_INFO(
@@ -1970,7 +1970,7 @@ void show_linux_context_menu() {
         g_context_menu = nullptr;
     }
     TrayMenuPayload payload = snapshot_payload();
-    g_context_layout = compute_menu_layout(payload);
+    g_context_layout = compute_menu_layout(payload, native_locale());
     g_context_menu = g_gtk.menu_new();
     if (!g_context_menu) return;
     append_linux_layout_to_menu(g_context_menu, g_context_layout);
@@ -2126,7 +2126,7 @@ void mac_tray_menu_needs_update(NSMenu* menu) {
     if (!menu) return;
     [menu removeAllItems];
     TrayMenuPayload payload = snapshot_payload();
-    g_mac_context_layout = compute_menu_layout(payload);
+    g_mac_context_layout = compute_menu_layout(payload, native_locale());
     append_mac_layout_to_menu(menu, g_mac_context_layout);
 }
 

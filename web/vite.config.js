@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
+import localizeStaticCopyBabelPlugin from './scripts/localize-static-copy-babel.mjs';
 
 // daemon 在 build 时把 web/dist/ 嵌入二进制(见 cmake/acecode_embed_assets.cmake)。
 // 用 viteSingleFile 把 JS/CSS 全部 inline 进 index.html — 一来 daemon 只需要
@@ -11,7 +12,11 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 //
 // dev 模式下跑 `pnpm dev` 起 Vite 5173,/api 与 /ws 自动代理到 127.0.0.1:28080。
 export default defineConfig({
-  plugins: [react(), tailwindcss(), viteSingleFile()],
+  plugins: [
+    react({ babel: { plugins: [localizeStaticCopyBabelPlugin] } }),
+    tailwindcss(),
+    viteSingleFile(),
+  ],
   build: {
     outDir: 'dist',
     emptyOutDir: true,

@@ -6,7 +6,9 @@
 // — 状态走本地 useState,提交按钮无网络副作用,待后端接口就绪后接入。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useTheme } from '../theme.jsx';
+import { localePreference } from '../i18n/index.js';
 import { api } from '../lib/api.js';
 import { openExternalUrl } from '../lib/externalUrl.js';
 import { copyTextToSystemClipboard } from '../lib/systemClipboard.js';
@@ -24,7 +26,7 @@ import {
   setDesktopBackgroundProcess,
 } from '../lib/desktopBackgroundProcess.js';
 import { Modal, Toggle } from './Modal.jsx';
-import { clsx, relativeTime } from '../lib/format.js';
+import { clsx, formatCount, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
 import { buildMcpServerList, countEnabledMcp, applyMcpToggle } from '../lib/mcpServers.js';
 import { normalizeConnectorList, applyConnectorToggle } from '../lib/connectors.js';
@@ -95,6 +97,7 @@ import {
 import { useSlashCommands } from './SlashCommandsContext.jsx';
 import { RefreshIcon, VsIcon } from './Icon.jsx';
 import { toast } from './Toast.jsx';
+import { loadUiLocale, persistUiLocale } from '../lib/uiLocale.js';
 import {
   WindowControls,
   isInteractiveTarget,
@@ -282,6 +285,9 @@ function SectionGeneral({
   onDesktopNotificationsChanged,
   onReplayGuidedTour,
 }) {
+  const { t } = useTranslation();
+  const [uiLocale, setUiLocale] = useState(() => localePreference());
+  const [uiLocaleBusy, setUiLocaleBusy] = useState(false);
   const [permMode, setPermMode] = useState('default');
   const [permBusy, setPermBusy] = useState(false);
   const [notificationsEnabled, setNotificationsEnabled] = useState(
@@ -303,6 +309,18 @@ function SectionGeneral({
   const [maxTurns, setMaxTurns] = useState(50);
   const [workMode, setWorkMode] = useState('coding');
   const [openTarget, setOpenTarget] = useState('vscode');
+
+  useEffect(() => {
+    let cancelled = false;
+    loadUiLocale(api)
+      .then((state) => {
+        if (!cancelled) setUiLocale(state.preference);
+      })
+      .catch(() => {
+        // Startup injection/cache remains usable when the daemon is offline.
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -496,9 +514,49 @@ function SectionGeneral({
     }
   };
 
+  const switchUiLocale = async (next) => {
+    const previous = uiLocale;
+    if (uiLocaleBusy || next === previous) return;
+    setUiLocale(next);
+    setUiLocaleBusy(true);
+    try {
+      const state = await persistUiLocale(next, api);
+      setUiLocale(state.preference);
+    } catch {
+      setUiLocale(previous);
+      toast({ kind: 'err', text: t('locale.saveFailed') });
+    } finally {
+      setUiLocaleBusy(false);
+    }
+  };
+
   return (
     <>
       <h2 className="text-xl font-bold mb-5">常规</h2>
+
+      <div className="flex items-center justify-between gap-4 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
+        <div>
+          <label htmlFor="settings-ui-locale" className="text-[13px] font-medium">
+            {t('locale.label')}
+          </label>
+          <div className="text-[11px] text-fg-mute mt-0.5 max-w-lg">
+            {t('locale.description')}
+          </div>
+        </div>
+        <select
+          id="settings-ui-locale"
+          value={uiLocale}
+          disabled={uiLocaleBusy}
+          onChange={(event) => switchUiLocale(event.target.value)}
+          className="h-8 min-w-36 px-2 text-[12px] rounded-md border border-border bg-surface-alt text-fg outline-none focus:border-accent transition disabled:opacity-60"
+        >
+          <option value="auto">{t('locale.auto')}</option>
+          <option value="zh-CN">{t('locale.zhCN')}</option>
+          <option value="en-US">{t('locale.enUS')}</option>
+        </select>
+      </div>
+
+      <div className="h-px bg-border my-5" />
 
       <div className="text-[14px] font-semibold mb-1">工作模式</div>
       <p className="text-[12px] text-fg-mute mb-3">选择 Agent 显示多少技术细节</p>
@@ -702,7 +760,7 @@ function SectionGeneral({
         </div>
         <span className="flex items-center gap-1.5 text-[12px] text-ok">
           <span className="w-2 h-2 rounded-full bg-ok shadow-[0_0_4px_var(--ace-ok)]" />
-          运行中 · 端口 {health?.port || 28080}
+          {t('settings.backgroundRunning', { port: health?.port || 28080 })}
         </span>
       </div>
       {backgroundProcessAvailable && (
@@ -2609,12 +2667,14 @@ function SectionUsage() {
     {
       label: '用量记录',
       value: String(stats.summary.records),
-      sub: stats.hasEstimates ? `${stats.summary.estimatedRecords} 条估算` : 'provider usage',
+      sub: stats.hasEstimates
+        ? formatCount(stats.summary.estimatedRecords, 'estimates')
+        : 'provider usage',
     },
     {
       label: '会话',
       value: String(stats.summary.sessionCount),
-      sub: `${stats.models.length} 个模型`,
+      sub: formatCount(stats.models.length, 'models'),
     },
   ];
   const tokenDetails = [
@@ -2727,7 +2787,7 @@ function SectionUsage() {
                       <span className="text-[13px] font-semibold truncate">{m.label}</span>
                     </div>
                     <div className="flex items-center gap-4 shrink-0">
-                      <span className="text-[12px] text-fg-mute">{m.records} 条</span>
+                      <span className="text-[12px] text-fg-mute">{formatCount(m.records, 'records')}</span>
                       <span className="text-[13px] font-semibold">{formatUsageTokens(total)}</span>
                     </div>
                   </div>

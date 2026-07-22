@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite",
     "test": "node src/lib/runTests.js",
+    "i18n:audit": "node scripts/i18n-audit.mjs",
+    "i18n:catalog": "node scripts/generate-source-catalog.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -17,17 +19,20 @@
     "diff2html": "^3.4.56",
     "docx-preview": "^0.3.7",
     "highlight.js": "^11.11.1",
+    "i18next": "26.3.6",
     "lexical": "^0.46.0",
     "markdown-it": "^14.1.1",
     "markdown-it-task-lists": "^2.1.1",
     "mermaid": "11.16.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-i18next": "17.0.10",
     "react-joyride": "3.2.0",
     "x-data-spreadsheet": "^1.1.9",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@babel/core": "7.29.0",
     "@tailwindcss/vite": "^4.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "@xmldom/xmldom": "0.9.10",

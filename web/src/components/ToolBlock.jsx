@@ -8,7 +8,7 @@
 // 纯 <pre>{output}</pre>。bash 工具的展开区头部加 `$ <command>` prompt 行。
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { clsx, formatBytes, formatElapsed } from '../lib/format.js';
+import { clsx, formatBytes, formatCount, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { compactOneLinePreview } from '../lib/compactMessagePreview.js';
 import { normalizeAttachmentList } from '../lib/messageAttachments.js';
@@ -150,7 +150,7 @@ function AskUserQuestionResultCard({ result, toolContextAttrs }) {
         <span className="ace-qa-card-icon">
           <VsIcon name="ok" size={14} mono={false} />
         </span>
-        <span className="ace-qa-card-title">已确认 {items.length} 项</span>
+        <span className="ace-qa-card-title">已确认 {formatCount(items.length, 'items')}</span>
         <span className="ace-qa-card-spacer" />
         <span className="ace-qa-card-state">{collapsed ? '展开' : '收起'}</span>
         <VsIcon

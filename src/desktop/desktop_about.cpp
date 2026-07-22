@@ -1,4 +1,5 @@
 #include "desktop_about.hpp"
+#include "strings.hpp"
 
 #include "../utils/encoding.hpp"
 
@@ -23,18 +24,25 @@ namespace acecode::desktop {
 
 namespace {
 
-std::string value_or_unknown(const std::string& value) {
-    return value.empty() ? std::string("未知") : value;
+std::string value_or_unknown(const std::string& value,
+                             const std::string& locale) {
+    return value.empty()
+        ? std::string(desktop_string(DesktopStringId::Unknown, locale))
+        : value;
 }
 
-std::string display_acecode_version(const std::string& version) {
-    if (version.empty()) return "未知";
+std::string display_acecode_version(const std::string& version,
+                                    const std::string& locale) {
+    if (version.empty()) {
+        return std::string(desktop_string(DesktopStringId::Unknown, locale));
+    }
     if (version.front() == 'v' || version.front() == 'V') return version;
     return "v" + version;
 }
 
-std::string browser_label(const DesktopAboutInfo& info) {
-    const std::string name = value_or_unknown(info.browser_name);
+std::string browser_label(const DesktopAboutInfo& info,
+                          const std::string& locale) {
+    const std::string name = value_or_unknown(info.browser_name, locale);
     return info.browser_version.empty() ? name : name + " " + info.browser_version;
 }
 
@@ -69,16 +77,21 @@ std::string current_compiler_version() {
 #endif
 }
 
-std::string format_desktop_about_content(const DesktopAboutInfo& info) {
+std::string format_desktop_about_content(const DesktopAboutInfo& info,
+                                         const std::string& locale) {
     std::ostringstream out;
-    out << "ACECode 版本：" << display_acecode_version(info.acecode_version) << '\n'
-        << "浏览器版本：" << browser_label(info) << '\n'
-        << "编译器版本：" << value_or_unknown(info.compiler_version);
+    out << desktop_string(DesktopStringId::AboutAceCodeVersion, locale)
+        << display_acecode_version(info.acecode_version, locale) << '\n'
+        << desktop_string(DesktopStringId::AboutBrowserVersion, locale)
+        << browser_label(info, locale) << '\n'
+        << desktop_string(DesktopStringId::AboutCompilerVersion, locale)
+        << value_or_unknown(info.compiler_version, locale);
     return out.str();
 }
 
 bool show_desktop_about_dialog(void* parent_window,
-                               const DesktopAboutInfo& info) {
+                               const DesktopAboutInfo& info,
+                               const std::string& locale) {
 #ifdef _WIN32
     using TaskDialogFn = HRESULT(WINAPI*)(
         HWND,
@@ -90,10 +103,11 @@ bool show_desktop_about_dialog(void* parent_window,
         PCWSTR,
         int*);
 
-    const std::wstring title = L"关于 ACECode";
+    const std::wstring title = acecode::utf8_to_wide(
+        std::string(desktop_string(DesktopStringId::AboutTitle, locale)));
     const std::wstring main_instruction = L"ACECode";
     const std::wstring content = acecode::utf8_to_wide(
-        format_desktop_about_content(info));
+        format_desktop_about_content(info, locale));
     int button = 0;
     HRESULT result = E_NOTIMPL;
     HMODULE common_controls = ::LoadLibraryW(L"comctl32.dll");
@@ -122,6 +136,7 @@ bool show_desktop_about_dialog(void* parent_window,
 #else
     (void)parent_window;
     (void)info;
+    (void)locale;
     return false;
 #endif
 }

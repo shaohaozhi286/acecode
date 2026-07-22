@@ -1083,6 +1083,7 @@ body {
 /* Codex-style new task home */
 .ace-home-panel {
   min-height: 0;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1090,6 +1091,8 @@ body {
 }
 .ace-home-content {
   width: min(100%, 660px);
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   align-items: stretch;

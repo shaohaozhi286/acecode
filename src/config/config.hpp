@@ -373,6 +373,14 @@ struct DesktopConfig {
     bool continue_background_process = false;
 };
 
+// Fixed GUI copy for Desktop/WebUI. A missing ui.locale belongs to legacy
+// configurations and intentionally keeps the historical Simplified Chinese
+// UI. Freshly generated configurations explicitly write "auto".
+struct UiConfig {
+    // Canonical values: auto | zh-CN | en-US.
+    std::string locale = "zh-CN";
+};
+
 // Web 控制台(ConsoleDock)配置。见 openspec/changes/add-console-dock。
 struct ConsoleConfig {
     // 终端 shell 覆盖(legacy)。空 = 平台默认(Windows: %COMSPEC% 即 cmd;POSIX: $SHELL)。
@@ -451,6 +459,7 @@ struct AppConfig {
     UpgradeConfig upgrade;                       // explicit self-upgrade command config
     TuiConfig tui;                               // 终端渲染策略(legacy fallback 等)
     DesktopConfig desktop;                       // desktop shell 配置(系统通知等)
+    UiConfig ui;                                 // Desktop/WebUI locale preference
     ConsoleConfig console;                       // Web 控制台(PTY shell 覆盖)
     SessionTitleConfig session_title;            // hidden auto session title generation
 
@@ -472,6 +481,9 @@ std::string normalize_upgrade_base_url(std::string raw);
 
 // Returns true for non-empty http/https URLs after normalization.
 bool is_valid_upgrade_base_url(const std::string& raw);
+
+// GUI locale preference accepted by config and the authenticated daemon API.
+bool is_valid_ui_locale(const std::string& locale);
 
 nlohmann::json connectors_to_json(const std::vector<ConnectorConfig>& connectors);
 bool parse_connectors_json(const nlohmann::json& value,
@@ -500,11 +512,12 @@ bool was_acecode_home_created_by_process();
 bool consume_acecode_home_created_by_process();
 void reset_acecode_home_created_flag_for_test();
 
-// Save config to ~/.acecode/config.json.
-// Creates directory if missing, overwrites existing file.
+// Save config to ~/.acecode/config.json. Creates the directory if missing,
+// overwrites the file, and throws std::runtime_error when writing fails.
 void save_config(const AppConfig& cfg);
 
-// Save config to an explicit file path. Creates parent directory if missing.
+// Save config to an explicit file path. Creates the parent directory if
+// missing and throws std::runtime_error when writing fails.
 // Used by daemon/test code paths that must NOT touch the user's real config —
 // e.g. PUT /api/mcp under WebServerFixture writes to a per-test temp file.
 void save_config(const AppConfig& cfg, const std::string& explicit_path);

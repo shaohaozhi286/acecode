@@ -5,6 +5,7 @@
 // CMakeLists.txt 通过显式列举把此文件加入 acecode_testable。
 
 #include "folder_picker.hpp"
+#include "strings.hpp"
 
 #include <optional>
 #include <string>
@@ -49,8 +50,12 @@ std::optional<std::string> pick_folder(void* /* parent_window */) {
         panel.canChooseFiles          = NO;
         panel.allowsMultipleSelection = NO;
         panel.canCreateDirectories    = YES;
-        panel.title  = @"选择项目文件夹";
-        panel.prompt = @"选择";
+        const std::string title = std::string(
+            native_string(DesktopStringId::FolderPickerTitle));
+        const std::string prompt = std::string(
+            native_string(DesktopStringId::FolderPickerPrompt));
+        panel.title = [NSString stringWithUTF8String:title.c_str()];
+        panel.prompt = [NSString stringWithUTF8String:prompt.c_str()];
         panel.level  = NSModalPanelWindowLevel;
         [panel orderFrontRegardless];
 

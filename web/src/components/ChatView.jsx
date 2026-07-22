@@ -3141,7 +3141,7 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
       { icon: 'lightbulb', title: '使用 Skills', desc: '预定义工作流，从侧边栏开启' },
     ];
     return (
-      <div className="flex-1 flex flex-col bg-bg">
+      <div className="flex-1 min-w-0 flex flex-col bg-bg">
         <div className="ace-home-panel flex-1">
           <div className="ace-home-content">
             <img src="/acecode-logo.png" alt="ACECode" width="64" height="64" className="ace-home-logo select-none" draggable="false" />

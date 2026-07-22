@@ -642,6 +642,45 @@ TEST(WebServerHttp, DesktopNotificationSettingRejectsInvalidPayload) {
     EXPECT_TRUE(fx.cfg.desktop.notifications.enabled);
 }
 
+TEST(WebServerHttp, UiLocaleDefaultsChineseAndPersistsCanonicalPreference) {
+    WebServerFixture fx;
+
+    auto initial = cpr::Get(cpr::Url{fx.url("/api/config/ui-locale")});
+    ASSERT_EQ(initial.status_code, 200) << initial.text;
+    EXPECT_EQ(json::parse(initial.text)["locale"], "zh-CN");
+
+    auto put = cpr::Put(
+        cpr::Url{fx.url("/api/config/ui-locale")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"locale":"en-US"})"});
+    ASSERT_EQ(put.status_code, 200) << put.text;
+    EXPECT_EQ(json::parse(put.text)["locale"], "en-US");
+    EXPECT_EQ(fx.cfg.ui.locale, "en-US");
+
+    std::ifstream input(fx.tmp_dir / "config.json");
+    ASSERT_TRUE(input.is_open());
+    EXPECT_EQ(json::parse(input)["ui"]["locale"], "en-US");
+}
+
+TEST(WebServerHttp, UiLocaleRejectsInvalidPayloadWithoutMutation) {
+    WebServerFixture fx;
+    auto invalid_value = cpr::Put(
+        cpr::Url{fx.url("/api/config/ui-locale")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"locale":"fr-FR"})"});
+    ASSERT_EQ(invalid_value.status_code, 400) << invalid_value.text;
+    EXPECT_EQ(json::parse(invalid_value.text)["error"], "INVALID_UI_LOCALE");
+    EXPECT_EQ(fx.cfg.ui.locale, "zh-CN");
+
+    auto invalid_shape = cpr::Put(
+        cpr::Url{fx.url("/api/config/ui-locale")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{R"({"locale":true})"});
+    ASSERT_EQ(invalid_shape.status_code, 400) << invalid_shape.text;
+    EXPECT_EQ(json::parse(invalid_shape.text)["error"], "BAD_REQUEST");
+    EXPECT_EQ(fx.cfg.ui.locale, "zh-CN");
+}
+
 TEST(WebServerHttp, LoopCrudEnableConflictAndRunHistory) {
     WebServerFixture fx;
     const auto workspace = fx.workspace_registry->list().front();

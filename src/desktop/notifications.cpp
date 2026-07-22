@@ -1,4 +1,5 @@
 #include "notifications.hpp"
+#include "strings.hpp"
 
 #include "notifications_backend.hpp"
 
@@ -206,7 +207,8 @@ NotifyPayload build_completion_notification(
     const std::string& session_id,
     const std::string& workspace_hash,
     const std::string& session_title,
-    const std::string& final_assistant_text) {
+    const std::string& final_assistant_text,
+    const std::string& locale) {
     NotifyPayload payload;
     payload.id = "completion-" +
         (session_id.empty() ? std::string("unknown") : session_id) + "-" +
@@ -214,11 +216,16 @@ NotifyPayload build_completion_notification(
     payload.workspace_hash = workspace_hash;
     payload.session_id = session_id;
     const std::string title = trim_ascii(session_title);
-    payload.title = u8"已完成 · " +
-        (title.empty() ? std::string(u8"会话") : title);
+    payload.title = std::string(
+        desktop_string(DesktopStringId::NotificationCompleted, locale)) +
+        (title.empty()
+             ? std::string(desktop_string(
+                   DesktopStringId::NotificationSession, locale))
+             : title);
     const std::string body = trim_ascii(final_assistant_text);
     payload.body = body.empty()
-        ? std::string(u8"(空白回合)")
+        ? std::string(desktop_string(
+              DesktopStringId::NotificationBlankTurn, locale))
         : truncate_notification_text(body);
     return payload;
 }

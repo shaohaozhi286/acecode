@@ -1,0 +1,146 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { collectStaticCopy } from './i18n-audit.mjs';
+import { OPAQUE_STATIC_COPY } from '../src/i18n/sourceAllowlist.js';
+import { ENGLISH_SOURCE_OVERRIDES } from './i18n-en-overrides.mjs';
+
+const root = path.resolve(process.cwd(), 'src');
+const outputPath = path.resolve(root, 'i18n/sourceCatalog.generated.js');
+const opaque = new Set(OPAQUE_STATIC_COPY);
+
+function sourceFiles(folder) {
+  const output = [];
+  for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+    const target = path.join(folder, entry.name);
+    if (entry.isDirectory()) output.push(...sourceFiles(target));
+    else if (/\.(?:js|jsx)$/u.test(entry.name)) output.push(target);
+  }
+  return output;
+}
+
+function copyId(text) {
+  return `s_${crypto.createHash('sha256').update(text).digest('hex').slice(0, 16)}`;
+}
+
+function protectPlaceholders(text) {
+  const placeholders = [];
+  const protectedText = text.replace(/{{p\d+}}/g, (value) => {
+    const token = `__ACECODEPH${placeholders.length}__`;
+    placeholders.push([token, value]);
+    return token;
+  });
+  return { protectedText, placeholders };
+}
+
+function restorePlaceholders(text, placeholders) {
+  let restored = text;
+  for (const [token, value] of placeholders) {
+    const flexible = new RegExp(token.replaceAll('_', '[_ ]*'), 'gi');
+    restored = restored.replace(flexible, value);
+  }
+  return restored;
+}
+
+function normalizeEnglish(text) {
+  return text
+    .replace(/([A-Za-z0-9])({{p\d+}})/g, '$1 $2')
+    .replace(/({{p\d+}})([A-Za-z])/g, '$1 $2')
+    .replace(/[ \t]+([,.;:!?])/g, '$1')
+    .trim();
+}
+
+async function translate(text, attempt = 0) {
+  const { protectedText, placeholders } = protectPlaceholders(text);
+  const params = new URLSearchParams({
+    client: 'gtx',
+    sl: 'zh-CN',
+    tl: 'en',
+    dt: 't',
+    q: protectedText,
+  });
+  try {
+    const response = await fetch('https://translate.googleapis.com/translate_a/single', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: params,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const translated = Array.isArray(payload?.[0])
+      ? payload[0].map((part) => part?.[0] || '').join('')
+      : '';
+    if (!translated) throw new Error('empty translation');
+    const restored = restorePlaceholders(translated, placeholders);
+    const found = [...restored.matchAll(/{{p\d+}}/g)].map((match) => match[0]).sort();
+    const expected = placeholders.map((entry) => entry[1]).sort();
+    if (JSON.stringify(found) !== JSON.stringify(expected)) {
+      throw new Error('placeholder mismatch');
+    }
+    return restored;
+  } catch (error) {
+    if (attempt >= 4) throw new Error(`translation failed for ${JSON.stringify(text)}: ${error.message}`);
+    await new Promise((resolve) => setTimeout(resolve, 400 * (2 ** attempt)));
+    return translate(text, attempt + 1);
+  }
+}
+
+const records = sourceFiles(root).flatMap((file) =>
+  collectStaticCopy(fs.readFileSync(file, 'utf8'), file));
+const texts = [...new Set(records.map((record) => record.text))]
+  .filter((text) => !opaque.has(text))
+  .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+
+let previous = { sourceCatalogs: { 'en-US': {} } };
+if (fs.existsSync(outputPath)) {
+  previous = await import(`${pathToFileURL(outputPath).href}?v=${Date.now()}`);
+}
+const previousEnglish = previous.sourceCatalogs?.['en-US'] || {};
+const allowMachineTranslation = process.argv.includes('--translate-missing');
+const missing = texts.filter((text) => {
+  const id = copyId(text);
+  return !ENGLISH_SOURCE_OVERRIDES[text] && !previousEnglish[id];
+});
+if (missing.length && !allowMachineTranslation) {
+  throw new Error(
+    `English review required for ${missing.length} new source strings. `
+    + 'Add them to scripts/i18n-en-overrides.mjs, or explicitly run '
+    + '`pnpm i18n:catalog -- --translate-missing` for a machine-translated draft:\n'
+    + missing.map((text) => `- ${JSON.stringify(text)}`).join('\n'),
+  );
+}
+const zh = {};
+const en = {};
+let completed = 0;
+const queue = [...texts];
+
+async function worker() {
+  while (queue.length) {
+    const text = queue.shift();
+    const id = copyId(text);
+    zh[id] = text;
+    const english = ENGLISH_SOURCE_OVERRIDES[text]
+      || previousEnglish[id]
+      || await translate(text);
+    en[id] = normalizeEnglish(english);
+    completed += 1;
+    if (completed % 50 === 0 || completed === texts.length) {
+      process.stderr.write(`processed ${completed}/${texts.length}\n`);
+    }
+  }
+}
+
+await Promise.all(Array.from({ length: 8 }, () => worker()));
+
+const ordered = (value) => Object.fromEntries(
+  Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+);
+const source = `// Generated by scripts/generate-source-catalog.mjs.\n`
+  + `// Product copy only; opaque user/model/path/session content is excluded.\n`
+  + `export const sourceCatalogs = ${JSON.stringify({
+    'zh-CN': ordered(zh),
+    'en-US': ordered(en),
+  }, null, 2)};\n`;
+fs.writeFileSync(outputPath, source, 'utf8');
+process.stderr.write(`wrote ${path.relative(process.cwd(), outputPath)} (${texts.length} entries)\n`);

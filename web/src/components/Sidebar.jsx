@@ -14,7 +14,7 @@ import {
   DESKTOP_CONTEXT_ACTIONS,
   SESSION_PIN_TOGGLE_EVENT,
 } from '../lib/desktopContextMenu.js';
-import { relativeTime, clsx } from '../lib/format.js';
+import { relativeTime, clsx, formatCount } from '../lib/format.js';
 import {
   filterPinnedSessions,
   normalizePinnedIds,
@@ -714,7 +714,9 @@ function OpencodeImportDialog({
           {sessions.map((session) => {
             const detail = [
               session.model || session.provider || '',
-              session.message_count > 0 ? `${session.message_count} 条消息` : '',
+              session.message_count > 0
+                ? formatCount(session.message_count, 'messages')
+                : '',
             ].filter(Boolean).join(' · ');
             return (
               <label

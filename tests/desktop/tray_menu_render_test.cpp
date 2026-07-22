@@ -78,6 +78,35 @@ TEST(TrayMenuLayout, EmptyPayloadCollapsesToActions) {
     EXPECT_EQ(count_kind(layout, TrayMenuEntryKind::Separator), 1u);
 }
 
+TEST(TrayMenuLayout, FixedChromeLocalizesAndSessionTitlesStayOpaque) {
+    TrayMenuPayload payload;
+    payload.pinned.push_back(mk("p1", u8"用户标题", "workspace"));
+    payload.recent.push_back(mk("r1", "", "workspace"));
+    const auto layout = compute_menu_layout(payload, "en-US");
+
+    EXPECT_EQ(layout.entries[0].label, "Pinned");
+    bool kept_user_title = false;
+    bool localized_fallback = false;
+    bool localized_new_action = false;
+    for (const auto& entry : layout.entries) {
+        if (entry.session_id == "p1") {
+            EXPECT_EQ(entry.title, u8"用户标题");
+            kept_user_title = true;
+        }
+        if (entry.session_id == "r1") {
+            EXPECT_EQ(entry.title, "New session 1");
+            localized_fallback = true;
+        }
+        if (entry.kind == TrayMenuEntryKind::NewChat) {
+            EXPECT_EQ(entry.label, "New session");
+            localized_new_action = true;
+        }
+    }
+    EXPECT_TRUE(kept_user_title);
+    EXPECT_TRUE(localized_fallback);
+    EXPECT_TRUE(localized_new_action);
+}
+
 // 场景:pinned 正好 3 条 — 顶层全展示,不开 More
 TEST(TrayMenuLayout, PinnedExactlyThreeNoMoreSubmenu) {
     TrayMenuPayload p;

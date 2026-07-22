@@ -27,6 +27,20 @@ TEST(DesktopAboutTest, ContentListsAceCodeBrowserAndCompilerVersions) {
         "编译器版本：Microsoft Visual C++ 19.44.35213");
 }
 
+TEST(DesktopAboutTest, EnglishContentPreservesRuntimeVersionValues) {
+    acecode::desktop::DesktopAboutInfo info;
+    info.acecode_version = "0.7.1";
+    info.browser_name = "WebView2";
+    info.browser_version = "138.0";
+    info.compiler_version = "Clang 20";
+
+    EXPECT_EQ(
+        acecode::desktop::format_desktop_about_content(info, "en-US"),
+        "ACECode version: v0.7.1\n"
+        "Browser version: WebView2 138.0\n"
+        "Compiler version: Clang 20");
+}
+
 TEST(DesktopAboutTest, CurrentCompilerVersionIsAvailable) {
     const std::string version = acecode::desktop::current_compiler_version();
     EXPECT_FALSE(version.empty());

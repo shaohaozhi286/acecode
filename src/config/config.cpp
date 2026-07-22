@@ -17,6 +17,7 @@
 #include <initializer_list>
 #include <limits>
 #include <set>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 
@@ -150,6 +151,10 @@ std::string normalize_upgrade_base_url(std::string raw) {
 bool is_valid_upgrade_base_url(const std::string& raw) {
     const std::string url = normalize_upgrade_base_url(raw);
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
+bool is_valid_ui_locale(const std::string& locale) {
+    return locale == "auto" || locale == "zh-CN" || locale == "en-US";
 }
 
 nlohmann::json connectors_to_json(const std::vector<ConnectorConfig>& connectors) {
@@ -611,6 +616,7 @@ static void write_default_config(const std::string& config_path) {
     j["saved_models"] = nlohmann::json::array();
     j["default_model_name"] = "";
     j["default_permission_mode"] = "default";
+    j["ui"]["locale"] = "auto";
 
     std::ofstream ofs(path_from_utf8(config_path));
     if (ofs.is_open()) {
@@ -1367,6 +1373,29 @@ AppConfig load_config() {
                 }
             }
 
+            // Fixed Desktop/WebUI locale. Missing remains zh-CN for existing
+            // installations; fresh configs contain ui.locale="auto".
+            if (j.contains("ui")) {
+                if (!j["ui"].is_object()) {
+                    LOG_WARN("[config] 'ui' must be an object, ignoring");
+                } else {
+                    const auto& uij = j["ui"];
+                    if (uij.contains("locale")) {
+                        if (uij["locale"].is_string()) {
+                            const std::string locale = uij["locale"].get<std::string>();
+                            if (is_valid_ui_locale(locale)) {
+                                cfg.ui.locale = locale;
+                            } else {
+                                LOG_WARN("[config] invalid ui.locale value '" + locale +
+                                         "', falling back to 'zh-CN'");
+                            }
+                        } else {
+                            LOG_WARN("[config] 'ui.locale' must be a string, using 'zh-CN'");
+                        }
+                    }
+                }
+            }
+
             // Web 控制台(add-console-dock):shell 覆盖 + + 旁下拉选择器
             // (default_shell / git_bash_path,见 控制台 Shell 选择器 plan)。
             if (j.contains("console")) {
@@ -1811,6 +1840,11 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
             j["desktop"] = deskj;
         }
 
+        UiConfig ui_d;
+        if (cfg.ui.locale != ui_d.locale) {
+            j["ui"]["locale"] = cfg.ui.locale;
+        }
+
         SessionTitleConfig st_d;
         nlohmann::json stj = nlohmann::json::object();
         if (cfg.session_title.enabled != st_d.enabled)
@@ -2070,8 +2104,13 @@ void save_config(const AppConfig& cfg) {
 
     auto j = build_config_json(cfg);
     std::ofstream ofs(path_from_utf8(config_path));
-    if (ofs.is_open()) {
-        ofs << j.dump(2) << std::endl;
+    if (!ofs.is_open()) {
+        throw std::runtime_error("failed to open config file for writing: " +
+                                 config_path);
+    }
+    ofs << j.dump(2) << std::endl;
+    if (!ofs.good()) {
+        throw std::runtime_error("failed to write config file: " + config_path);
     }
 }
 
@@ -2083,8 +2122,14 @@ void save_config(const AppConfig& cfg, const std::string& explicit_path) {
 
     auto j = build_config_json(cfg);
     std::ofstream ofs(p);
-    if (ofs.is_open()) {
-        ofs << j.dump(2) << std::endl;
+    if (!ofs.is_open()) {
+        throw std::runtime_error("failed to open config file for writing: " +
+                                 path_to_utf8(p));
+    }
+    ofs << j.dump(2) << std::endl;
+    if (!ofs.good()) {
+        throw std::runtime_error("failed to write config file: " +
+                                 path_to_utf8(p));
     }
 }
 

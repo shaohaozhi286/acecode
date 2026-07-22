@@ -275,6 +275,8 @@ when known.
 | POST | `/api/ui/onboarding/desktop/dismiss` | dismiss the current Desktop guided-tour version |
 | GET | `/api/config/ui-preferences` | read UI preferences |
 | PUT | `/api/config/ui-preferences` | write UI preferences |
+| GET | `/api/config/ui-locale` | read Desktop/WebUI locale preference |
+| PUT | `/api/config/ui-locale` | write Desktop/WebUI locale preference |
 | GET | `/api/config/custom-instructions` | read custom instructions |
 | PUT | `/api/config/custom-instructions` | write custom instructions |
 | GET | `/api/config/connectors` | read connector settings |
@@ -1498,6 +1500,32 @@ Body:
 ```
 
 Validates the field, persists config, and echoes the normalized response.
+
+### `GET /api/config/ui-locale`
+
+Returns the persisted fixed-copy locale preference:
+
+```json
+{"locale":"auto"}
+```
+
+Supported values are `auto`, `zh-CN`, and `en-US`. `auto` resolves Chinese
+system locales to `zh-CN` and all other system locales to `en-US`. A legacy
+configuration with no `ui.locale` remains `zh-CN`; a newly generated
+configuration explicitly writes `auto`.
+
+### `PUT /api/config/ui-locale`
+
+Body:
+
+```json
+{"locale":"en-US"}
+```
+
+The route validates the canonical value, persists `ui.locale`, and echoes the
+stored preference. Invalid values return HTTP `400` with
+`error:"INVALID_UI_LOCALE"`; a persistence failure restores the previous
+in-memory value and returns HTTP `500` with `error:"PERSIST_FAILED"`.
 
 ### `GET /api/config/custom-instructions`
 

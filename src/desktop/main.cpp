@@ -21,11 +21,13 @@
 #include "edge_app_launcher.hpp"
 #include "external_url.hpp"
 #include "folder_picker.hpp"
+#include "locale.hpp"
 #include "notifications.hpp"
 #include "open_in_explorer.hpp"
 #include "pick_active.hpp"
 #include "single_instance.hpp"
 #include "splash_screen.hpp"
+#include "strings.hpp"
 #include "tray_menu_bridge.hpp"
 #include "tray_icon_win.hpp"
 #include "url_builder.hpp"
@@ -238,7 +240,10 @@ std::string desktop_exe_dir() {
 #ifdef _WIN32
 void show_error(const std::string& msg) {
     std::wstring w = acecode::utf8_to_wide(msg);
-    ::MessageBoxW(nullptr, w.c_str(), L"ACECode Desktop", MB_ICONERROR | MB_OK);
+    const std::wstring title = acecode::utf8_to_wide(std::string(
+        acecode::desktop::native_string(
+            acecode::desktop::DesktopStringId::StartupFailedTitle)));
+    ::MessageBoxW(nullptr, w.c_str(), title.c_str(), MB_ICONERROR | MB_OK);
 }
 #endif
 
@@ -508,11 +513,8 @@ int run_browser_fallback(const std::string& url,
                   "(daemon failed to start)");
         splash.close();
 #ifdef _WIN32
-        std::string body =
-            "ACECode 无法启动内置 WebView,且后台服务也未能就绪,无法回退到浏览器。\n\n"
-            "原因:\n" + reason;
-        if (!webview_error.empty()) body += "\n\nWebView2 失败:\n" + webview_error;
-        show_error(body);
+        show_error(format_browser_fallback_no_daemon_message(
+            reason, webview_error, native_locale()));
 #endif
         auto failures = pool.stop_all();
         return failures.empty() ? 1 : 100;
@@ -548,11 +550,8 @@ int run_browser_fallback(const std::string& url,
 
     if (!opened) {
         LOG_ERROR("[desktop] browser fallback failed to open any browser: " + launch_detail);
-        std::string body =
-            "ACECode 无法启动内置 WebView,回退到浏览器也失败了。\n\n"
-            "原因:\n" + reason + "\n\n浏览器失败:\n" + launch_detail;
-        if (!webview_error.empty()) body += "\n\nWebView2 失败:\n" + webview_error;
-        show_error(body);
+        show_error(format_browser_fallback_open_failed_message(
+            reason, launch_detail, webview_error, native_locale()));
         if (edge_process) ::CloseHandle(static_cast<HANDLE>(edge_process));
         auto failures = pool.stop_all();
         return failures.empty() ? 1 : 100;
@@ -708,13 +707,19 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         LOG_WARN(std::string("[desktop] load_config failed, using defaults: ") + e.what());
     }
+    const std::string desktop_system_locale =
+        acecode::desktop::detect_system_locale_tag();
+    std::string desktop_effective_locale = acecode::desktop::resolve_ui_locale(
+        desktop_cfg.ui.locale, desktop_system_locale);
+    acecode::desktop::set_native_locale(desktop_effective_locale);
+    LOG_INFO("[desktop] GUI locale preference=" + desktop_cfg.ui.locale +
+             " effective=" + desktop_effective_locale);
 
     std::string daemon_exe = locate_daemon_exe();
     if (daemon_exe.empty()) {
         splash.close();
 #ifdef _WIN32
-        show_error("Cannot locate acecode.exe next to acecode-desktop.exe.\n"
-                   "Place both binaries in the same directory.");
+        show_error(format_daemon_missing_message(native_locale()));
 #endif
         return 1;
     }
@@ -817,7 +822,8 @@ int main(int argc, char** argv) {
                 url = build_loopback_url(r.port, r.token);
             } else {
 #ifdef _WIN32
-                show_error("Failed to start daemon for workspace '" + m->name + "':\n" + r.error);
+                show_error(format_daemon_workspace_failed_message(
+                    m->name, r.error, native_locale()));
 #endif
                 // 不致命退出 — 仍打开 onboarding,用户可重试 / 切其它 workspace
             }
@@ -1067,6 +1073,47 @@ int main(int argc, char** argv) {
         }.dump();
     });
 
+    // Runtime locale bridge intentionally updates only native in-memory state.
+    // The authenticated daemon API is the sole config.json writer, preventing
+    // Desktop and daemon from racing over unrelated config fields.
+    host.bind("aceDesktop_applyLocale",
+              [&](const std::string& req) -> std::string {
+        try {
+            const auto args = nlohmann::json::parse(req);
+            if (!args.is_array() || args.empty() || !args[0].is_string()) {
+                return nlohmann::json{
+                    {"ok", false},
+                    {"error", "expect [locale:string]"},
+                }.dump();
+            }
+            const std::string preference = args[0].get<std::string>();
+            if (!acecode::is_valid_ui_locale(preference)) {
+                return nlohmann::json{
+                    {"ok", false},
+                    {"error", "invalid locale"},
+                }.dump();
+            }
+            const std::string effective = acecode::desktop::resolve_ui_locale(
+                preference, desktop_system_locale);
+            {
+                std::lock_guard<std::mutex> lock(desktop_config_mu);
+                desktop_cfg.ui.locale = preference;
+                desktop_effective_locale = effective;
+            }
+            acecode::desktop::set_native_locale(effective);
+            return nlohmann::json{
+                {"ok", true},
+                {"preference", preference},
+                {"locale", effective},
+            }.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{
+                {"ok", false},
+                {"error", e.what()},
+            }.dump();
+        }
+    });
+
     host.bind("aceDesktop_setBackgroundProcessPreference",
               [&](const std::string& req) -> std::string {
         bool enabled = false;
@@ -1172,7 +1219,8 @@ int main(int argc, char** argv) {
         info.browser_name = web_core.name.empty() ? web_core.backend : web_core.name;
         info.browser_version = web_core.version;
         info.compiler_version = current_compiler_version();
-        const bool shown = show_desktop_about_dialog(host.native_window(), info);
+        const bool shown = show_desktop_about_dialog(
+            host.native_window(), info, acecode::desktop::native_locale());
         if (!shown) {
             return nlohmann::json{
                 {"ok", false},
@@ -1486,7 +1534,9 @@ int main(int argc, char** argv) {
     constexpr const char* kHostOs = "linux";
     constexpr const char* kNativeFileDrop = "false";
 #endif
-    host.init_script(std::string("window.__ACECODE_DESKTOP_SHELL__=true;\n") +
+    host.init_script(acecode::desktop::locale_bootstrap_script(
+                         desktop_cfg.ui.locale, desktop_effective_locale) +
+                                     "window.__ACECODE_DESKTOP_SHELL__=true;\n" +
                                      "window.__ACECODE_DESKTOP_DEBUG__=" +
                                      (desktop_debug ? "true" : "false") + ";\n" +
                                      "window.__ACECODE_FRAMELESS_WINDOW__=" +
@@ -1873,22 +1923,15 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         LOG_ERROR(std::string("[desktop] unhandled exception during startup: ") + e.what());
 #ifdef _WIN32
-        const std::string body = std::string(
-            "ACECode 桌面版启动时遇到未预期的错误,即将退出。\n\n"
-            "请把以下日志文件发给 IT/开发以便定位:\n"
-            "  %USERPROFILE%\\.acecode\\logs\\desktop-*.log\n\n"
-            "异常信息:\n") + e.what();
-        const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, body.c_str(),
-                                               static_cast<int>(body.size()), nullptr, 0);
-        std::wstring wbody;
-        if (wlen > 0) {
-            wbody.resize(static_cast<std::size_t>(wlen));
-            ::MultiByteToWideChar(CP_UTF8, 0, body.c_str(),
-                                  static_cast<int>(body.size()), wbody.data(), wlen);
-        }
+        const std::string locale = acecode::desktop::native_locale();
+        const std::wstring wbody = acecode::utf8_to_wide(
+            acecode::desktop::format_startup_exception_message(e.what(), locale));
+        const std::wstring wtitle = acecode::utf8_to_wide(std::string(
+            acecode::desktop::desktop_string(
+                acecode::desktop::DesktopStringId::StartupFailedTitle, locale)));
         ::MessageBoxW(nullptr,
                       wbody.empty() ? L"Unhandled exception during startup." : wbody.c_str(),
-                      L"ACECode 启动失败",
+                      wtitle.c_str(),
                       MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 #else
         std::fprintf(stderr, "[desktop] unhandled exception: %s\n", e.what());
@@ -1897,10 +1940,15 @@ int main(int argc, char** argv) {
     } catch (...) {
         LOG_ERROR("[desktop] unhandled non-std::exception during startup");
 #ifdef _WIN32
+        const std::string locale = acecode::desktop::native_locale();
+        const std::wstring wbody = acecode::utf8_to_wide(
+            acecode::desktop::format_startup_exception_message({}, locale));
+        const std::wstring wtitle = acecode::utf8_to_wide(std::string(
+            acecode::desktop::desktop_string(
+                acecode::desktop::DesktopStringId::StartupFailedTitle, locale)));
         ::MessageBoxW(nullptr,
-                      L"ACECode 桌面版启动时遇到未预期的错误,即将退出。\n"
-                      L"请把日志文件 %USERPROFILE%\\.acecode\\logs\\desktop-*.log 发给 IT 团队。",
-                      L"ACECode 启动失败",
+                      wbody.c_str(),
+                      wtitle.c_str(),
                       MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 #else
         std::fprintf(stderr, "[desktop] unhandled non-std::exception during startup\n");

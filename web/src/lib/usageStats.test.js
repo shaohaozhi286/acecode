@@ -87,7 +87,8 @@ run('normalizeUsageStats accepts flat snake_case usage buckets', () => {
 });
 
 run('formatUsageTokens uses compact token units', () => {
-  assert.equal(formatUsageTokens(608), '608');
-  assert.equal(formatUsageTokens(79_800), '79.8K');
-  assert.equal(formatUsageTokens(2_847_563), '2.85M');
+  assert.equal(formatUsageTokens(608, 'en-US'), '608');
+  assert.equal(formatUsageTokens(79_800, 'en-US'), '79.8K');
+  assert.equal(formatUsageTokens(2_847_563, 'en-US'), '2.85M');
+  assert.equal(formatUsageTokens(79_800, 'zh-CN'), '7.98万');
 });

@@ -188,8 +188,10 @@ set(ACECODE_NATIVE_BRIDGE_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/daemon/platform_windows.cpp
     ${CMAKE_SOURCE_DIR}/src/daemon/runtime_files.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/folder_picker_win.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/locale.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/notifications.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/open_in_explorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/desktop/strings.cpp
     ${CMAKE_SOURCE_DIR}/src/desktop/workspace_registry.cpp
     ${CMAKE_SOURCE_DIR}/src/utils/clipboard.cpp
     ${CMAKE_SOURCE_DIR}/src/utils/cwd_hash.cpp

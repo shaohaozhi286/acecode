@@ -46,6 +46,9 @@ import './changeReviewDetailsArchitecture.test.js';
 import './modalPresentationArchitecture.test.js';
 import './changeDockDismissal.test.js';
 import './taskCompleteSummary.test.js';
+import '../i18n/locale.test.js';
+import '../i18n/catalogs.test.js';
+import '../i18n/sourceCatalog.test.js';
 import './conversationTurnScrubber.test.js';
 import './conversationTurnScrubberArchitecture.test.js';
 import './sessionTitle.test.js';
@@ -88,7 +91,6 @@ import './mcpServers.test.js';
 import './webCoreInfo.test.js';
 import './globalFind.test.js';
 import './fileTypeIcons.test.js';
-import './slashCommands.test.js';
 import './builtinCommandRouting.test.js';
 import './slashCommandWorkspace.test.js';
 import './desktopNotify.test.js';
@@ -126,3 +128,10 @@ import './projectCreation.test.js';
 import './workspacePicker.test.js';
 import './connectors.test.js';
 import './settingsNavigation.test.js';
+
+// These suites intentionally mutate the process-wide locale. Run them in
+// series after the ordinary static-import suites so top-level await cannot
+// leak a temporary English locale into an unrelated presentation test.
+await import('../i18n/runtime.test.js');
+await import('./uiLocale.test.js');
+await import('./slashCommands.test.js');

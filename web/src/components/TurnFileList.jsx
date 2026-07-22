@@ -9,6 +9,7 @@
 import { memo, useMemo, useState } from 'react';
 import { buildTurnFileItems, splitTurnFileItems } from '../lib/turnFileList.js';
 import { summarizeChangeGroups } from '../lib/sessionChanges.js';
+import { formatCount } from '../lib/format.js';
 import { FileTypeIcon } from './Icon.jsx';
 
 function ChangeCounts({ additions, deletions, className = '' }) {
@@ -33,7 +34,7 @@ export const TurnFileList = memo(function TurnFileList({ groups, summary, cwd = 
   return (
     <div className="ace-turn-files" data-chat-turn-files="true">
       <div className="ace-turn-files-title">
-        <span>已修改 {changeSummary.fileCount} 个文件</span>
+        <span>{formatCount(changeSummary.fileCount, 'filesModified')}</span>
         <ChangeCounts
           additions={changeSummary.totalAdditions}
           deletions={changeSummary.totalDeletions}

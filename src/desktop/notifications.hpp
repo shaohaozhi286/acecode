@@ -94,7 +94,8 @@ NotifyPayload build_completion_notification(
     const std::string& session_id,
     const std::string& workspace_hash,
     const std::string& session_title,
-    const std::string& final_assistant_text);
+    const std::string& final_assistant_text,
+    const std::string& locale = "zh-CN");
 
 // Called by platform event handlers. Public to keep payload fidelity and
 // lifecycle behavior directly testable without displaying an OS notification.

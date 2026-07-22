@@ -1,4 +1,5 @@
 import { transcriptTimestampMs } from './timestamps.js';
+import { formatCount } from './format.js';
 
 function isUserMessage(item) {
   return item?.kind === 'msg' && item.role === 'user';
@@ -252,11 +253,11 @@ function summarizeToolItems(items) {
   }
 
   const parts = [];
-  if (created.size > 0) parts.push(`已创建 ${created.size} 个文件`);
-  if (edited.size > 0) parts.push(`已编辑 ${edited.size} 个文件`);
-  if (read.size > 0) parts.push(`读取 ${read.size} 个文件`);
-  if (commands > 0) parts.push(`已运行 ${commands} 条命令`);
-  if (nonFileTools > 0) parts.push(`调用 ${nonFileTools} 个工具`);
+  if (created.size > 0) parts.push(`已创建 ${formatCount(created.size, 'files')}`);
+  if (edited.size > 0) parts.push(`已编辑 ${formatCount(edited.size, 'files')}`);
+  if (read.size > 0) parts.push(`读取 ${formatCount(read.size, 'files')}`);
+  if (commands > 0) parts.push(formatCount(commands, 'commandsRun'));
+  if (nonFileTools > 0) parts.push(formatCount(nonFileTools, 'toolsCalled'));
   return parts.length > 0 ? parts.join('，') : '已调用工具';
 }
 

@@ -41,6 +41,13 @@ TEST(NativeNotifications, BuildsCompletionPayloadWithStableSessionIdentity) {
     EXPECT_NE(payload.id.find("completion-session-42-"), std::string::npos);
 }
 
+TEST(NativeNotifications, LocalizesNotificationShellWithoutChangingSessionTitle) {
+    const auto payload = acecode::desktop::build_completion_notification(
+        "session-en", "workspace", u8"用户标题", "", "en-US");
+    EXPECT_EQ(payload.title, u8"Completed · 用户标题");
+    EXPECT_EQ(payload.body, "(blank turn)");
+}
+
 TEST(NativeNotifications, ParsesDirectObjectBridgeArgument) {
     const auto payload = sample_payload("completion-1", "session-1");
     nlohmann::json object = {

@@ -1,8 +1,10 @@
 #include "folder_picker.hpp"
+#include "strings.hpp"
 
 #ifdef _WIN32
 
 #include "../utils/logger.hpp"
+#include "../utils/encoding.hpp"
 
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -25,7 +27,10 @@ namespace acecode::desktop {
 
 namespace {
 
-constexpr const wchar_t* kFolderPickerTitle = L"Select project folder";
+std::wstring folder_picker_title() {
+    return acecode::utf8_to_wide(
+        std::string(native_string(DesktopStringId::FolderPickerTitle)));
+}
 
 // UTF-16 → UTF-8。基础实现,夹带不可解码字节直接落空(MVP 容忍,实际选目录路径都是
 // 系统合法 UTF-16)。
@@ -74,7 +79,8 @@ struct DialogForegroundState {
 bool is_folder_picker_window(HWND hwnd) {
     wchar_t title[128] = {0};
     ::GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-    if (std::wcscmp(title, kFolderPickerTitle) == 0) return true;
+    const std::wstring expected_title = folder_picker_title();
+    if (std::wcscmp(title, expected_title.c_str()) == 0) return true;
 
     wchar_t cls[64] = {0};
     ::GetClassNameW(hwnd, cls, static_cast<int>(sizeof(cls) / sizeof(cls[0])));
@@ -197,7 +203,8 @@ std::optional<std::string> pick_folder(void* parent_hwnd) {
         if (SUCCEEDED(dlg->GetOptions(&opts))) {
             dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
         }
-        dlg->SetTitle(kFolderPickerTitle);
+        const std::wstring title = folder_picker_title();
+        dlg->SetTitle(title.c_str());
 
         HWND requested_parent = reinterpret_cast<HWND>(parent_hwnd);
         HWND parent = resolve_dialog_owner(requested_parent);
@@ -339,11 +346,14 @@ FolderPickOutcome pick_folder_outcome(void* /*parent*/) {
     FolderPickOutcome outcome;
     std::string path;
 
+    const std::string title = std::string(
+        native_string(DesktopStringId::FolderPickerTitle));
+    const std::string zenity_title = "--title=" + title;
     auto zenity = run_folder_picker_command({
         "zenity",
         "--file-selection",
         "--directory",
-        "--title=Select project folder",
+        zenity_title.c_str(),
         nullptr,
     }, path);
     if (zenity == RunStatus::Picked) {
@@ -357,7 +367,7 @@ FolderPickOutcome pick_folder_outcome(void* /*parent*/) {
         "--getexistingdirectory",
         ".",
         "--title",
-        "Select project folder",
+        title.c_str(),
         nullptr,
     }, path);
     if (kdialog == RunStatus::Picked) {
@@ -367,9 +377,8 @@ FolderPickOutcome pick_folder_outcome(void* /*parent*/) {
     if (kdialog == RunStatus::Cancelled) return outcome;
 
     LOG_WARN("[folder_picker] no folder picker tool available (tried zenity, kdialog)");
-    outcome.error =
-        u8"未找到目录选择工具:请安装 zenity(如 sudo apt install zenity)"
-        u8"或 kdialog 后重试";
+    outcome.error = std::string(
+        native_string(DesktopStringId::FolderPickerMissing));
     return outcome;
 }
 

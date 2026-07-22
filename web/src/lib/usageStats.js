@@ -1,3 +1,6 @@
+import { effectiveLocale } from '../i18n/index.js';
+import { formatCompactNumber } from './format.js';
+
 function numberValue(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
@@ -29,11 +32,9 @@ function normalizeCommonBucket(raw = {}) {
   };
 }
 
-export function formatUsageTokens(value) {
+export function formatUsageTokens(value, locale = effectiveLocale()) {
   const n = numberValue(value);
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
+  return formatCompactNumber(n, { maximumFractionDigits: 2 }, locale);
 }
 
 export function normalizeUsageStats(raw = {}) {

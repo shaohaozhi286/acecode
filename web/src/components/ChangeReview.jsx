@@ -6,7 +6,7 @@ import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { normalizeTreePath } from '../lib/fileTreeChangeStatus.js';
 import { todoChecklistPresentation } from '../lib/todoChecklist.js';
-import { clsx } from '../lib/format.js';
+import { clsx, formatCount } from '../lib/format.js';
 import { ChangeReviewDetails } from './ChangeReviewDetails.jsx';
 import { VsIcon } from './Icon.jsx';
 
@@ -24,7 +24,7 @@ export function ChangeTotals({ summary, compact = false }) {
   if (!summary?.hasChanges) return null;
   return (
     <span className={clsx('ace-change-totals', compact && 'ace-change-totals-compact')}>
-      <span>{summary.fileCount} 个文件已更改</span>
+      <span>{formatCount(summary.fileCount, 'filesChanged')}</span>
       <span className="ace-change-add">+{summary.totalAdditions}</span>
       <span className="ace-change-del">-{summary.totalDeletions}</span>
     </span>
@@ -545,7 +545,7 @@ export function ChangeReviewPanel({
     <ChangeReviewDetails
       rows={rows}
       ready
-      summaryLabel={`${changeSummary.fileCount || 0} 个文件已更改`}
+      summaryLabel={formatCount(changeSummary.fileCount || 0, 'filesChanged')}
       fileCount={changeSummary.fileCount || 0}
       totalAdditions={changeSummary.totalAdditions || 0}
       totalDeletions={changeSummary.totalDeletions || 0}
