@@ -17,7 +17,10 @@
 // 空文本回退到默认占位,纯函数,可测。
 
 const NOTIFICATION_BODY_LIMIT = 80;
-const DEFAULT_COMPLETION_BODY = '(空白回合)';
+
+function defaultCompletionBody() {
+  return '(空白回合)';
+}
 
 function defaultCfg() {
   return {
@@ -68,7 +71,7 @@ export function buildNotificationPayload({
   const trimmedBody = String(bodyText || '').trim();
   const body = trimmedBody
     ? truncateForNotification(trimmedBody)
-    : (safeType === 'completion' ? DEFAULT_COMPLETION_BODY : '');
+    : (safeType === 'completion' ? defaultCompletionBody() : '');
   return {
     id: `${safeType}-${sessionId || 'unknown'}-${Date.now()}`,
     workspace_hash: workspaceHash || '',

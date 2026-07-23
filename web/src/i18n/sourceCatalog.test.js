@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { transformSync } from '@babel/core';
 import { collectStaticCopy } from '../../scripts/i18n-audit.mjs';
 import localizeStaticCopyBabelPlugin from '../../scripts/localize-static-copy-babel.mjs';
 import { sourceCatalogs } from './sourceCatalog.generated.js';
 import { OPAQUE_STATIC_COPY } from './sourceAllowlist.js';
+import { applyLocalePreference, localizedArray } from './index.js';
 
 function sourceFiles(folder) {
   return fs.readdirSync(folder, { withFileTypes: true }).flatMap((entry) => {
@@ -34,6 +36,13 @@ assert.equal(
   false,
   'English product-copy catalog must not retain Han text',
 );
+
+let liveArrayLabel = '一';
+const liveArray = localizedArray([1, undefined], { 1: () => liveArrayLabel });
+Object.freeze(liveArray);
+assert.equal(liveArray[1], '一');
+liveArrayLabel = 'Mon';
+assert.equal(liveArray[1], 'Mon', 'localized array entries must resolve on every read');
 
 const sample = `
   const dynamicUserContent = props.message;
@@ -65,6 +74,72 @@ assert.match(
   /__acecodeT\("source\.[^"]+"\) \+ " "/,
   'inline JSX space after localized copy must survive compilation',
 );
+
+assert.throws(
+  () => transformSync("export const eagerLabel = '设置';", {
+    filename: path.join(sourceRoot, 'lib/EagerLocaleFixture.js'),
+    configFile: false,
+    babelrc: false,
+    plugins: [localizeStaticCopyBabelPlugin],
+  }),
+  /Module-scope translated primitives must resolve lazily/,
+);
+
+const liveModuleSource = `
+  export const menu = Object.freeze([{ label: '设置' }]);
+  export const weekdays = Object.freeze([[1, '一']]);
+`;
+const liveModuleOutput = transformSync(liveModuleSource, {
+  filename: path.join(sourceRoot, 'lib/LiveLocaleFixture.js'),
+  configFile: false,
+  babelrc: false,
+  plugins: [localizeStaticCopyBabelPlugin],
+}).code;
+assert.match(liveModuleOutput, /get label\(\)/);
+assert.match(liveModuleOutput, /localizedArray as __acecodeLocalizedArray/);
+
+const memoModuleOutput = transformSync(`
+  import { useMemo } from 'react';
+  export function LocaleMemoFixture() {
+    return useMemo(() => ({ label: '设置' }), []);
+  }
+`, {
+  filename: path.join(sourceRoot, 'components/LocaleMemoFixture.jsx'),
+  configFile: false,
+  babelrc: false,
+  plugins: [localizeStaticCopyBabelPlugin],
+}).code;
+assert.match(memoModuleOutput, /i18n as __acecodeI18n/);
+assert.match(
+  memoModuleOutput,
+  /useMemo\(\(\) => \(\{[\s\S]*?\}\), \[__acecodeI18n\.resolvedLanguage\]\)/,
+  'localized useMemo values must be recomputed after a language change',
+);
+const i18nModuleUrl = pathToFileURL(path.join(sourceRoot, 'i18n/index.js')).href;
+const executableLiveModule = liveModuleOutput.replace(
+  '"/src/i18n/index.js"',
+  JSON.stringify(i18nModuleUrl),
+);
+const liveModule = await import(
+  `data:text/javascript;base64,${Buffer.from(executableLiveModule).toString('base64')}`
+);
+const stableMenu = liveModule.menu;
+const stableWeekdays = liveModule.weekdays;
+await applyLocalePreference('zh-CN', { cache: false });
+assert.equal(liveModule.menu[0].label, '设置');
+assert.equal(liveModule.weekdays[0][1], '一');
+await applyLocalePreference('en-US', { cache: false });
+assert.equal(
+  liveModule.menu[0].label,
+  sourceCatalogs['en-US'][catalogKeyByCopy.get('设置')],
+);
+assert.equal(
+  liveModule.weekdays[0][1],
+  sourceCatalogs['en-US'][catalogKeyByCopy.get('一')],
+);
+assert.equal(liveModule.menu, stableMenu, 'language changes must preserve module collection identity');
+assert.equal(liveModule.weekdays, stableWeekdays, 'language changes must preserve nested UI state');
+await applyLocalePreference('zh-CN', { cache: false });
 
 const moduleScopeFixtures = [
   {

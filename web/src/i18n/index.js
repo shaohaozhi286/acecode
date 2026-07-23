@@ -33,6 +33,24 @@ export function tr(key, options) {
   return i18n.t(key, options);
 }
 
+// Keep module-scope array identity stable while translated entries resolve
+// against the current i18n language on every read. The static-copy compiler
+// uses this only for arrays that would otherwise capture translated strings
+// during module evaluation.
+export function localizedArray(values, readers = {}) {
+  const result = Array.isArray(values) ? values : [];
+  Object.entries(readers).forEach(([rawIndex, read]) => {
+    const index = Number(rawIndex);
+    if (!Number.isInteger(index) || index < 0 || typeof read !== 'function') return;
+    Object.defineProperty(result, index, {
+      configurable: false,
+      enumerable: true,
+      get: read,
+    });
+  });
+  return result;
+}
+
 export function localePreference() {
   return currentPreference;
 }

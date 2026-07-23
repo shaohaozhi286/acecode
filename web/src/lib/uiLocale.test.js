@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { applyLocalePreference, localePreference } from '../i18n/index.js';
-import { GUI_LOCALE_RELOAD_STORAGE_KEY } from '../i18n/locale.js';
+import { GUI_LOCALE_RUNTIME_STORAGE_KEY } from '../i18n/locale.js';
 import { loadUiLocale, persistUiLocale, syncNativeLocale } from './uiLocale.js';
 
 function memoryStorage() {
@@ -55,11 +55,10 @@ await persistUiLocale('en-US', {
   },
 });
 assert.deepEqual(
-  JSON.parse(sessionStorage.getItem(GUI_LOCALE_RELOAD_STORAGE_KEY)),
+  JSON.parse(sessionStorage.getItem(GUI_LOCALE_RUNTIME_STORAGE_KEY)),
   { preference: 'en-US', locale: 'en-US' },
 );
-await new Promise((resolve) => setTimeout(resolve, 0));
-assert.equal(reloadCount, 1);
+assert.equal(reloadCount, 0, 'locale switching must preserve the mounted document');
 
 await applyLocalePreference('zh-CN', { cache: false });
 await assert.rejects(

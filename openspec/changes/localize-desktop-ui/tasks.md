@@ -17,6 +17,7 @@
 - [x] 2.6 Localize the guided tour, accessibility labels, tooltips, placeholders, document metadata, compatibility page copy, and no-script fallback
 - [x] 2.7 Run the presentation-literal audit, migrate or explicitly allowlist every remaining Desktop-visible product string, and verify opaque Chinese content remains unchanged in English mode
 - [x] 2.8 Compile catalogued static copy in plain JavaScript modules and preserve the newly selected locale across the same-run WebView reload so module-scope product metadata cannot remain in the previous language
+- [x] 2.9 Make compiled module-scope product metadata resolve lazily, remove the locale-switch document reload, preserve live WebUI state, and add an eager-translation regression gate
 
 ## 3. M3 - Native Desktop localization and quality gates
 

@@ -8,6 +8,7 @@
 // 纯 <pre>{output}</pre>。bash 工具的展开区头部加 `$ <command>` prompt 行。
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { clsx, formatBytes, formatCount, formatElapsed } from '../lib/format.js';
 import { hunksToUnifiedDiff } from '../lib/diff.js';
 import { compactOneLinePreview } from '../lib/compactMessagePreview.js';
@@ -184,6 +185,7 @@ function AskUserQuestionResultCard({ result, toolContextAttrs }) {
 }
 
 export const ToolBlock = memo(function ToolBlock({ entry, onReviewToggle, sessionRunning = true }) {
+  useTranslation();
   const [expanded, setExpanded] = useState(false);
   const contextIdRef = useRef('');
   if (!contextIdRef.current) {

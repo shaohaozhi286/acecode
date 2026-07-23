@@ -7,6 +7,7 @@
 // 纯逻辑(路径展示 / 条目构建 / 折叠切分)在 lib/turnFileList.js,有 Node 单测。
 
 import { memo, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { buildTurnFileItems, splitTurnFileItems } from '../lib/turnFileList.js';
 import { summarizeChangeGroups } from '../lib/sessionChanges.js';
 import { formatCount } from '../lib/format.js';
@@ -23,6 +24,7 @@ function ChangeCounts({ additions, deletions, className = '' }) {
 }
 
 export const TurnFileList = memo(function TurnFileList({ groups, summary, cwd = '', onOpenFile }) {
+  useTranslation();
   const [expanded, setExpanded] = useState(false);
   const items = useMemo(() => buildTurnFileItems(groups, cwd), [groups, cwd]);
   const changeSummary = summary && typeof summary === 'object'

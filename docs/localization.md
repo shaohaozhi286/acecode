@@ -12,7 +12,7 @@ ACECode localizes the Desktop shell and its embedded WebUI in Simplified Chinese
 
 Newly generated configs contain `"ui": { "locale": "auto" }`. An older config with no locale field retains the historical `zh-CN` behavior. The authenticated `GET` and `PUT /api/config/ui-locale` endpoints read and update the stored preference; unsupported values are rejected without changing it.
 
-Desktop resolves the preference before WebView modules execute and injects both the preference and effective locale. Settings > General applies a change optimistically, persists it through the daemon, and synchronizes the native bridge. Any save or bridge failure rolls all layers back. A successful change reloads only the embedded page so module-scope presentation maps are rebuilt; ACECode and the daemon are not restarted.
+Desktop resolves the preference before WebView modules execute and injects both the preference and effective locale. Settings > General applies a change optimistically, persists it through the daemon, and synchronizes the native bridge. Any save or bridge failure rolls all layers back. A successful change updates the current WebUI in place without reloading the embedded page, so draft input, scroll position, open panels, and dialogs are preserved. The confirmed preference is also kept for later navigations in the same WebView session.
 
 ## Web catalogs
 
@@ -20,8 +20,10 @@ Web localization is synchronous and bundled. There is no runtime translation req
 
 - `web/src/i18n/catalogs/zh-CN.js` and `en-US.js` contain reviewed semantic keys, reusable terms, and plural-aware count phrases.
 - `web/src/i18n/sourceCatalog.generated.js` contains content-addressed mappings for the existing static product-copy surface.
-- `web/scripts/localize-static-copy-babel.mjs` rewrites only catalogued static product literals to `tr(...)` during Vite builds.
+- `web/scripts/localize-static-copy-babel.mjs` rewrites only catalogued static product literals during Vite builds. Function-local copy becomes `tr(...)`; module-scope object properties and array entries become lazy accessors so they resolve against the current locale on every read. Localized modules also invalidate `useMemo` caches when the active language changes.
 - `web/scripts/i18n-en-overrides.mjs` holds reviewed English wording for new or context-sensitive source strings.
+
+The compiler rejects unsupported eager module-scope translated primitives. Move those values behind a function or place them in a supported object/array presentation map instead of caching a translated string at module initialization.
 
 Use a semantic key when copy is reused, has plural/interpolation grammar, or represents a stable product identifier. Add the same key and interpolation variables to both semantic catalogs. Static one-off product copy is covered by the source compiler; after adding it, run:
 

@@ -598,14 +598,20 @@ function suppressStructuredToolWrappers(items) {
     .filter(Boolean);
 }
 
-const LEGACY_INVOCATION_LABEL = '工具调用 / 返回';
-const MISSING_TOOL_REQUEST_TEXT = '请求未记录（旧记录未保存工具调用参数）';
+function legacyInvocationLabel() {
+  return '工具调用 / 返回';
+}
+
+function missingToolRequestText() {
+  return '请求未记录（旧记录未保存工具调用参数）';
+}
 
 function legacyRequestText(call, result) {
   const content = String(call?.content || '').trim();
   if (content) return content;
   const name = transcriptToolName(result);
-  return name ? `[Tool: ${name}] ${MISSING_TOOL_REQUEST_TEXT}` : MISSING_TOOL_REQUEST_TEXT;
+  const missingText = missingToolRequestText();
+  return name ? `[Tool: ${name}] ${missingText}` : missingText;
 }
 
 function legacyResultText(result) {
@@ -634,7 +640,7 @@ function makeLegacyInvocationItem(call, result, betweenItems) {
     metadata: {
       ...objectMetadata(result),
       legacyToolInvocation: true,
-      compact_label: LEGACY_INVOCATION_LABEL,
+      compact_label: legacyInvocationLabel(),
     },
   };
 }

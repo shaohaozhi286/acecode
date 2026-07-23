@@ -7,6 +7,7 @@
 
 import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { renderMarkdownBlocks } from '../lib/markdown.js';
 import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import { clsx, relativeTime } from '../lib/format.js';
@@ -312,6 +313,7 @@ export const Message = memo(function Message({
   showFooter = true,
   showAceCodeAvatar = false,
 }) {
+  useTranslation();
   if (role === 'user') {
     // expand-webui-skill-commands:daemon 把 /<skill> args 在送给 LLM 前展开为
     // 轻量提示;原文存到 metadata.display_text,UI 优先显示原文,不让用户看到

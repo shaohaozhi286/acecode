@@ -4,7 +4,7 @@ import {
   localePreference,
 } from '../i18n/index.js';
 import {
-  cacheLocaleReloadOverride,
+  cacheLocaleRuntimeOverride,
   normalizeLocalePreference,
 } from '../i18n/locale.js';
 
@@ -24,9 +24,15 @@ export async function loadUiLocale(apiClient, options = {}) {
   const result = await apiClient.getUiLocale();
   const preference = normalizeLocalePreference(result?.locale);
   const native = await syncNativeLocale(preference, options.scope);
-  return applyLocalePreference(preference, {
+  const applied = await applyLocalePreference(preference, {
     effectiveLocale: native?.locale,
   });
+  cacheLocaleRuntimeOverride(
+    applied.preference,
+    applied.locale,
+    options.scope || globalThis,
+  );
+  return applied;
 }
 
 export async function persistUiLocale(preference, apiClient, options = {}) {
@@ -45,11 +51,7 @@ export async function persistUiLocale(preference, apiClient, options = {}) {
       effectiveLocale: native?.locale,
     });
     const scope = options.scope || globalThis;
-    if (options.reloadStaticCopy !== false
-        && typeof scope?.location?.reload === 'function') {
-      cacheLocaleReloadOverride(applied.preference, applied.locale, scope);
-      setTimeout(() => scope.location.reload(), 0);
-    }
+    cacheLocaleRuntimeOverride(applied.preference, applied.locale, scope);
     return applied;
   } catch (error) {
     if (persisted) {

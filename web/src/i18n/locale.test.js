@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import {
-  GUI_LOCALE_RELOAD_STORAGE_KEY,
+  GUI_LOCALE_RUNTIME_STORAGE_KEY,
   GUI_LOCALE_STORAGE_KEY,
   cacheLocalePreference,
-  cacheLocaleReloadOverride,
+  cacheLocaleRuntimeOverride,
   initialLocaleState,
   normalizeLocalePreference,
   resolveLocalePreference,
@@ -35,24 +35,27 @@ assert.deepEqual(initialLocaleState({
   __ACECODE_LOCALE__: 'en-US',
 }), { preference: 'auto', locale: 'en-US' });
 
-const reloadStorage = memoryStorage();
-const reloadScope = {
+const runtimeStorage = memoryStorage();
+const runtimeScope = {
   __ACECODE_LOCALE_PREFERENCE__: 'zh-CN',
   __ACECODE_LOCALE__: 'zh-CN',
-  sessionStorage: reloadStorage,
+  sessionStorage: runtimeStorage,
 };
 assert.deepEqual(
-  cacheLocaleReloadOverride('en-US', 'en-US', reloadScope),
+  cacheLocaleRuntimeOverride('en-US', 'en-US', runtimeScope),
   { preference: 'en-US', locale: 'en-US' },
 );
-assert.deepEqual(initialLocaleState(reloadScope), {
+assert.deepEqual(initialLocaleState(runtimeScope), {
   preference: 'en-US',
   locale: 'en-US',
 });
-assert.equal(reloadStorage.getItem(GUI_LOCALE_RELOAD_STORAGE_KEY), null);
-assert.deepEqual(initialLocaleState(reloadScope), {
-  preference: 'zh-CN',
-  locale: 'zh-CN',
+assert.deepEqual(
+  JSON.parse(runtimeStorage.getItem(GUI_LOCALE_RUNTIME_STORAGE_KEY)),
+  { preference: 'en-US', locale: 'en-US' },
+);
+assert.deepEqual(initialLocaleState(runtimeScope), {
+  preference: 'en-US',
+  locale: 'en-US',
 });
 
 const writes = [];

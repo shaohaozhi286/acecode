@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { attachmentsFromContentParts, contextsFromContentParts, isImageAttachment, normalizeAttachmentList } from '../lib/messageAttachments.js';
 import {
   DESKTOP_CONTEXT_ACTION_EVENT,
@@ -20,6 +21,7 @@ export const AttachmentStrip = memo(function AttachmentStrip({
   align = 'left',
   compact = false,
 }) {
+  useTranslation();
   const [preview, setPreview] = useState(null);
   const attachmentItems = attachments !== undefined
     ? normalizeAttachmentList(attachments)

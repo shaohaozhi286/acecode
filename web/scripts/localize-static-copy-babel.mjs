@@ -48,6 +48,64 @@ function translationCall(types, text, expressions = []) {
   return types.callExpression(types.identifier('__acecodeT'), args);
 }
 
+function moduleScopeObjectGetter(types, path, call) {
+  if (path.getFunctionParent()) return null;
+  const property = path.parentPath;
+  if (!property?.isObjectProperty() || property.node.value !== path.node) return null;
+  const getter = types.objectMethod(
+    'get',
+    types.cloneNode(property.node.key, true),
+    [],
+    types.blockStatement([types.returnStatement(call)]),
+    property.node.computed,
+  );
+  types.inheritsComments(getter, property.node);
+  return { property, getter };
+}
+
+function moduleScopeLocalizedArray(types, path) {
+  if (path.getFunctionParent()
+      || path.node.elements.some((element) => types.isSpreadElement(element))) {
+    return null;
+  }
+  const readers = [];
+  const values = path.node.elements.map((element, index) => {
+    if (!types.isStringLiteral(element)) return element;
+    const call = translationCall(types, element.value);
+    if (!call) return element;
+    readers.push(types.objectProperty(
+      types.numericLiteral(index),
+      types.arrowFunctionExpression([], call),
+    ));
+    return types.unaryExpression('void', types.numericLiteral(0));
+  });
+  if (readers.length === 0) return null;
+  return types.callExpression(
+    types.identifier('__acecodeLocalizedArray'),
+    [types.arrayExpression(values), types.objectExpression(readers)],
+  );
+}
+
+function assertNotEagerModuleTranslation(path) {
+  if (path.getFunctionParent()) return;
+  throw path.buildCodeFrameError(
+    'Module-scope translated primitives must resolve lazily; '
+    + 'move this copy behind a function or a supported object/array accessor.',
+  );
+}
+
+function isUseMemoCall(path) {
+  const callee = path.node.callee;
+  return path.isCallExpression()
+    && ((callee.type === 'Identifier' && callee.name === 'useMemo')
+      || (callee.type === 'MemberExpression'
+        && !callee.computed
+        && callee.object.type === 'Identifier'
+        && callee.object.name === 'React'
+        && callee.property.type === 'Identifier'
+        && callee.property.name === 'useMemo'));
+}
+
 function preserveInlineJsxSpacing(types, expression, rawText) {
   // Babel/React preserves a same-line space beside an expression, while
   // indentation-only whitespace around line breaks is discarded. JSXText is
@@ -71,13 +129,30 @@ export default function localizeStaticCopyBabelPlugin({ types }) {
     pre(file) {
       this.acecodeSkip = ignoredFilename(file.opts.filename || '');
       this.acecodeLocalized = false;
+      this.acecodeLocalizedArray = false;
+      this.acecodeMemoDependencyArrays = [];
     },
     visitor: {
+      CallExpression(path, state) {
+        if (state.acecodeSkip || !isUseMemoCall(path)) return;
+        const dependencies = path.get('arguments.1');
+        if (!dependencies?.isArrayExpression()) return;
+        state.acecodeMemoDependencyArrays.push(dependencies);
+      },
+      ArrayExpression(path, state) {
+        if (state.acecodeSkip) return;
+        const call = moduleScopeLocalizedArray(types, path);
+        if (!call) return;
+        state.acecodeLocalized = true;
+        state.acecodeLocalizedArray = true;
+        path.replaceWith(call);
+      },
       JSXText(path, state) {
         if (state.acecodeSkip) return;
         const text = normalizeJsxText(path.node.value);
         const call = translationCall(types, text);
         if (!call) return;
+        assertNotEagerModuleTranslation(path);
         state.acecodeLocalized = true;
         path.replaceWith(types.jsxExpressionContainer(
           preserveInlineJsxSpacing(types, call, path.node.value),
@@ -89,6 +164,13 @@ export default function localizeStaticCopyBabelPlugin({ types }) {
         const call = translationCall(types, path.node.value);
         if (!call) return;
         state.acecodeLocalized = true;
+        const lazyProperty = moduleScopeObjectGetter(types, path, call);
+        if (lazyProperty) {
+          lazyProperty.property.replaceWith(lazyProperty.getter);
+          lazyProperty.property.skip();
+          return;
+        }
+        assertNotEagerModuleTranslation(path);
         if (path.parentPath?.isJSXAttribute()) {
           path.replaceWith(types.jsxExpressionContainer(call));
         } else {
@@ -100,6 +182,7 @@ export default function localizeStaticCopyBabelPlugin({ types }) {
         if (state.acecodeSkip) return;
         const call = translationCall(types, templateSource(path.node), path.node.expressions);
         if (!call) return;
+        assertNotEagerModuleTranslation(path);
         state.acecodeLocalized = true;
         path.replaceWith(call);
         path.skip();
@@ -107,12 +190,34 @@ export default function localizeStaticCopyBabelPlugin({ types }) {
       Program: {
         exit(path, state) {
           if (!state.acecodeLocalized) return;
-          path.unshiftContainer('body', types.importDeclaration([
-            types.importSpecifier(
-              types.identifier('__acecodeT'),
-              types.identifier('tr'),
-            ),
-          ], types.stringLiteral('/src/i18n/index.js')));
+          const memoDependencyArrays = state.acecodeMemoDependencyArrays
+            .filter((dependencies) => dependencies?.node);
+          memoDependencyArrays.forEach((dependencies) => {
+            dependencies.pushContainer('elements', types.memberExpression(
+              types.identifier('__acecodeI18n'),
+              types.identifier('resolvedLanguage'),
+            ));
+          });
+          const specifiers = [types.importSpecifier(
+            types.identifier('__acecodeT'),
+            types.identifier('tr'),
+          )];
+          if (state.acecodeLocalizedArray) {
+            specifiers.push(types.importSpecifier(
+              types.identifier('__acecodeLocalizedArray'),
+              types.identifier('localizedArray'),
+            ));
+          }
+          if (memoDependencyArrays.length > 0) {
+            specifiers.push(types.importSpecifier(
+              types.identifier('__acecodeI18n'),
+              types.identifier('i18n'),
+            ));
+          }
+          path.unshiftContainer('body', types.importDeclaration(
+            specifiers,
+            types.stringLiteral('/src/i18n/index.js'),
+          ));
         },
       },
     },

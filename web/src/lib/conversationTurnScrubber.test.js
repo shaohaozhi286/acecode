@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   MAX_CONVERSATION_TURN_SCRUBBER_MARKERS,
-  RUNNING_ANSWER_PREVIEW,
+  runningAnswerPreview,
   activeConversationTurnIndex,
   activatedConversationTurnIndex,
   buildConversationTurnPreviews,
@@ -163,7 +163,7 @@ run('running fallback is limited to the current unanswered turn', () => {
     { ...assistant(3, '还在流式输出'), streaming: true },
   ], { busy: true });
   assert.equal(turns[0].answer, '暂无回答');
-  assert.equal(turns[1].answer, RUNNING_ANSWER_PREVIEW);
+  assert.equal(turns[1].answer, runningAnswerPreview());
   assert.equal(turns[1].running, true);
 });
 

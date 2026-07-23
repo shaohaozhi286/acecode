@@ -1,5 +1,5 @@
 export const GUI_LOCALE_STORAGE_KEY = 'acecode.guiLocale.v1';
-export const GUI_LOCALE_RELOAD_STORAGE_KEY = 'acecode.guiLocale.reload.v1';
+export const GUI_LOCALE_RUNTIME_STORAGE_KEY = 'acecode.guiLocale.runtime.v1';
 
 export const GUI_LOCALE_PREFERENCES = Object.freeze([
   'auto',
@@ -24,7 +24,7 @@ export function resolveLocalePreference(preference, systemLocale = '') {
   return normalized === 'auto' ? systemLocaleToSupported(systemLocale) : normalized;
 }
 
-export function cacheLocaleReloadOverride(preference, locale, scope = globalThis) {
+export function cacheLocaleRuntimeOverride(preference, locale, scope = globalThis) {
   const normalizedPreference = normalizeLocalePreference(preference);
   const normalizedLocale = GUI_LOCALES.includes(locale)
     ? locale
@@ -32,7 +32,7 @@ export function cacheLocaleReloadOverride(preference, locale, scope = globalThis
   const state = { preference: normalizedPreference, locale: normalizedLocale };
   try {
     scope?.sessionStorage?.setItem(
-      GUI_LOCALE_RELOAD_STORAGE_KEY,
+      GUI_LOCALE_RUNTIME_STORAGE_KEY,
       JSON.stringify(state),
     );
   } catch {
@@ -41,11 +41,10 @@ export function cacheLocaleReloadOverride(preference, locale, scope = globalThis
   return state;
 }
 
-export function consumeLocaleReloadOverride(scope = globalThis) {
+export function readLocaleRuntimeOverride(scope = globalThis) {
   let raw = '';
   try {
-    raw = scope?.sessionStorage?.getItem(GUI_LOCALE_RELOAD_STORAGE_KEY) || '';
-    scope?.sessionStorage?.removeItem(GUI_LOCALE_RELOAD_STORAGE_KEY);
+    raw = scope?.sessionStorage?.getItem(GUI_LOCALE_RUNTIME_STORAGE_KEY) || '';
   } catch {
     return null;
   }
@@ -61,11 +60,11 @@ export function consumeLocaleReloadOverride(scope = globalThis) {
 }
 
 export function initialLocaleState(scope = globalThis) {
-  // The native Desktop init script is registered when the WebView is created.
-  // A same-run page reload therefore still injects the locale that was active
-  // at process start. Prefer this one-shot handoff after a successful Settings
-  // change so module-scope translated metadata is evaluated in the new locale.
-  const reloadOverride = consumeLocaleReloadOverride(scope);
+  // The native Desktop init script is registered when the WebView is created,
+  // so later same-process navigations can still inject its startup locale.
+  // A session-scoped runtime value keeps those navigations aligned with the
+  // most recently confirmed Settings change without affecting a cold launch.
+  const runtimeOverride = readLocaleRuntimeOverride(scope);
   const injectedPreference = normalizeLocalePreference(
     scope?.__ACECODE_LOCALE_PREFERENCE__,
     '',
@@ -79,7 +78,7 @@ export function initialLocaleState(scope = globalThis) {
   })();
   // A missing ui.locale belongs to pre-localization configurations. Preserve
   // their historical Chinese UI until the daemon explicitly returns a value.
-  const preference = reloadOverride?.preference
+  const preference = runtimeOverride?.preference
     || injectedPreference
     || storedPreference
     || 'zh-CN';
@@ -91,7 +90,7 @@ export function initialLocaleState(scope = globalThis) {
     || '';
   return {
     preference,
-    locale: reloadOverride?.locale
+    locale: runtimeOverride?.locale
       || injectedLocale
       || resolveLocalePreference(preference, browserLocale),
   };

@@ -38,7 +38,7 @@ The WebUI SHALL switch locale without restarting the application, persist the ch
 
 #### Scenario: Successful runtime switch
 - **WHEN** a Desktop user changes the language in Settings and persistence succeeds
-- **THEN** visible WebUI product text and subsequent native tray/dialog text use the new locale during the same application run
+- **THEN** visible WebUI product text and subsequent native tray/dialog text use the new locale during the same application run without reloading the Web document or discarding current input, scroll, panel, and dialog state
 
 #### Scenario: Persistence fails
 - **WHEN** saving a requested locale fails

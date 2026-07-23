@@ -3,10 +3,18 @@ import { completionSummaryMarkdown } from './taskCompleteSummary.js';
 
 export const MIN_CONVERSATION_TURN_SCRUBBER_TURNS = 5;
 export const MAX_CONVERSATION_TURN_SCRUBBER_MARKERS = 20;
-export const RUNNING_ANSWER_PREVIEW = '正在回答...';
 
-const EMPTY_ANSWER_PREVIEW = '暂无回答';
-const ATTACHMENT_QUESTION_PREVIEW = '附件消息';
+export function runningAnswerPreview() {
+  return '正在回答...';
+}
+
+function emptyAnswerPreview() {
+  return '暂无回答';
+}
+
+function attachmentQuestionPreview() {
+  return '附件消息';
+}
 
 function compactPreview(value, limit, fallback) {
   const text = String(value ?? '').trim();
@@ -23,7 +31,7 @@ function questionText(item) {
     return item.content;
   }
   if (Array.isArray(item?.contentParts) && item.contentParts.length > 0) {
-    return ATTACHMENT_QUESTION_PREVIEW;
+    return attachmentQuestionPreview();
   }
   return '';
 }
@@ -54,7 +62,7 @@ export function buildConversationTurnPreviews(
         question: compactPreview(
           questionText(item),
           questionLimit,
-          ATTACHMENT_QUESTION_PREVIEW,
+          attachmentQuestionPreview(),
         ),
         assistantAnswer: '',
         completionAnswer: '',
@@ -89,7 +97,7 @@ export function buildConversationTurnPreviews(
       question: turn.question,
       answer: turn.completionAnswer
         || turn.assistantAnswer
-        || (isRunningTurn ? RUNNING_ANSWER_PREVIEW : EMPTY_ANSWER_PREVIEW),
+        || (isRunningTurn ? runningAnswerPreview() : emptyAnswerPreview()),
       running: isRunningTurn && !turn.completionAnswer && !turn.assistantAnswer,
     };
   });
