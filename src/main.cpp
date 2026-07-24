@@ -1936,6 +1936,7 @@ static bool handle_confirm_overlay_event(
 static void clear_rewind_picker_locked(TuiState& state) {
     state.rewind_picker_active = false;
     state.rewind_mode_active = false;
+    state.rewind_picker_operation = TuiState::RewindPickerOperation::Rewind;
     state.rewind_items.clear();
     state.rewind_selected = 0;
     state.rewind_view_offset = 0;
@@ -2002,7 +2003,7 @@ static void commit_rewind_mode_locked(
     screen.PostEvent(Event::Custom);
 }
 
-// rewind picker 是两级菜单：先选目标，再选恢复模式。
+// /rewind 是两级菜单；/fork 复用目标页并直接提交 conversation-only。
 static bool handle_rewind_picker_event(
     TuiState& state,
     ScreenInteractive& screen,
@@ -2019,7 +2020,8 @@ static bool handle_rewind_picker_event(
             return;
         }
         const auto& item = state.rewind_items[state.rewind_selected];
-        if (item.can_restore_code) {
+        if (TuiState::rewind_target_uses_mode_picker(
+                state.rewind_picker_operation, item.can_restore_code)) {
             populate_rewind_modes_locked(state, item);
             state.rewind_mode_active = true;
         } else {
@@ -2035,8 +2037,14 @@ static bool handle_rewind_picker_event(
             state.rewind_modes.clear();
             state.rewind_mode_selected = 0;
         } else {
+            const bool is_fork =
+                state.rewind_picker_operation ==
+                TuiState::RewindPickerOperation::Fork;
             clear_rewind_picker_locked(state);
-            state.conversation.push_back({"system", "Rewind cancelled.", false});
+            state.conversation.push_back({
+                "system",
+                is_fork ? "Fork cancelled." : "Rewind cancelled.",
+                false});
             state.chat_follow_tail = true;
             clamp_chat_focus();
         }
@@ -4077,8 +4085,14 @@ static Element render_tui_frame(TuiRendererContext& ctx) {
                 picker_rows.push_back(row);
             }
         } else {
+            const bool is_fork =
+                state.rewind_picker_operation ==
+                TuiState::RewindPickerOperation::Fork;
             picker_rows.push_back(
-                text(" Rewind to a user turn (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel, 1-9 jump):")
+                text(std::string(is_fork
+                    ? " Fork from a user turn"
+                    : " Rewind to a user turn") +
+                    " (Up/Down/PgUp/PgDn/Home/End to navigate, Enter to confirm, Esc to cancel, 1-9 jump):")
                 | bold | color(tui::theme().ui.border));
             picker_rows.push_back(text(""));
 

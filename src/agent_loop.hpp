@@ -40,6 +40,7 @@ class MemoryRegistry;
 class HookManager;
 struct MemoryConfig;
 struct ProjectInstructionsConfig;
+struct ExpertDefinition;
 struct CompactResult;
 class AgentLoopDoomGuard;
 
@@ -293,6 +294,11 @@ public:
     void set_custom_instructions_config(const CustomInstructionsConfig* cfg) {
         custom_instructions_cfg_ = cfg;
     }
+    void set_expert_context(const ExpertDefinition* expert,
+                            std::string member_id = {}) {
+        expert_ = expert;
+        expert_member_id_ = std::move(member_id);
+    }
     void set_git_context_config(const GitContextConfig* cfg) {
         git_context_cfg_ = cfg;
     }
@@ -525,6 +531,8 @@ private:
     const MemoryConfig* memory_cfg_ = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;
     const CustomInstructionsConfig* custom_instructions_cfg_ = nullptr;
+    const ExpertDefinition* expert_ = nullptr;
+    std::string expert_member_id_;
     const GitContextConfig* git_context_cfg_ = nullptr;
     // gitStatus 快照缓存(openspec add-git-context):nullopt = 尚未采集,
     // 空串 = 已采集但非仓库/失败/disabled(不注入)。只在 worker 线程读写

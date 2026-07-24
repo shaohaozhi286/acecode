@@ -495,14 +495,21 @@ void WebServer::Impl::register_workspaces() {
             opts.no_workspace = false;
             opts.workspace_hash = ws->hash;
             std::string id;
-            {
+            try {
                 std::lock_guard<std::mutex> config_lock(app_config_mu);
                 refresh_default_session_preferences_for_new_session_locked();
                 id = deps.session_client->create_session(opts);
+            } catch (const std::invalid_argument& ex) {
+                crow::response r(400);
+                r.body = json{{"error", "INVALID_EXPERT"},
+                              {"message", ex.what()}}.dump();
+                r.add_header("Content-Type", "application/json");
+                return with_cors(req, std::move(r));
             }
             LOG_INFO("[web] workspace session created hash=" + ws->hash + " id=" + id);
             crow::response r(201);
-            r.body = json{{"session_id", id}, {"id", id}, {"workspace_hash", ws->hash}, {"cwd", ws->cwd}}.dump();
+            r.body = json{{"session_id", id}, {"id", id}, {"workspace_hash", ws->hash},
+                          {"cwd", ws->cwd}, {"expert_id", opts.expert_id}}.dump();
             r.add_header("Content-Type", "application/json");
             return with_cors(req, std::move(r));
         });

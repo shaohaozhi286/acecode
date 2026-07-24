@@ -74,6 +74,8 @@ TEST(SessionStorage, MetaRoundtrip) {
     in.archived      = true;
     in.no_workspace  = true;
     in.parent_session_id = "20260419-110000-ffff";
+    in.expert_id = "delivery-team";
+    in.expert_member_id = "tester";
     in.loop_id = "loop-1";
     in.loop_run_id = "run-1";
 
@@ -111,6 +113,8 @@ TEST(SessionStorage, MetaRoundtrip) {
     EXPECT_EQ(out.archived,      in.archived);
     EXPECT_EQ(out.no_workspace,  in.no_workspace);
     EXPECT_EQ(out.parent_session_id, in.parent_session_id);
+    EXPECT_EQ(out.expert_id, in.expert_id);
+    EXPECT_EQ(out.expert_member_id, in.expert_member_id);
     EXPECT_EQ(out.loop_id, in.loop_id);
     EXPECT_EQ(out.loop_run_id, in.loop_run_id);
 }

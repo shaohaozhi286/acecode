@@ -650,6 +650,34 @@ json WebServer::Impl::session_info_to_json(const SessionInfo& s, const SessionMe
     o["parent_session_id"] = !s.parent_session_id.empty()
         ? s.parent_session_id
         : (m ? m->parent_session_id : std::string{});
+    const std::string expert_id = !s.expert_id.empty()
+        ? s.expert_id : (m ? m->expert_id : std::string{});
+    const std::string expert_member_id = !s.expert_member_id.empty()
+        ? s.expert_member_id : (m ? m->expert_member_id : std::string{});
+    o["expert_id"] = expert_id;
+    o["expert_member_id"] = expert_member_id;
+    if (!expert_id.empty()) {
+        json expert_json = {
+            {"id", expert_id},
+            {"member_id", expert_member_id},
+            {"missing", s.expert_missing},
+        };
+        if (!s.expert_display_name.empty()) {
+            expert_json["display_name"] = s.expert_display_name;
+            expert_json["type"] = s.expert_type;
+            expert_json["source"] = s.expert_source;
+        } else if (deps.expert_registry && m) {
+            if (auto resolved = deps.expert_registry->find(m->cwd, expert_id)) {
+                expert_json["display_name"] = resolved->display_name;
+                expert_json["type"] = to_string(resolved->type);
+                expert_json["source"] = resolved->source;
+                expert_json["missing"] = false;
+            } else {
+                expert_json["missing"] = true;
+            }
+        }
+        o["expert"] = std::move(expert_json);
+    }
     append_attention_fields(o, s.id, workspace_hash, cwd, s.busy);
     return o;
 }
@@ -690,6 +718,24 @@ json WebServer::Impl::session_meta_to_json(const SessionMeta& m, const std::stri
     }
     o["archived"]       = m.archived;
     o["parent_session_id"] = m.parent_session_id;
+    o["expert_id"] = m.expert_id;
+    o["expert_member_id"] = m.expert_member_id;
+    if (!m.expert_id.empty()) {
+        json expert_json = {
+            {"id", m.expert_id},
+            {"member_id", m.expert_member_id},
+            {"missing", true},
+        };
+        if (deps.expert_registry) {
+            if (auto resolved = deps.expert_registry->find(m.cwd, m.expert_id)) {
+                expert_json["display_name"] = resolved->display_name;
+                expert_json["type"] = to_string(resolved->type);
+                expert_json["source"] = resolved->source;
+                expert_json["missing"] = false;
+            }
+        }
+        o["expert"] = std::move(expert_json);
+    }
     append_attention_fields(o, m.id, effective_workspace_hash, effective_cwd, false);
     return o;
 }
@@ -1761,6 +1807,11 @@ std::optional<crow::response> WebServer::Impl::parse_session_options(
         }
         if (j.contains("initial_user_message") && j["initial_user_message"].is_string())
             opts.initial_user_message = j["initial_user_message"].get<std::string>();
+        if (j.contains("expert_id") && j["expert_id"].is_string()) {
+            opts.expert_id = j["expert_id"].get<std::string>();
+        } else if (j.contains("expertId") && j["expertId"].is_string()) {
+            opts.expert_id = j["expertId"].get<std::string>();
+        }
         if (j.contains("auto_start") && j["auto_start"].is_boolean())
             opts.auto_start = j["auto_start"].get<bool>();
         const bool no_workspace =

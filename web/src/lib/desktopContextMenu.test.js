@@ -10,6 +10,7 @@ import {
   SESSION_PIN_TARGET_SELECTOR,
   WORKSPACE_TARGET_SELECTOR,
   FILE_TARGET_SELECTOR,
+  MERMAID_TARGET_SELECTOR,
   PREVIEW_TARGET_SELECTOR,
   REVIEW_TARGET_SELECTOR,
   MESSAGE_TARGET_SELECTOR,
@@ -17,10 +18,13 @@ import {
   ATTACHMENT_TARGET_SELECTOR,
   containingWorkspacePath,
   joinWorkspacePath,
+  mermaidTargetFromElement,
   openInExplorerTargetFromElement,
   sessionPinTargetFromElement,
   workspaceTargetFromElement,
+  shouldUseCustomContextMenu,
 } from './desktopContextMenu.js';
+import { registerMermaidExportTarget } from './mermaidExport.js';
 
 function test(name, fn) {
   try {
@@ -234,6 +238,7 @@ test('file and directory targets build expected actions', () => {
     },
   })), [
     DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE,
+    DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER,
     DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH,
     DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH,
     DESKTOP_CONTEXT_ACTIONS.LOCATE_FILE,
@@ -274,6 +279,38 @@ test('review, message, tool, and attachment targets build object actions first',
   assert.equal(ids(buildDesktopContextMenuItems({
     reviewTarget: { kind: 'summary', canRefresh: false },
   })).includes(DESKTOP_CONTEXT_ACTIONS.REFRESH_DETAILS), false);
+  const reviewItems = buildDesktopContextMenuItems({
+    reviewTarget: {
+      kind: 'file',
+      file: 'src/a.cpp',
+      absolutePath: 'C:/repo/src/a.cpp',
+      canReveal: true,
+    },
+  });
+  assert.deepEqual(ids(reviewItems), [
+    DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF,
+    DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH,
+    DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE,
+    DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER,
+    DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE,
+    DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
+  ]);
+  assert.deepEqual(
+    reviewItems.find((item) => item.id === DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER).target,
+    { path: 'C:/repo/src/a.cpp', kind: 'file' },
+  );
+  const deletedReviewItems = buildDesktopContextMenuItems({
+    reviewTarget: {
+      kind: 'file',
+      file: 'src/deleted.cpp',
+      absolutePath: 'C:/repo/src/deleted.cpp',
+      canReveal: false,
+    },
+  });
+  assert.equal(
+    deletedReviewItems.find((item) => item.id === DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER).enabled,
+    false,
+  );
   assert.deepEqual(ids(buildDesktopContextMenuItems({
     messageTarget: { role: 'assistant', messageId: 'm1', text: 'hello', canFork: true },
   })), [
@@ -298,6 +335,36 @@ test('review, message, tool, and attachment targets build object actions first',
     DESKTOP_CONTEXT_ACTIONS.REMOVE_ATTACHMENT,
     DESKTOP_CONTEXT_ACTIONS.SELECT_ALL,
   ]);
+});
+
+test('Mermaid 正文和预览目标共享三个导出动作', () => {
+  const attrs = new Map();
+  const element = {
+    closest(requested) { return requested === MERMAID_TARGET_SELECTOR ? this : null; },
+    setAttribute(name, value) { attrs.set(name, String(value)); },
+    removeAttribute(name) { attrs.delete(name); },
+  };
+  const detail = {
+    source: 'sequenceDiagram\nAlice->>Bob: hello',
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"></svg>',
+    width: 200,
+    height: 100,
+    theme: 'light',
+  };
+  const registered = registerMermaidExportTarget(element, detail);
+  assert.equal(mermaidTargetFromElement(element), registered);
+  assert.equal(contextTargetsFromElement(element).mermaidTarget, registered);
+  assert.deepEqual(ids(buildDesktopContextMenuItems({ mermaidTarget: registered })), [
+    DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_PNG,
+    DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SVG,
+    DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SOURCE,
+  ]);
+});
+
+test('普通浏览器只为 Mermaid 目标启用自定义右键菜单', () => {
+  assert.equal(shouldUseCustomContextMenu({ desktop: false, mermaidTarget: null }), false);
+  assert.equal(shouldUseCustomContextMenu({ desktop: false, mermaidTarget: { type: 'mermaid' } }), true);
+  assert.equal(shouldUseCustomContextMenu({ desktop: true, mermaidTarget: null }), true);
 });
 
 test('聊天图片附件显示复制图片动作', () => {
@@ -390,8 +457,12 @@ test('contextTargetsFromElement 提取各类目标', () => {
   const review = elementFor(REVIEW_TARGET_SELECTOR, {
     'data-desktop-review-kind': 'file',
     'data-desktop-review-file': 'src/a.cpp',
+    'data-desktop-review-absolute-path': 'C:/repo/src/a.cpp',
+    'data-desktop-review-can-reveal': 'false',
   });
   assert.equal(contextTargetsFromElement(review).reviewTarget.file, 'src/a.cpp');
+  assert.equal(contextTargetsFromElement(review).reviewTarget.absolutePath, 'C:/repo/src/a.cpp');
+  assert.equal(contextTargetsFromElement(review).reviewTarget.canReveal, false);
   assert.equal(contextTargetsFromElement(review).reviewTarget.canRefresh, false);
 
   const refreshableReview = elementFor(REVIEW_TARGET_SELECTOR, {

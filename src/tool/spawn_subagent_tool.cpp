@@ -133,11 +133,13 @@ WaitOutcome wait_for_subagent(SessionRegistry& registry,
 void expand_skill_prompt(const SubagentToolDeps& deps,
                          const std::string& cwd,
                          std::string& prompt,
-                         std::string& display_text) {
+                         std::string& display_text,
+                         const SkillRegistry* session_skills = nullptr) {
     if (prompt.empty() || prompt[0] != '/' || !deps.config) return;
     SkillRegistry tmp;
-    initialize_skill_registry(tmp, *deps.config, cwd);
-    auto expansion = web::try_expand_skill_command(prompt, tmp);
+    if (!session_skills) initialize_skill_registry(tmp, *deps.config, cwd);
+    const SkillRegistry& skills = session_skills ? *session_skills : tmp;
+    auto expansion = web::try_expand_skill_command(prompt, skills);
     if (expansion.expanded) {
         display_text = prompt;
         prompt = std::move(expansion.text);
@@ -236,6 +238,10 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
                 {"type", "string"},
                 {"description", "Optional saved model name for the sub-agent "
                                 "session (defaults to the daemon default)."}}},
+            {"expert_member", json{
+                {"type", "string"},
+                {"description", "Optional selected expert ID from the current "
+                                "team expert. Only a team lead may use it."}}},
             {"timeout_seconds", json{
                 {"type", "integer"},
                 {"description", "Optional wait timeout. 0 or omitted = wait "
@@ -270,6 +276,9 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         const std::string model_name =
             args.contains("model") && args["model"].is_string()
                 ? args["model"].get<std::string>() : std::string{};
+        const std::string expert_member =
+            args.contains("expert_member") && args["expert_member"].is_string()
+                ? args["expert_member"].get<std::string>() : std::string{};
         const int timeout_seconds = parse_timeout_seconds(args);
 
         // 深度限制:子代理不能再派生。父会话 id 从注入的 SessionManager 拿。
@@ -277,8 +286,10 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         if (ctx.session_manager) parent_id = ctx.session_manager->current_session_id();
         std::string parent_permission_mode;
         bool parent_in_registry = false;
+        std::shared_ptr<SessionEntry> parent_entry;
         if (!parent_id.empty()) {
             if (auto parent = deps->registry->acquire(parent_id)) {
+                parent_entry = parent;
                 parent_in_registry = true;
                 if (parent->subagent_depth >= 1) {
                     return error_result(
@@ -288,6 +299,18 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
                     parent_permission_mode =
                         PermissionManager::mode_name(parent->perm->mode());
                 }
+            }
+        }
+        if (!expert_member.empty()) {
+            if (!parent_entry || !parent_entry->expert ||
+                parent_entry->expert->type != ExpertType::Team ||
+                !parent_entry->expert_member_id.empty()) {
+                return error_result(
+                    "expert_member is only available to a team expert lead");
+            }
+            if (!parent_entry->expert->is_declared_member(expert_member)) {
+                return error_result("expert is not selected for this team: " +
+                                    expert_member);
             }
         }
         if (!parent_in_registry && deps->fallback_permissions) {
@@ -305,6 +328,10 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
         // 父会话 id 持久化到子会话 meta:子会话从常规列表隐藏,归入父会话
         // 的「后台任务」面板;daemon 重启后依然识别为后台任务。
         opts.parent_session_id = parent_id;
+        if (!expert_member.empty()) {
+            opts.expert_id = parent_entry->expert_id;
+            opts.expert_member_id = expert_member;
+        }
 
         std::string child_id;
         try {
@@ -324,7 +351,11 @@ ToolImpl create_spawn_subagent_tool(std::shared_ptr<SubagentToolDeps> deps) {
 
         std::string send_text = prompt;
         std::string display_text;
-        expand_skill_prompt(*deps, ctx.cwd, send_text, display_text);
+        const SkillRegistry* child_skills = nullptr;
+        if (auto child = deps->registry->acquire(child_id)) {
+            child_skills = child->skill_registry.get();
+        }
+        expand_skill_prompt(*deps, ctx.cwd, send_text, display_text, child_skills);
         if (deps->on_spawn) {
             deps->on_spawn(child_id, prompt);
         }

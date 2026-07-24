@@ -72,10 +72,10 @@ run('flattenCommands 注入 kind 字段并保留 builtin/skill 顺序', () => {
 
 run('fallbackCommands 返回基础 builtin 命令', () => {
   const r = fallbackCommands();
-  assert.equal(r.length, 10);
+  assert.equal(r.length, 11);
   assert.ok(r.every((x) => x.kind === 'builtin'));
   assert.deepEqual(r.map((x) => x.name), [
-    'init', 'compact', 'goal', 'plan', 'turn', 'btw', 'side', 'lsp', 'rc', 'remote-control',
+    'init', 'compact', 'feedback', 'goal', 'plan', 'turn', 'btw', 'side', 'lsp', 'rc', 'remote-control',
   ]);
 });
 
@@ -122,7 +122,7 @@ run('commandsWithFallback:空响应回退到基础命令', () => {
   const r1 = commandsWithFallback(null);
   const r2 = commandsWithFallback({ builtins: [], skills: [] });
   const expected = [
-    'init', 'compact', 'goal', 'plan', 'turn', 'btw', 'side', 'lsp', 'rc', 'remote-control',
+    'init', 'compact', 'feedback', 'goal', 'plan', 'turn', 'btw', 'side', 'lsp', 'rc', 'remote-control',
   ];
   assert.deepEqual(r1.map((x) => x.name), expected);
   assert.deepEqual(r2.map((x) => x.name), expected);
@@ -141,6 +141,7 @@ run('commandsWithFallback:后端返回 skills 时保留 skill + builtin 组合',
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:feedback',
     'builtin:goal',
     'builtin:plan',
     'builtin:turn',
@@ -161,6 +162,7 @@ run('commandsWithFallback:保留 command kind 并放在基础 builtin 后', () =
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:feedback',
     'builtin:goal',
     'builtin:plan',
     'builtin:turn',
@@ -181,6 +183,7 @@ run('commandsWithFallback:skills-only 响应也补上基础命令', () => {
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:feedback',
     'builtin:goal',
     'builtin:plan',
     'builtin:turn',
@@ -201,6 +204,7 @@ run('commandsWithFallback:partial builtin 响应补齐缺失基础命令', () =>
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:feedback',
     'builtin:goal',
     'builtin:plan',
     'builtin:turn',
@@ -224,6 +228,7 @@ run('commandsWithFallback:额外 builtin 保留在基础命令之后', () => {
   assert.deepEqual(r.map((x) => `${x.kind}:${x.name}`), [
     'builtin:init',
     'builtin:compact',
+    'builtin:feedback',
     'builtin:goal',
     'builtin:plan',
     'builtin:turn',
@@ -480,6 +485,7 @@ run('parseExecutableBuiltinCommand:识别 init、compact、goal 和 plan', () =>
     display_text: '/plan inspect first',
   });
   assert.equal(parseExecutableBuiltinCommand('/code-review check this'), null);
+  assert.equal(parseExecutableBuiltinCommand('/feedback details'), null);
   assert.equal(parseExecutableBuiltinCommand('/unknown'), null);
   assert.equal(parseExecutableBuiltinCommand('plain text'), null);
 });

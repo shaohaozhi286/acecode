@@ -152,6 +152,24 @@ run('conversation turn rail loads lazily with an empty failure-safe fallback', (
   assert.match(chatView, /return this\.state\.failed \? null : this\.props\.children/);
 });
 
+run('composer popup host stacks above the rail in legacy WebView2', () => {
+  const inputBar = source('components/InputBar.jsx');
+  const slashDropdown = source('components/SlashDropdown.jsx');
+  const styles = source('styles/globals.css');
+  const inputLayer = styles.match(/\.ace-inputbar-layer\s*\{[\s\S]*?z-index:\s*(\d+);[\s\S]*?\}/);
+  const scrubberLayer = styles.match(/\.ace-conversation-turn-scrubber\s*\{[\s\S]*?z-index:\s*(\d+);[\s\S]*?\}/);
+
+  assert.match(inputBar, /<div className=\{clsx\(\s*'ace-inputbar-layer',/);
+  assert.match(slashDropdown, /className="absolute left-0 right-0 flex flex-col/);
+  assert.match(styles, /\.ace-inputbar-layer\s*\{[\s\S]*?position:\s*relative;/);
+  assert.ok(inputLayer, 'input-bar stacking rule is missing');
+  assert.ok(scrubberLayer, 'conversation-turn scrubber stacking rule is missing');
+  assert.ok(
+    Number(inputLayer[1]) > Number(scrubberLayer[1]),
+    'the input-bar popup host must stack above the conversation-turn scrubber',
+  );
+});
+
 run('turn preparation waits until transcript paint and idle time and remains cancellable', () => {
   const chatView = source('components/ChatView.jsx');
   assert.match(chatView, /transcriptLoadState !== 'loaded'/);

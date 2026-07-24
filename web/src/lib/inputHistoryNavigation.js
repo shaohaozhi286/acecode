@@ -2,8 +2,8 @@ export function isInputHistoryNavigationMode({ value = '', editedSinceHistory = 
   return String(value ?? '').length === 0 || !editedSinceHistory;
 }
 
-// Lexical 在程序化设值(历史导航填充 / ValueSyncPlugin 外部同步)和 selection-only
-// 变化时也会触发 onChange 回声,此时文本与当前 value 相同。这类回声不是用户编辑,
+// 富文本编辑器在程序化设值(历史导航填充 / 外部 value 同步)和 selection-only
+// 变化时也可能触发 onChange 回声,此时文本与当前 value 相同。这类回声不是用户编辑,
 // 不能把 editedSinceHistory 置 true,否则历史浏览态一填充就被打断。
 export function isUserComposerEdit({ nextValue = '', currentValue = '' } = {}) {
   return String(nextValue ?? '') !== String(currentValue ?? '');

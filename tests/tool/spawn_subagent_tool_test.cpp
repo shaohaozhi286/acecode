@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "config/config.hpp"
+#include "experts/expert_registry.hpp"
 #include "permissions.hpp"
 #include "session/local_session_client.hpp"
 #include "session/session_registry.hpp"
@@ -125,16 +126,17 @@ struct SubagentFixture {
     acecode::PermissionManager permissions;
     acecode::AppConfig config;
     std::shared_ptr<acecode::LlmProvider> provider;
+    fs::path cwd;
+    acecode::ExpertRegistry experts;
     acecode::SessionRegistry registry;
     acecode::LocalSessionClient client;
     std::shared_ptr<acecode::SubagentToolDeps> deps;
-    fs::path cwd;
 
     SubagentFixture()
-        : registry(make_deps(*this)), client(registry) {
-        std::random_device rd;
-        cwd = fs::temp_directory_path() /
-              ("acecode_subagent_test_" + std::to_string(rd()));
+        : cwd(fs::temp_directory_path() /
+              ("acecode_subagent_test_" + std::to_string(std::random_device{}()))),
+          experts(cwd / "global-experts"),
+          registry(make_deps(*this)), client(registry) {
         fs::create_directories(cwd);
         deps = std::make_shared<acecode::SubagentToolDeps>();
         deps->registry = &registry;
@@ -154,6 +156,7 @@ struct SubagentFixture {
         d.provider_accessor = [&self] { return self.provider; };
         d.tools = &self.tools;
         d.cwd = "/tmp/subagent_test_registry";
+        d.expert_registry = &self.experts;
         d.template_permissions = &self.permissions;
         return d;
     }
@@ -299,6 +302,83 @@ TEST(SpawnSubagentTool, SubagentCannotSpawnFurther) {
     EXPECT_NE(nested.output.find("cannot spawn"), std::string::npos);
     EXPECT_EQ(fx.registry.size(), before) << "被拒绝时不应创建新会话";
     fx.registry.destroy(child_id);
+}
+
+TEST(SpawnSubagentTool, TeamLeadCanSpawnOnlyDeclaredExpertMember) {
+    SubagentFixture fx;
+    acecode::ExpertDraft coordinator;
+    coordinator.id = "coordinator";
+    coordinator.display_name = "Coordinator";
+    coordinator.profession = "Delivery";
+    coordinator.lead = {
+        "lead", "Coordinator", "Delivery", "Coordinate the work."};
+    std::string error;
+    ASSERT_TRUE(fx.experts.create_global(coordinator, &error)) << error;
+
+    acecode::ExpertDraft tester;
+    tester.id = "tester";
+    tester.display_name = "Tester";
+    tester.profession = "QA";
+    tester.lead = {"lead", "Tester", "QA", "Test the work."};
+    ASSERT_TRUE(fx.experts.create_global(tester, &error)) << error;
+
+    acecode::ExpertDraft team;
+    team.id = "delivery-team";
+    team.type = acecode::ExpertType::Team;
+    team.display_name = "Delivery Team";
+    team.profession = "Delivery";
+    team.lead_expert_id = "coordinator";
+    team.member_expert_ids = {"tester"};
+    ASSERT_TRUE(fx.experts.create_global(team, &error)) << error;
+
+    acecode::SessionOptions parent_options;
+    parent_options.cwd = fx.cwd.string();
+    parent_options.expert_id = team.id;
+    const std::string parent_id = fx.registry.create(parent_options);
+
+    const std::size_t before = fx.registry.size();
+    auto rejected = fx.tools.execute(
+        "spawn_subagent",
+        R"({"prompt":"attack","wait":false,"expert_member":"intruder"})",
+        fx.ctx_for(parent_id));
+    EXPECT_FALSE(rejected.success);
+    EXPECT_NE(rejected.output.find("not selected"), std::string::npos);
+    EXPECT_EQ(fx.registry.size(), before);
+
+    RecordingSessionClient recording_client;
+    fx.deps->client = &recording_client;
+    auto accepted = fx.tools.execute(
+        "spawn_subagent",
+        R"({"prompt":"test it","wait":false,"expert_member":"tester"})",
+        fx.ctx_for(parent_id));
+    ASSERT_TRUE(accepted.success) << accepted.output;
+    const std::string child_id =
+        accepted.metadata["subagent_session_id"].get<std::string>();
+    auto child = fx.registry.acquire(child_id);
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->expert_id, team.id);
+    EXPECT_EQ(child->expert_member_id, "tester");
+    ASSERT_TRUE(child->expert.has_value());
+    ASSERT_NE(child->expert->selected_agent("tester"), nullptr);
+    EXPECT_EQ(child->expert->selected_agent("tester")->instructions, "Test the work.");
+
+    fx.registry.destroy(child_id);
+    fx.registry.destroy(parent_id);
+}
+
+TEST(SpawnSubagentTool, OrdinarySessionCannotRequestExpertMember) {
+    SubagentFixture fx;
+    acecode::SessionOptions parent_options;
+    parent_options.cwd = fx.cwd.string();
+    const std::string parent_id = fx.registry.create(parent_options);
+    const auto result = fx.tools.execute(
+        "spawn_subagent",
+        R"({"prompt":"test it","wait":false,"expert_member":"tester"})",
+        fx.ctx_for(parent_id));
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.output.find("team expert lead"), std::string::npos);
+    EXPECT_EQ(fx.registry.size(), 1u);
+    fx.registry.destroy(parent_id);
 }
 
 // 场景: wait=true(默认)阻塞至子会话本轮结束,并把最终 assistant 答复带回

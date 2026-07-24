@@ -817,7 +817,7 @@ std::vector<ChatMessage> AgentLoop::build_compaction_initial_context() const {
     std::string mutable_context = build_session_context_prompt(
         cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
         skill_registry_, context_window_.load(std::memory_order_relaxed),
-        custom_instructions_cfg_, git_snapshot).content;
+        custom_instructions_cfg_, git_snapshot, expert_, expert_member_id_).content;
     const std::string request_context = build_request_context_prompt(cwd_);
     if (!request_context.empty()) {
         if (!mutable_context.empty()) mutable_context += "\n\n";
@@ -1660,7 +1660,7 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
             cwd_, memory_registry_, memory_cfg_, project_instructions_cfg_,
             skill_registry_, context_window_.load(std::memory_order_relaxed),
             custom_instructions_cfg_,
-            *git_snapshot_cache_),
+            *git_snapshot_cache_, expert_, expert_member_id_),
         session_context_cache_key_, session_context_cache_content_);
     std::vector<ChatMessage> mutable_context_messages;
     append_request_context_for_api(mutable_context_messages, session_context);
@@ -2046,6 +2046,7 @@ ToolContext AgentLoop::build_tool_context(
     tool_ctx.cwd = cwd_;
     tool_ctx.abort_flag = &abort_requested_;
     tool_ctx.session_manager = session_manager_;
+    tool_ctx.skill_registry = skill_registry_;
     tool_ctx.scratch_dir = build_session_scratch_dir(cwd_, session_manager_);
     tool_ctx.preserve_full_output = true;
     tool_ctx.account_goal_usage = [this]() {

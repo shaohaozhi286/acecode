@@ -25,6 +25,13 @@ import {
   getDesktopBackgroundProcess,
   setDesktopBackgroundProcess,
 } from '../lib/desktopBackgroundProcess.js';
+import {
+  DESKTOP_CLOSE_BEHAVIORS,
+  DESKTOP_CLOSE_BEHAVIOR_OPTIONS,
+  desktopCloseBehaviorAvailable,
+  getDesktopCloseBehavior,
+  setDesktopCloseBehavior,
+} from '../lib/desktopCloseBehavior.js';
 import { Modal, Toggle } from './Modal.jsx';
 import { clsx, formatCount, relativeTime } from '../lib/format.js';
 import { lookupErrorMessage } from '../lib/errors.js';
@@ -111,6 +118,10 @@ const FONT_SIZE_OPTIONS = [
   { key: 'medium', label: '中' },
   { key: 'large', label: '大' },
 ];
+const COLOR_THEME_OPTIONS = [
+  { key: 'blue', label: '蓝色' },
+  { key: 'orange', label: '橙色' },
+];
 const NOTIFICATION_AUTHORIZATION_TONE = {
   ok: {
     text: 'text-ok',
@@ -142,7 +153,12 @@ export function SettingsPage({
   fontSize = 'medium',
   onFontSizeChange = () => {},
 }) {
-  const { theme, set: setTheme } = useTheme();
+  const {
+    theme,
+    colorTheme,
+    set: setTheme,
+    setColorTheme,
+  } = useTheme();
   const [activeNav, setActiveNav] = useState(
     () => settingsNavIndexForKey(initialNavKey),
   );
@@ -249,6 +265,8 @@ export function SettingsPage({
             <SectionAppearance
               theme={theme}
               setTheme={setTheme}
+              colorTheme={colorTheme}
+              setColorTheme={setColorTheme}
               fontSize={fontSize}
               onFontSizeChange={onFontSizeChange}
             />
@@ -306,6 +324,10 @@ function SectionGeneral({
   const [backgroundProcessBusy, setBackgroundProcessBusy] = useState(
     backgroundProcessAvailable,
   );
+  const closeBehaviorAvailable = desktopCloseBehaviorAvailable();
+  const [closeBehavior, setCloseBehavior] = useState(DESKTOP_CLOSE_BEHAVIORS.ASK);
+  const [closeBehaviorBusy, setCloseBehaviorBusy] = useState(closeBehaviorAvailable);
+  const [closeBehaviorTrayAvailable, setCloseBehaviorTrayAvailable] = useState(true);
   const [maxTurns, setMaxTurns] = useState(50);
   const [workMode, setWorkMode] = useState('coding');
   const [openTarget, setOpenTarget] = useState('vscode');
@@ -365,6 +387,22 @@ function SectionGeneral({
       });
     return () => { cancelled = true; };
   }, [backgroundProcessAvailable]);
+
+  useEffect(() => {
+    if (!closeBehaviorAvailable) return undefined;
+    let cancelled = false;
+    setCloseBehaviorBusy(true);
+    getDesktopCloseBehavior()
+      .then((state) => {
+        if (cancelled) return;
+        if (state?.ok) setCloseBehavior(state.behavior);
+        setCloseBehaviorTrayAvailable(state?.trayAvailable !== false);
+      })
+      .finally(() => {
+        if (!cancelled) setCloseBehaviorBusy(false);
+      });
+    return () => { cancelled = true; };
+  }, [closeBehaviorAvailable]);
 
   useEffect(() => {
     if (!macAuthorizationAvailable) return undefined;
@@ -527,6 +565,31 @@ function SectionGeneral({
       toast({ kind: 'err', text: t('locale.saveFailed') });
     } finally {
       setUiLocaleBusy(false);
+    }
+  };
+
+  const switchCloseBehavior = async (nextBehavior) => {
+    const previous = closeBehavior;
+    if (!closeBehaviorAvailable || closeBehaviorBusy || nextBehavior === previous) return;
+    setCloseBehavior(nextBehavior);
+    setCloseBehaviorBusy(true);
+    try {
+      const state = await setDesktopCloseBehavior(nextBehavior);
+      if (!state?.ok) throw new Error(state?.error || '原生设置不可用');
+      setCloseBehavior(state.behavior);
+      setCloseBehaviorTrayAvailable(state?.trayAvailable !== false);
+      const label = DESKTOP_CLOSE_BEHAVIOR_OPTIONS.find(
+        (option) => option.value === state.behavior,
+      )?.label || '每次询问';
+      toast({ kind: 'ok', text: `关闭窗口时将${label}` });
+    } catch (error) {
+      setCloseBehavior(previous);
+      toast({
+        kind: 'err',
+        text: '关闭窗口设置失败:' + (error?.message || ''),
+      });
+    } finally {
+      setCloseBehaviorBusy(false);
     }
   };
 
@@ -763,6 +826,33 @@ function SectionGeneral({
           {t('settings.backgroundRunning', { port: health?.port || 28080 })}
         </span>
       </div>
+      {closeBehaviorAvailable && (
+        <div className="flex items-center justify-between gap-4 px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2">
+          <div>
+            <div className="text-[13px] font-medium">关闭窗口时</div>
+            <div className="text-[11px] text-fg-mute mt-0.5">
+              点击窗口右上角关闭按钮时执行的操作
+            </div>
+          </div>
+          <select
+            value={closeBehavior}
+            disabled={closeBehaviorBusy}
+            onChange={(event) => switchCloseBehavior(event.target.value)}
+            className="h-7 shrink-0 px-2 text-[12px] rounded-md border border-border bg-surface-alt text-fg outline-none focus:border-accent transition disabled:opacity-60"
+          >
+            {DESKTOP_CLOSE_BEHAVIOR_OPTIONS.map((option) => (
+              <option
+                key={option.value}
+                value={option.value}
+                disabled={option.value === DESKTOP_CLOSE_BEHAVIORS.MINIMIZE_TO_TRAY
+                  && !closeBehaviorTrayAvailable}
+              >
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {backgroundProcessAvailable && (
         <div
           role="switch"
@@ -804,35 +894,38 @@ function SectionGeneral({
 
 // ─── 外观 ──────────────────────────────────────────────────────────────────
 
-function SectionAppearance({ theme, setTheme, fontSize, onFontSizeChange }) {
+function SectionAppearance({
+  theme,
+  setTheme,
+  colorTheme,
+  setColorTheme,
+  fontSize,
+  onFontSizeChange,
+}) {
   return (
     <>
       <h2 className="text-xl font-bold mb-5">外观</h2>
 
       <div className="text-[14px] font-semibold mb-1">主题</div>
-      <p className="text-[12px] text-fg-mute mb-3">浅色 / 深色;新窗口打开时跟随系统设置</p>
+      <p className="text-[12px] text-fg-mute mb-3">选择界面的主色风格</p>
       <div className="grid grid-cols-2 gap-3 max-w-md">
-        {[
-          { key: 'light', label: '浅色',
-            sw1: '#ffffff', sw2: '#f5f5f2', sw3: '#2563eb' },
-          { key: 'dark', label: '深色',
-            sw1: '#1a1a1a', sw2: '#0f0f0f', sw3: '#3b82f6' },
-        ].map((opt) => {
-          const active = theme === opt.key;
+        {COLOR_THEME_OPTIONS.map((opt) => {
+          const active = colorTheme === opt.key;
           return (
             <button
               key={opt.key}
               type="button"
-              onClick={() => setTheme(opt.key)}
+              aria-pressed={active}
+              onClick={() => setColorTheme(opt.key)}
               className={clsx(
                 'relative p-3 rounded-lg border text-left transition',
                 active ? 'border-accent border-2 bg-accent-bg' : 'border-border bg-surface hover:border-accent/50',
               )}
             >
-              <div className="flex gap-1 mb-2">
-                <span className="w-6 h-6 rounded border border-border" style={{ background: opt.sw1 }} />
-                <span className="w-6 h-6 rounded border border-border" style={{ background: opt.sw2 }} />
-                <span className="w-6 h-6 rounded border border-border" style={{ background: opt.sw3 }} />
+              <div className={clsx('flex gap-1 mb-2', `ace-theme-preview-${opt.key}`)}>
+                <span className="ace-theme-preview-bg w-6 h-6 rounded border border-border" />
+                <span className="ace-theme-preview-surface w-6 h-6 rounded border border-border" />
+                <span className="ace-theme-preview-accent w-6 h-6 rounded border border-border" />
               </div>
               <div className="text-[13px] font-semibold">{opt.label}</div>
               {active && <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-accent" />}
@@ -841,7 +934,20 @@ function SectionAppearance({ theme, setTheme, fontSize, onFontSizeChange }) {
         })}
       </div>
 
-      <div className="mt-7 text-[14px] font-semibold mb-1">字体大小</div>
+      <div className="h-px bg-border my-5" />
+      <div className="flex items-center justify-between px-3.5 py-2.5 rounded-md bg-surface border border-border mb-2 max-w-md">
+        <div>
+          <div className="text-[13px] font-medium">暗黑模式</div>
+          <div className="text-[11px] text-fg-mute mt-0.5">使用深色背景，关闭后使用浅色背景</div>
+        </div>
+        <Toggle
+          on={theme === 'dark'}
+          onChange={(enabled) => setTheme(enabled ? 'dark' : 'light')}
+        />
+      </div>
+
+      <div className="h-px bg-border my-5" />
+      <div className="text-[14px] font-semibold mb-1">字体大小</div>
       <div className="grid grid-cols-3 gap-1 p-1 rounded-lg border border-border bg-surface max-w-[240px]">
         {FONT_SIZE_OPTIONS.map((opt) => {
           const active = fontSize === opt.key;

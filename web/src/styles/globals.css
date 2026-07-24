@@ -1,6 +1,7 @@
 /* Tailwind v4 entry — CSS-first 配置,无 tailwind.config.js
  *
- * 主题策略:CSS variables 驱动,light/dark 切换只换 var() 值,Tailwind 类名不变。
+ * 主题策略:CSS variables 驱动,颜色主题与 light/dark 模式只换 var() 值,
+ * Tailwind 类名不变。
  * `@theme inline` 把变量暴露给 Tailwind 的 utility 生成器,因此 `bg-bg` /
  * `text-fg` / `border-border` / `bg-accent` 等都可用。
  */
@@ -135,6 +136,124 @@
   --ace-shadow-lg:    0 4px 12px rgba(0,0,0,.4);
 
   color-scheme: dark;
+}
+
+:root[data-color-theme="orange"]:not([data-theme="dark"]) {
+  --ace-bg:           #fff6f0;
+  --ace-bg-rgb:       255, 246, 240;
+  --ace-surface:      #ffffff;
+  --ace-surface-rgb:  255, 255, 255;
+  --ace-surface-alt:  #fffaf7;
+  --ace-surface-alt-rgb: 255, 250, 247;
+  --ace-surface-hi:   #ffeadf;
+  --ace-surface-hi-rgb: 255, 234, 223;
+  --ace-border:       #f0d2c3;
+  --ace-border-rgb:   240, 210, 195;
+  --ace-border-soft:  #f6e0d5;
+  --ace-fg:           #201713;
+  --ace-fg-rgb:       32, 23, 19;
+  --ace-fg-2:         #705f57;
+  --ace-fg-2-rgb:     112, 95, 87;
+  --ace-fg-mute:      #665750;
+  --ace-fg-mute-rgb:  102, 87, 80;
+  --ace-accent:       #ea5504;
+  --ace-accent-rgb:   234, 85, 4;
+  --ace-accent-bg:    #fff0e7;
+  --ace-accent-soft:  #ffd2bd;
+  --ace-ok:           #16a34a;
+  --ace-ok-rgb:       22, 163, 74;
+  --ace-ok-bg:        #f0fdf4;
+  --ace-ok-border:    #bbf7d0;
+  --ace-warn:         #b7791f;
+  --ace-warn-rgb:     183, 121, 31;
+  --ace-warn-bg:      #fffbeb;
+  --ace-danger:       #dc2626;
+  --ace-danger-rgb:   220, 38, 38;
+  --ace-danger-bg:    #fef2f2;
+  --ace-code-bg:      #1e1e2e;
+  --ace-code-bg-rgb:  30, 30, 46;
+  --ace-code-fg:      #cdd6f4;
+  --ace-code-fg-rgb:  205, 214, 244;
+  --ace-code-line:    #6272a4;
+  --ace-shadow:       0 1px 3px rgba(91, 44, 20, .08);
+  --ace-shadow-lg:    0 4px 12px rgba(91, 44, 20, .12);
+}
+
+:root[data-color-theme="orange"][data-theme="dark"] {
+  --ace-bg:           #120c09;
+  --ace-bg-rgb:       18, 12, 9;
+  --ace-surface:      #1d1410;
+  --ace-surface-rgb:  29, 20, 16;
+  --ace-surface-alt:  #281b15;
+  --ace-surface-alt-rgb: 40, 27, 21;
+  --ace-surface-hi:   #35241c;
+  --ace-surface-hi-rgb: 53, 36, 28;
+  --ace-border:       #4b3125;
+  --ace-border-rgb:   75, 49, 37;
+  --ace-border-soft:  #3b271f;
+  --ace-fg:           #c9c1bd;
+  --ace-fg-rgb:       201, 193, 189;
+  --ace-fg-2:         #a99a92;
+  --ace-fg-2-rgb:     169, 154, 146;
+  --ace-fg-mute:      #93857e;
+  --ace-fg-mute-rgb:  147, 133, 126;
+  --ace-accent:       #ff6b1a;
+  --ace-accent-rgb:   255, 107, 26;
+  --ace-accent-bg:    #451b09;
+  --ace-accent-soft:  #6a2b10;
+  --ace-ok:           #22c55e;
+  --ace-ok-rgb:       34, 197, 94;
+  --ace-ok-bg:        #052e16;
+  --ace-ok-border:    #14532d;
+  --ace-warn:         #fbbf24;
+  --ace-warn-rgb:     251, 191, 36;
+  --ace-warn-bg:      #422006;
+  --ace-danger:       #ef4444;
+  --ace-danger-rgb:   239, 68, 68;
+  --ace-danger-bg:    #450a0a;
+  --ace-code-bg:      #120f0d;
+  --ace-code-bg-rgb:  18, 15, 13;
+  --ace-code-fg:      #e6d6cf;
+  --ace-code-fg-rgb:  230, 214, 207;
+  --ace-code-line:    #7a5d50;
+  --ace-shadow:       0 1px 3px rgba(0, 0, 0, .34);
+  --ace-shadow-lg:    0 4px 12px rgba(0, 0, 0, .44);
+}
+
+.ace-theme-preview-blue {
+  --ace-theme-preview-bg: #f5f5f2;
+  --ace-theme-preview-surface: #ffffff;
+  --ace-theme-preview-accent: #2563eb;
+}
+
+.ace-theme-preview-orange {
+  --ace-theme-preview-bg: #fff6f0;
+  --ace-theme-preview-surface: #ffffff;
+  --ace-theme-preview-accent: #ea5504;
+}
+
+[data-theme="dark"] .ace-theme-preview-blue {
+  --ace-theme-preview-bg: #0f0f0f;
+  --ace-theme-preview-surface: #1a1a1a;
+  --ace-theme-preview-accent: #3b82f6;
+}
+
+[data-theme="dark"] .ace-theme-preview-orange {
+  --ace-theme-preview-bg: #120c09;
+  --ace-theme-preview-surface: #1d1410;
+  --ace-theme-preview-accent: #ff6b1a;
+}
+
+.ace-theme-preview-bg {
+  background: var(--ace-theme-preview-bg);
+}
+
+.ace-theme-preview-surface {
+  background: var(--ace-theme-preview-surface);
+}
+
+.ace-theme-preview-accent {
+  background: var(--ace-theme-preview-accent);
 }
 
 [data-font-size="small"] {
@@ -533,6 +652,13 @@ body {
 
 /* WorkBuddy-style composer footer: session controls stay on one line around a
    flexible, horizontally accessible selected-context strip. */
+.ace-inputbar-layer {
+  /* WebView2 109 keeps the container-query composer card in its own stacking
+     context. Order the whole popup host above the transcript rail instead of
+     trying to escape that context with a larger descendant z-index. */
+  position: relative;
+  z-index: 30;
+}
 .ace-composer-card {
   container-type: inline-size;
 }
@@ -605,6 +731,7 @@ body {
   background: var(--ace-surface-hi);
 }
 .ace-composer-control-button:focus-visible,
+.ace-composer-model-settings:focus-visible,
 .ace-composer-model-refresh:focus-visible {
   outline: 1px solid rgba(var(--ace-accent-rgb), 0.58);
   outline-offset: 1px;
@@ -679,14 +806,29 @@ body {
 }
 .ace-composer-model-menu-header {
   height: 34px;
-  padding: 0 7px 0 11px;
+  padding: 0 7px 0 0;
   border-bottom: 1px solid var(--ace-border-soft);
   display: flex;
   align-items: center;
-  justify-content: space-between;
   color: var(--ace-fg-mute);
   font-size: 11px;
   font-weight: 600;
+}
+.ace-composer-model-settings {
+  align-self: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 8px 0 11px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ace-fg-2);
+  text-align: left;
+  transition: color 0.14s ease;
+}
+.ace-composer-model-settings:hover {
+  color: var(--ace-fg);
 }
 .ace-composer-model-refresh {
   width: 26px;
@@ -1220,12 +1362,28 @@ body {
 .ace-mermaid-diagram[data-mermaid-diagram="ready"] .ace-mermaid-source {
   display: none;
 }
+.ace-mermaid-preview-trigger {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  color: inherit;
+  background: transparent;
+  cursor: zoom-in;
+}
+.ace-mermaid-preview-trigger:focus-visible {
+  outline: 2px solid var(--ace-accent);
+  outline-offset: 2px;
+}
 .ace-mermaid-svg {
   display: block;
   width: auto;
   height: auto;
   max-width: none;
   margin: 0 auto;
+  pointer-events: none;
 }
 .ace-mermaid-source {
   border-radius: 0 !important;
@@ -2252,8 +2410,8 @@ body {
   border-color: var(--ace-accent-soft);
 }
 
-/* Rich composer command token: token and plain text live in the same editable
-   layout, so wrapped lines use one browser caret/text model. */
+/* Slate composer: inline void tags and plain text share one native caret/layout
+   surface. InputBar owns the outer spacing, height and bottom controls. */
 .ace-rich-composer-input {
   display: block;
   white-space: pre-wrap;
@@ -2264,37 +2422,26 @@ body {
 .ace-rich-composer-input:empty::before {
   content: "";
 }
-.ace-rich-command-token {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 20px;
-  line-height: 20px;
-  margin-right: 0.55ch;
-  max-width: 100%;
-  vertical-align: top;
-  white-space: nowrap;
-  color: var(--ace-accent);
+.ace-rich-composer-input[aria-disabled="true"] {
+  opacity: 0.5;
 }
-.ace-rich-command-token::before {
-  content: "";
-  display: inline-block;
-  flex: 0 0 14px;
-  width: 14px;
-  min-width: 14px;
-  height: 14px;
-  background-color: currentColor;
-  -webkit-mask-image: var(--ace-rich-command-token-icon-url);
-  mask-image: var(--ace-rich-command-token-icon-url);
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  -webkit-mask-position: center;
-  mask-position: center;
-  -webkit-mask-size: contain;
-  mask-size: contain;
+.ace-slate-composer-paragraph {
+  min-height: 20px;
+  margin: 0;
+}
+.ace-slate-inline-tag {
+  max-width: 100%;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.ace-slate-path-tag .ace-cmd-token-name {
+  min-width: 0;
+  max-width: min(520px, calc(100vw - 96px));
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* transcript 用户气泡里的斜杠命令徽标:skill 图标 + 蓝色命令名,hover 浮出描述。
+/* 用户气泡和 composer 共用的命令/tag 徽标:图标 + 蓝色名称。
    inline-flex 让徽标与 whitespace-pre-wrap 正文内联同行排版。 */
 .ace-cmd-token {
   position: relative;

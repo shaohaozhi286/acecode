@@ -58,6 +58,10 @@ nlohmann::json build_commands_payload(const SkillRegistry& global_skills,
         {"description", "Compress conversation history"},
     });
     builtins.push_back({
+        {"name", "feedback"},
+        {"description", "Send feedback with current-session Desktop diagnostics"},
+    });
+    builtins.push_back({
         {"name", "goal"},
         {"description", "Create, view, pause, resume, edit, or clear the thread goal"},
     });

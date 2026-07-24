@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   builtinCommandRequestForText,
+  desktopFeedbackRequestForText,
   inputRouteForText,
   sideQuestionRequestForText,
   sessionCreateOptionsForText,
@@ -88,6 +89,29 @@ run('/turn routes to active-turn steering instead of a builtin or ordinary messa
   assert.equal(turnSteerRequestForText('/turnip no'), null);
 });
 
+run('/feedback routes directly to Desktop diagnostics before builtin parsing', () => {
+  assert.deepEqual(
+    desktopFeedbackRequestForText('  /FEEDBACK   模型切换后卡住了  '),
+    {
+      feedbackText: '模型切换后卡住了',
+      display_text: '/FEEDBACK   模型切换后卡住了',
+    },
+  );
+  assert.deepEqual(inputRouteForText('/feedback details'), {
+    kind: 'desktop_feedback',
+    feedbackText: 'details',
+    display_text: '/feedback details',
+  });
+  assert.deepEqual(inputRouteForText('/feedback'), {
+    kind: 'desktop_feedback',
+    feedbackText: '',
+    display_text: '/feedback',
+  });
+  assert.equal(desktopFeedbackRequestForText('/feedbacker no'), null);
+  assert.equal(desktopFeedbackRequestForText('/feedback-extra no'), null);
+  assert.equal(builtinCommandRequestForText('/feedback details'), null);
+});
+
 run('unknown slash input remains ordinary message route', () => {
   assert.deepEqual(inputRouteForText('/foobar test'), {
     kind: 'message',
@@ -106,6 +130,9 @@ run('home builtin session creation disables auto start', () => {
     auto_start: false,
   });
   assert.deepEqual(sessionCreateOptionsForText('/turn guide this'), {
+    auto_start: false,
+  });
+  assert.deepEqual(sessionCreateOptionsForText('/feedback reproduce this'), {
     auto_start: false,
   });
 });

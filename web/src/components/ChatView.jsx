@@ -22,6 +22,7 @@ import {
 import { flushSync } from 'react-dom';
 import { createApi } from '../lib/api.js';
 import { connection } from '../lib/connection.js';
+import { tr } from '../i18n/index.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { codeTextFromCopyButtonTarget, copyTextToClipboard } from '../lib/codeBlockCopy.js';
 import { Message } from './Message.jsx';
@@ -102,6 +103,7 @@ import {
 } from '../lib/conversationActivity.js';
 import { normalizeTokenBudget } from '../lib/tokenBudget.js';
 import { pickModelLoad } from '../lib/modelLoad.js';
+import { normalizeExperts } from '../lib/expertComponents.js';
 import {
   modelDisplayLabel,
   isEmptyModelState,
@@ -118,6 +120,7 @@ import { PanelToggleIcon, VsIcon } from './Icon.jsx';
 import { commandWorkspaceHashForInput } from '../lib/slashCommandWorkspace.js';
 import { consoleCwdForContext } from '../lib/consoleDock.js';
 import { inputRouteForText, sessionCreateOptionsForText } from '../lib/builtinCommandRouting.js';
+import { buildCurrentSessionDesktopFeedbackPayload } from '../lib/desktopFeedback.js';
 import { buildWorktreeIntent } from '../lib/gitSessionPill.js';
 import { fileTreeRefreshKeyFromItems } from '../lib/fileTreeRefresh.js';
 import { buildAssistantRunDirectives } from '../lib/assistantRunDirectives.js';
@@ -525,7 +528,7 @@ function isRealWorkspaceHash(hash) {
   return !!hash && hash !== '__local__';
 }
 
-export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, previewPanelAutoFit = false, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
+export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, onOpenModelSettings, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, previewPanelAutoFit = false, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
   const sidRef = useRef(sid);
@@ -674,6 +677,10 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
   const [modelOptions, setModelOptions] = useState([]);
   const [modelListLoaded, setModelListLoaded] = useState(false);
   const [homeModelName, setHomeModelName] = useState('');
+  const [experts, setExperts] = useState([]);
+  const [homeExpertId, setHomeExpertId] = useState(() => String(
+    ref?.expertId || ref?.expert_id || ref?.expert?.id || '',
+  ));
   const [modelState, setModelState] = useState(null);
   // 模型池负载快照(每 30s 轮询 /api/model-pool-status)。
   const [poolModels, setPoolModels] = useState([]);
@@ -912,6 +919,19 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
     selectedHomeWorkspace,
     hasSession: !!sid,
   }), [ref, selectedHomeWorkspace, sid]);
+
+  useEffect(() => {
+    if (sid) return;
+    setHomeExpertId(String(ref?.expertId || ref?.expert_id || ref?.expert?.id || ''));
+  }, [ref?.expert?.id, ref?.expertId, ref?.expert_id, sid]);
+
+  useEffect(() => {
+    let alive = true;
+    api.listExperts(commandWorkspaceHash || '__local__')
+      .then((result) => { if (alive) setExperts(normalizeExperts(result)); })
+      .catch(() => { if (alive) setExperts([]); });
+    return () => { alive = false; };
+  }, [api, commandWorkspaceHash]);
   const consoleCwd = useMemo(() => consoleCwdForContext({
     activeRef: ref,
     selectedHomeWorkspace,
@@ -964,9 +984,10 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
       createOptions || sessionCreateOptionsForText(text),
       { modelName: homeModelName, permissionMode },
     );
+    const expertOptions = homeExpertId ? { expert_id: homeExpertId, expertId: homeExpertId } : {};
     const options = targetNoWorkspace
-      ? { ...baseOptions, no_workspace: true, noWorkspace: true }
-      : baseOptions;
+      ? { ...baseOptions, ...expertOptions, no_workspace: true, noWorkspace: true }
+      : { ...baseOptions, ...expertOptions };
     const create = isRealWorkspaceHash(targetHash)
       ? api.createWorkspaceSession(targetHash, options)
       : api.createSession(options);
@@ -987,6 +1008,12 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
         next.cwd = r.cwd || target?.cwd || ref?.cwd;
       }
       next.title = title || text;
+      if (homeExpertId) {
+        const selectedExpert = experts.find((expert) => expert.id === homeExpertId) || ref?.expert || null;
+        next.expertId = homeExpertId;
+        next.expert_id = homeExpertId;
+        if (selectedExpert) next.expert = selectedExpert;
+      }
       if (preserveExtras) preserveComposerExtrasOnSessionChangeRef.current = true;
       onSessionPromoted?.(next);
       notifySessionListChanged({
@@ -1005,7 +1032,7 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
     } finally {
       setHomeSubmitting(false);
     }
-  }, [api, health, homeModelName, homeSubmitting, onSessionPromoted, permissionMode, ref, selectedHomeWorkspace]);
+  }, [api, experts, health, homeExpertId, homeModelName, homeSubmitting, onSessionPromoted, permissionMode, ref, selectedHomeWorkspace]);
 
   const uploadMediaFilesToSession = useCallback((targetSid, files) => {
     for (const [index, file] of Array.from(files || []).entries()) {
@@ -2049,6 +2076,57 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
     const hasExtras = payloadHasExtras(payload);
     if (!payload.text.trim() && !hasExtras) return;
     const route = inputRouteForText(payload.text);
+    if (route.kind === 'desktop_feedback') {
+      if (!sid) {
+        toast({ kind: 'err', text: tr('feedbackCommand.requiresSession') });
+        return;
+      }
+      if (hasExtras) {
+        toast({ kind: 'err', text: tr('feedbackCommand.textOnly') });
+        return;
+      }
+      if (composerSubmitting) return;
+
+      const noWorkspace = !!(ref?.noWorkspace || ref?.no_workspace);
+      const requestPayload = buildCurrentSessionDesktopFeedbackPayload({
+        feedbackText: route.feedbackText,
+        sessionId: sid,
+        workspaceHash:
+          ref?.workspaceHash || ref?.workspace_hash || draftWorkspaceHash,
+        noWorkspace,
+      });
+      if (!requestPayload) {
+        toast({ kind: 'err', text: tr('feedbackCommand.unknownSession') });
+        return;
+      }
+
+      setComposerSubmitting(true);
+      api.submitDesktopFeedback(requestPayload)
+        .then((result) => {
+          recordInputHistory(route.display_text);
+          clearCurrentSessionDraft();
+          const packageName = String(result?.package_filename || '').trim();
+          toast({
+            kind: 'ok',
+            text: packageName
+              ? tr('feedbackCommand.uploadedWithPackage', { packageName })
+              : tr('feedbackCommand.uploaded'),
+          });
+        })
+        .catch((e) => {
+          toast({
+            kind: 'err',
+            text: tr('feedbackCommand.uploadFailed', {
+              error: e?.message || tr('common.unknown'),
+            }),
+          });
+        })
+        .finally(() => {
+          setComposerSubmitting(false);
+          restoreChatInputFocusSoon(false);
+        });
+      return;
+    }
     if (route.kind === 'side_question') {
       if (hasExtras) {
         toast({ kind: 'err', text: `/${route.command} 暂不支持附件或上下文，请仅提交文字问题` });
@@ -2214,7 +2292,7 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
         applyEvent({ type: 'busy_changed', payload: { busy: false } }, { emitEffects: false });
       })
       .finally(() => setComposerSubmitting(false));
-  }, [sid, busy, activeTurnId, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon, setTailFollowFromAction, runSideQuestion]);
+  }, [sid, busy, activeTurnId, api, homeSubmitting, recordInputHistory, enqueueInput, applyEvent, setTranscriptTitle, sendInputOrBuiltin, composerSubmitting, clearCurrentSessionDraft, composerAttachments, composerContexts, clearComposerExtras, createHomeComposerSession, restoreChatInputFocusSoon, setTailFollowFromAction, runSideQuestion, draftWorkspaceHash, ref?.noWorkspace, ref?.no_workspace, ref?.workspaceHash, ref?.workspace_hash]);
 
   const drainQueuedInput = useCallback(() => {
     const targetSid = sidRef.current;
@@ -2693,6 +2771,21 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
     selectedHomeModel || (homeModelName ? { name: homeModelName } : null),
     homeModelFallback,
   );
+  const boundExpertId = String(ref?.expertId || ref?.expert_id || ref?.expert?.id || '');
+  const displayedExperts = useMemo(() => {
+    if (!boundExpertId || experts.some((expert) => expert.id === boundExpertId)) return experts;
+    if (ref?.expert && typeof ref.expert === 'object') {
+      return normalizeExperts([ref.expert, ...experts]);
+    }
+    return [{
+      id: boundExpertId,
+      display_name: ref?.expert?.missing ? `${boundExpertId}（已缺失）` : boundExpertId,
+      type: 'agent',
+      source: 'global',
+      managed_global: false,
+      quick_prompts: [],
+    }, ...experts];
+  }, [boundExpertId, experts, ref?.expert]);
   const currentContextWindow = Number(modelState?.contextWindow || ref?.context_window || ref?.contextWindow || 0) || 0;
   const tokenBudget = useMemo(() => normalizeTokenBudget({
     usage: tokenUsage,
@@ -3166,10 +3259,15 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
                   modelRefreshing,
                   onModelChange: changeComposerModel,
                   onRefreshModels: refreshSessionModels,
+                  onOpenModelSettings,
                   tokenBudget: homeTokenBudget,
                   permissionMode,
                   permissionSwitching,
                   onPermissionModeChange: changeComposerPermissionMode,
+                  expertOptions: experts,
+                  selectedExpertId: homeExpertId,
+                  onExpertChange: setHomeExpertId,
+                  expertLocked: false,
                 }}
               />
             </div>
@@ -3795,10 +3893,14 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
           modelRefreshing,
           onModelChange: changeComposerModel,
           onRefreshModels: refreshSessionModels,
+          onOpenModelSettings,
           tokenBudget,
           permissionMode,
           permissionSwitching,
           onPermissionModeChange: changeComposerPermissionMode,
+          expertOptions: displayedExperts,
+          selectedExpertId: boundExpertId,
+          expertLocked: true,
         }}
       />
       <GitSessionPill

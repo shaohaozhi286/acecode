@@ -80,3 +80,32 @@ TEST(WebHostCloseDispatch, MacCloseHidesButExplicitQuitStillTerminates) {
     EXPECT_EQ(dispatch_request_quit(),
               CloseDispatch::FallthroughToDestroy);
 }
+
+TEST(WebHostCloseBehavior, AskShowsPrompt) {
+    EXPECT_EQ(resolve_close_request_action(
+                  acecode::DesktopCloseBehavior::Ask,
+                  true),
+              CloseRequestAction::ShowPrompt);
+}
+
+TEST(WebHostCloseBehavior, TrayChoiceRequiresAvailableTray) {
+    EXPECT_EQ(resolve_close_request_action(
+                  acecode::DesktopCloseBehavior::MinimizeToTray,
+                  true),
+              CloseRequestAction::HideToTray);
+    EXPECT_EQ(resolve_close_request_action(
+                  acecode::DesktopCloseBehavior::MinimizeToTray,
+                  false),
+              CloseRequestAction::ShowPrompt);
+}
+
+TEST(WebHostCloseBehavior, ExitFallsThroughToApplicationDestruction) {
+    EXPECT_EQ(resolve_close_request_action(
+                  acecode::DesktopCloseBehavior::Exit,
+                  true),
+              CloseRequestAction::ExitApplication);
+    EXPECT_EQ(resolve_close_request_action(
+                  acecode::DesktopCloseBehavior::Exit,
+                  false),
+              CloseRequestAction::ExitApplication);
+}

@@ -269,6 +269,16 @@ struct TuiState {
 
     // Rewind picker state. Target selection and restore-mode selection are
     // separate phases so Esc can step back from modes before cancelling.
+    enum class RewindPickerOperation {
+        Rewind,
+        Fork,
+    };
+    static bool rewind_target_uses_mode_picker(
+        RewindPickerOperation operation,
+        bool can_restore_code) {
+        return operation == RewindPickerOperation::Rewind &&
+               can_restore_code;
+    }
     enum class RewindRestoreMode {
         CodeAndConversation,
         ConversationOnly,
@@ -293,6 +303,7 @@ struct TuiState {
     };
     bool rewind_picker_active = false;
     bool rewind_mode_active = false;
+    RewindPickerOperation rewind_picker_operation = RewindPickerOperation::Rewind;
     std::vector<RewindItem> rewind_items;
     int rewind_selected = 0;
     int rewind_view_offset = 0; // top index of the visible viewport for the items list

@@ -16,6 +16,7 @@ function lower(s) {
 const BUILTIN_DESCRIPTION_KEYS = Object.freeze({
   init: 'init',
   compact: 'compact',
+  feedback: 'feedback',
   goal: 'goal',
   plan: 'plan',
   turn: 'turn',

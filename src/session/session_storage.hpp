@@ -54,6 +54,11 @@ struct SessionMeta {
     // 子会话依然被识别为后台任务,而不是泄漏进侧栏。空时序列化省略。
     std::string parent_session_id;
 
+    // Immutable expert identity selected when the session was created. Member
+    // is non-empty only for a validated team sub-agent session.
+    std::string expert_id;
+    std::string expert_member_id;
+
     // Daemon-owned LOOP provenance. This is display/history metadata only:
     // resuming the session does not reactivate LOOP execution policy.
     // Empty loop_id means this session was not directly created by a LOOP run.

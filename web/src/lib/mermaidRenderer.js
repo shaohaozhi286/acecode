@@ -1,4 +1,6 @@
 import mermaid from 'mermaid';
+import { registerMermaidExportTarget } from './mermaidExport.js';
+import { dispatchMermaidPreview } from './mermaidPreview.js';
 
 export const MAX_MERMAID_SOURCE_BYTES = 64 * 1024;
 export const MAX_MERMAID_SOURCE_LINES = 1000;
@@ -12,6 +14,7 @@ const DIAGRAM_SELECTOR = '[data-mermaid-diagram]';
 const SOURCE_DIAGRAM_SELECTOR = '[data-mermaid-diagram="source"]';
 const SOURCE_SELECTOR = '[data-mermaid-source="true"]';
 const TARGET_SELECTOR = '[data-mermaid-render-target="true"]';
+const SAFE_MERMAID_LABEL_BREAK = /<br[ \t]*\/?>/gi;
 
 const ALLOWED_SVG_ELEMENTS = new Set([
   'circle',
@@ -87,7 +90,8 @@ export function inspectMermaidSource(value) {
 
   if (/%%\s*\{/.test(source)) return rejected('directive');
   if (/@\s*\{/.test(source)) return rejected('generalized-shape');
-  if (/<\/?[A-Za-z][^>\r\n]*>/i.test(source)
+  const htmlSafetySource = source.replace(SAFE_MERMAID_LABEL_BREAK, '');
+  if (/<\/?[A-Za-z][^>\r\n]*>/i.test(htmlSafetySource)
       || /&(?:lt|gt|#0*60|#x0*3c);/i.test(source)) {
     return rejected('html');
   }
@@ -99,10 +103,11 @@ export function inspectMermaidSource(value) {
       || /url\s*\(/i.test(source)) {
     return rejected('external-resource');
   }
-  if (/(?:^|[\r\n;])\s*(?:click|href|links?|callback|call|classDef|style|linkStyle|cssClass)\b/im.test(source)
-      || (family !== 'class' && /(?:^|[\r\n;])\s*class\b/im.test(source))
-      || /:::/.test(source)) {
-    return rejected('interactive-or-style');
+  if (/(?:expression\s*\(|-moz-binding\b|behavior\s*:|@(?:import|font-face|namespace|supports|media|document|page)\b)/i.test(source)) {
+    return rejected('unsafe-style');
+  }
+  if (/(?:^|[\r\n;])\s*(?:click|href|links?|callback|call)\b/im.test(source)) {
+    return rejected('interactive');
   }
 
   return { ok: true, family, source };
@@ -371,6 +376,7 @@ export function installMermaidRenderer(
     }
 
     const owner = frame.ownerDocument || doc;
+    const previewTrigger = owner.createElement('button');
     const image = owner.createElement('img');
     const objectUrl = urlApi.createObjectURL(
       new BlobType([result.svg], { type: 'image/svg+xml;charset=utf-8' }),
@@ -382,6 +388,27 @@ export function installMermaidRenderer(
       try { urlApi.revokeObjectURL(objectUrl); } catch { /* best effort */ }
     };
     jobs.set(frame, { token, source, theme, release });
+    previewTrigger.type = 'button';
+    previewTrigger.className = 'ace-mermaid-preview-trigger';
+    previewTrigger.title = '放大预览 Mermaid 图表';
+    previewTrigger.setAttribute('aria-label', '放大预览 Mermaid 图表');
+    registerMermaidExportTarget(previewTrigger, {
+      source,
+      svg: result.svg,
+      width: result.width,
+      height: result.height,
+      theme,
+    });
+    previewTrigger.addEventListener('click', () => {
+      dispatchMermaidPreview(win, {
+        source,
+        svg: result.svg,
+        width: result.width,
+        height: result.height,
+        alt: image.alt,
+        theme,
+      });
+    });
     image.className = 'ace-mermaid-svg';
     image.alt = 'Mermaid diagram';
     image.width = Math.ceil(result.width);
@@ -413,7 +440,8 @@ export function installMermaidRenderer(
       setState(frame, 'error');
     }, { once: true });
     image.src = objectUrl;
-    target.replaceChildren(image);
+    previewTrigger.append(image);
+    target.replaceChildren(previewTrigger);
   };
 
   const scan = () => {

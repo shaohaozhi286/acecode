@@ -18,6 +18,7 @@
 namespace acecode {
 
 class SessionManager;
+class SkillRegistry;
 class ToolExecutor;
 
 // Structured summary used by the TUI to render a single-line tool-result row
@@ -109,6 +110,11 @@ struct ToolContext {
     // Per-session state injected by AgentLoop. Goal tools use this instead of
     // binding to one SessionManager at process-wide tool registration time.
     SessionManager* session_manager = nullptr;
+
+    // Effective per-session Skill registry. Skill tools prefer this over
+    // rebuilding a workspace-only registry, which preserves expert-bundled
+    // Skill isolation and precedence.
+    const SkillRegistry* skill_registry = nullptr;
 
     // AgentLoop sets this so bash can hand the full output to the
     // tool-result budget layer. Standalone tool callers keep the legacy

@@ -10,7 +10,7 @@ import {
   sidebarSectionCounts,
   sidebarSectionIsVisible,
   sidebarSectionTitle,
-  sidebarCustomMaxCount,
+  sidebarCustomTotalCount,
   validateSidebarSectionExpansion,
 } from './sidebarNavigation.js';
 
@@ -35,16 +35,17 @@ test('sidebar fixed navigation keeps the confirmed order and callbacks', () => {
 test('sidebar custom settings keep the restored order and default collapsed state', () => {
   assert.deepEqual(SIDEBAR_CUSTOM_ITEMS, [
     { id: 'mcp', label: 'MCP 服务器', icon: 'mcp', settingsSection: 'mcp' },
-    { id: 'models', label: '模型', icon: 'code', settingsSection: 'models' },
     { id: 'skills', label: '技能', icon: 'lightbulb', settingsSection: 'skills' },
+    { id: 'experts', label: '专家组件', icon: 'brain', action: 'experts' },
   ]);
   assert.equal(DEFAULT_SIDEBAR_CUSTOM_EXPANDED, false);
 });
 
-test('sidebar custom heading uses the greatest available count', () => {
-  assert.equal(sidebarCustomMaxCount({ mcp: 7, models: 38, skills: 12 }), 38);
-  assert.equal(sidebarCustomMaxCount({ mcp: null, models: 3.9, skills: Number.NaN }), 3);
-  assert.equal(sidebarCustomMaxCount({ mcp: -1, models: undefined, skills: null }), null);
+test('sidebar extension heading sums every available child count', () => {
+  assert.equal(sidebarCustomTotalCount({ mcp: 2, models: 7, skills: 16, experts: 3 }), 21);
+  assert.equal(sidebarCustomTotalCount({ mcp: null, models: 3.9, skills: 4.8, experts: 2.2 }), 6);
+  assert.equal(sidebarCustomTotalCount({ mcp: 0, models: 7, skills: 0, experts: 0 }), 0);
+  assert.equal(sidebarCustomTotalCount({ mcp: -1, models: 7, skills: null, experts: null }), null);
 });
 
 test('sidebar sections use confirmed labels and default expanded state', () => {

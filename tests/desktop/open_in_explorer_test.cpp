@@ -8,8 +8,11 @@
 namespace fs = std::filesystem;
 
 using acecode::desktop::open_directory_in_file_manager;
+using acecode::desktop::open_path_in_file_manager;
 using acecode::desktop::append_allowed_open_root;
+using acecode::desktop::OpenInExplorerTargetKind;
 using acecode::desktop::validate_open_directory_request;
+using acecode::desktop::validate_open_in_explorer_request;
 
 namespace {
 
@@ -60,11 +63,44 @@ TEST(DesktopOpenInExplorer, AllowsDirectoryInsideRegisteredWorkspaceRoot) {
     fs::remove_all(root, ec);
 }
 
+TEST(DesktopOpenInExplorer, AllowsFileInsideRegisteredWorkspaceRoot) {
+    auto root = make_tmp_dir("acecode_reveal_file_inside");
+    auto file = root / "file.txt";
+    std::ofstream(file.string()) << "x";
+
+    auto result = validate_open_in_explorer_request(
+        path_string(file),
+        {path_string(root)});
+    EXPECT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.kind, OpenInExplorerTargetKind::File);
+    EXPECT_EQ(result.path.filename(), file.filename());
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
 TEST(DesktopOpenInExplorer, RejectsDirectoryOutsideRegisteredWorkspaceRoots) {
     auto root = make_tmp_dir("acecode_open_explorer_root");
     auto outside = make_tmp_dir("acecode_open_explorer_outside");
 
     auto result = validate_open_directory_request(path_string(outside), {path_string(root)});
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.find("outside"), std::string::npos);
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::remove_all(outside, ec);
+}
+
+TEST(DesktopOpenInExplorer, RejectsFileOutsideRegisteredWorkspaceRoots) {
+    auto root = make_tmp_dir("acecode_reveal_file_root");
+    auto outside = make_tmp_dir("acecode_reveal_file_outside");
+    auto file = outside / "file.txt";
+    std::ofstream(file.string()) << "x";
+
+    auto result = validate_open_in_explorer_request(
+        path_string(file),
+        {path_string(root)});
     EXPECT_FALSE(result.ok);
     EXPECT_NE(result.error.find("outside"), std::string::npos);
 
@@ -113,6 +149,53 @@ TEST(DesktopOpenInExplorer, UsesInjectedLauncherAfterValidation) {
 
     EXPECT_TRUE(result.ok) << result.error;
     EXPECT_FALSE(launched.empty());
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST(DesktopOpenInExplorer, FileRevealPassesFileKindToInjectedLauncher) {
+    auto root = make_tmp_dir("acecode_reveal_file_launch");
+    auto file = root / "file.txt";
+    std::ofstream(file.string()) << "x";
+    fs::path launched;
+    auto launched_kind = OpenInExplorerTargetKind::Directory;
+
+    auto result = open_path_in_file_manager(
+        path_string(file),
+        {path_string(root)},
+        [&](const fs::path& path,
+            OpenInExplorerTargetKind kind,
+            std::string&) {
+            launched = path;
+            launched_kind = kind;
+            return true;
+        });
+
+    EXPECT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(launched.filename(), file.filename());
+    EXPECT_EQ(launched_kind, OpenInExplorerTargetKind::File);
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST(DesktopOpenInExplorer, PathRevealPreservesDirectoryKind) {
+    auto root = make_tmp_dir("acecode_reveal_directory_launch");
+    auto launched_kind = OpenInExplorerTargetKind::File;
+
+    auto result = open_path_in_file_manager(
+        path_string(root),
+        {path_string(root)},
+        [&](const fs::path&,
+            OpenInExplorerTargetKind kind,
+            std::string&) {
+            launched_kind = kind;
+            return true;
+        });
+
+    EXPECT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(launched_kind, OpenInExplorerTargetKind::Directory);
 
     std::error_code ec;
     fs::remove_all(root, ec);

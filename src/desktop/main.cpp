@@ -32,6 +32,7 @@
 #include "tray_icon_win.hpp"
 #include "url_builder.hpp"
 #include "web_host.hpp"
+#include "web_host_close_policy.hpp"
 #include "workspace_registry.hpp"
 
 #include "../config/config.hpp"
@@ -84,6 +85,8 @@ namespace {
 
 constexpr const char* kSharedDaemonSlotHash = "__shared_daemon__";
 constexpr const char* kSharedDaemonContextId = "default";
+constexpr const char* kDesktopCloseRequestEvent =
+    "acecode:desktop-close-requested";
 
 std::string context_picker_mime_type(const fs::path& path) {
     std::string extension = acecode::path_to_utf8(path.extension());
@@ -696,7 +699,7 @@ int main(int argc, char** argv) {
     SplashScreen splash;
     splash.show();
 
-    // 加载 desktop 端用到的 config(目前只关心 desktop.close_to_tray)。
+    // 加载 desktop 端用到的 config(窗口关闭行为、通知、后台进程等)。
     // 失败回退默认 AppConfig — 不阻断启动,与 daemon 一致;只是 close-to-tray
     // 默认值仍生效。Daemon 子进程会自己再次 load_config,所以 Desktop 这次读
     // 不会污染或覆盖 daemon 端配置。
@@ -904,6 +907,7 @@ int main(int argc, char** argv) {
 #endif
     };
 
+    std::atomic<bool> page_ready_notified{false};
     bool tray_ok = init_tray_icon(
         /*on_show=*/[&bring_window_foreground]() { bring_window_foreground(); },
         /*on_quit=*/[&host]() {
@@ -921,21 +925,38 @@ int main(int argc, char** argv) {
         host.set_visible(false);
         return true;
     });
-#else
-    if (tray_ok && desktop_cfg.desktop.close_to_tray) {
-        host.set_close_request_handler([&host]() {
-#ifdef _WIN32
-            auto* hwnd = static_cast<HWND>(host.native_window());
-            if (hwnd && ::IsWindow(hwnd)) {
-                ::ShowWindow(hwnd, SW_HIDE);
-                return true;
-            }
-#else
-            (void)host;
-#endif
+#elif defined(_WIN32)
+    host.set_close_request_handler([
+        &host,
+        &desktop_cfg,
+        &desktop_config_mu,
+        &page_ready_notified,
+        tray_ok
+    ]() {
+        acecode::DesktopCloseBehavior behavior;
+        {
+            std::lock_guard<std::mutex> lock(desktop_config_mu);
+            behavior = desktop_cfg.desktop.close_behavior;
+        }
+        const auto action = acecode::desktop::resolve_close_request_action(
+            behavior,
+            tray_ok);
+        if (action == acecode::desktop::CloseRequestAction::ExitApplication) {
             return false;
-        });
-    }
+        }
+        if (action == acecode::desktop::CloseRequestAction::HideToTray) {
+            host.set_visible(false);
+            return true;
+        }
+        if (!page_ready_notified.load()) {
+            return false;
+        }
+        host.eval(std::string(
+            "(function(){try{window.dispatchEvent(new Event('") +
+            kDesktopCloseRequestEvent +
+            "'));}catch(_){}})();");
+        return true;
+    });
 #endif
 
     // 共享的 "focus session" lambda — native 通知 / tray 菜单 session 项 / 直接
@@ -1049,7 +1070,6 @@ int main(int argc, char** argv) {
         LOG_WARN("[desktop] tray icon unavailable");
     }
 
-    std::atomic<bool> page_ready_notified{false};
     auto close_splash_once = [&] {
         bool expected = false;
         if (!page_ready_notified.compare_exchange_strong(expected, true)) return;
@@ -1154,6 +1174,72 @@ int main(int argc, char** argv) {
                 {"error", e.what()},
             }.dump();
         }
+    });
+
+    host.bind("aceDesktop_getCloseBehaviorPreference",
+              [&](const std::string& /*req*/) -> std::string {
+        std::lock_guard<std::mutex> lock(desktop_config_mu);
+        return nlohmann::json{
+            {"ok", true},
+            {"behavior", std::string(acecode::desktop_close_behavior_value(
+                desktop_cfg.desktop.close_behavior))},
+            {"tray_available", tray_ok},
+        }.dump();
+    });
+
+    host.bind("aceDesktop_setCloseBehaviorPreference",
+              [&](const std::string& req) -> std::string {
+        try {
+            const auto args = nlohmann::json::parse(req);
+            if (!args.is_array() || args.empty() || !args[0].is_string()) {
+                return nlohmann::json{
+                    {"ok", false},
+                    {"error", "expect [behavior:string]"},
+                }.dump();
+            }
+            const auto behavior = acecode::parse_desktop_close_behavior(
+                args[0].get<std::string>());
+            if (!behavior) {
+                return nlohmann::json{
+                    {"ok", false},
+                    {"error", "invalid close behavior"},
+                }.dump();
+            }
+
+            acecode::AppConfig latest = acecode::load_config();
+            latest.desktop.close_behavior = *behavior;
+            latest.desktop.close_to_tray =
+                *behavior != acecode::DesktopCloseBehavior::Exit;
+            acecode::save_config(latest);
+            {
+                std::lock_guard<std::mutex> lock(desktop_config_mu);
+                desktop_cfg.desktop.close_behavior = *behavior;
+                desktop_cfg.desktop.close_to_tray =
+                    latest.desktop.close_to_tray;
+            }
+            return nlohmann::json{
+                {"ok", true},
+                {"behavior", std::string(
+                    acecode::desktop_close_behavior_value(*behavior))},
+                {"tray_available", tray_ok},
+            }.dump();
+        } catch (const std::exception& e) {
+            return nlohmann::json{
+                {"ok", false},
+                {"error", e.what()},
+            }.dump();
+        }
+    });
+
+    host.bind("aceDesktop_hideToTray", [&](const std::string& /*req*/) -> std::string {
+        if (!tray_ok) {
+            return nlohmann::json{
+                {"ok", false},
+                {"error", "system tray is unavailable"},
+            }.dump();
+        }
+        host.set_visible(false);
+        return nlohmann::json{{"ok", true}}.dump();
     });
 
     // Post-upgrade restart bridge. Preflight while the current UI is still alive
@@ -1496,7 +1582,7 @@ int main(int argc, char** argv) {
                 std::move(roots),
                 acecode::path_to_utf8(
                     acecode::path_from_utf8(acecode::get_acecode_dir()) / "skills"));
-            auto result = acecode::desktop::open_directory_in_file_manager(
+            auto result = acecode::desktop::open_path_in_file_manager(
                 arr[0].get<std::string>(), roots);
             if (!result.ok) {
                 return nlohmann::json{{"ok", false}, {"error", result.error}}.dump();

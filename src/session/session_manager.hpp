@@ -169,6 +169,11 @@ public:
     void set_parent_session_id(std::string parent_id);
     std::string current_parent_session_id() const;
 
+    // Persist the immutable expert identity selected for this session.
+    void set_expert_binding(std::string expert_id, std::string member_id = {});
+    std::string current_expert_id() const;
+    std::string current_expert_member_id() const;
+
     // Persist the daemon-owned LOOP/run that directly created this session.
     // This is provenance only and does not restore LOOP runtime policy.
     void set_loop_origin(std::string loop_id, std::string loop_run_id);
@@ -252,6 +257,8 @@ private:
     bool writer_lease_active_ = false;
     bool archived_ = false;
     std::string parent_session_id_;
+    std::string expert_id_;
+    std::string expert_member_id_;
     std::string loop_id_;
     std::string loop_run_id_;
     WorktreeSessionInfo worktree_;

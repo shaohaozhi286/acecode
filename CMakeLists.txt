@@ -88,7 +88,7 @@ endif()
 # `web/dist/` build artifact, NOT the JSX source. If `web/dist/` is missing
 # the embed function emits an empty asset map (daemon will 404 the SPA but
 # keep the API working) — devs need to run `pnpm install && pnpm build`
-# inside web/ once before configuring cmake. CI/release flow runs the same
+# inside web/ once before configuring cmake. CI/release flow runs the same点
 # command before invoking cmake.
 include(${CMAKE_SOURCE_DIR}/cmake/acecode_embed_assets.cmake)
 acecode_compute_build_version(ACECODE_BUILD_VERSION)

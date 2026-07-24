@@ -5,7 +5,13 @@
 import { useEffect, useState } from 'react';
 import { clsx } from '../lib/format.js';
 
-export function Modal({ children, onClose, width = 460, dismissOnBackdrop = true }) {
+export function Modal({
+  children,
+  onClose,
+  width = 460,
+  dismissOnBackdrop = true,
+  layerClassName = 'z-[200]',
+}) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
     document.addEventListener('keydown', onKey);
@@ -16,7 +22,7 @@ export function Modal({ children, onClose, width = 460, dismissOnBackdrop = true
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+      className={clsx('fixed inset-0 flex items-center justify-center p-4', layerClassName)}
       style={{ backgroundColor: 'rgba(0, 0, 0, 0.35)' }}
       onClick={() => dismissOnBackdrop && handleClose()}
     >

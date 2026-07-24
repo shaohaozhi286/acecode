@@ -200,7 +200,7 @@ when known.
 | POST | `/api/workspaces/pick-folder` | desktop native folder picker |
 | GET | `/api/projects/defaults` | new-project default parent directory |
 | POST | `/api/projects` | create and register a new project directory |
-| POST | `/api/open-in-explorer` | open folder in OS file manager |
+| POST | `/api/open-in-explorer` | open a folder or reveal a file in the OS file manager |
 | GET | `/api/workspaces/:hash/sessions` | list sessions in workspace |
 | POST | `/api/workspaces/:hash/sessions` | create workspace session |
 | POST | `/api/workspaces/:hash/sessions/:id/resume` | resume workspace session |
@@ -482,12 +482,14 @@ Body:
 {"path":"C:/repo"}
 ```
 
-Opens an absolute directory in Explorer/Finder/xdg-open. The desktop callback
-validates that the path exists and is within an allowed root: a registered
-workspace, the daemon cwd, or the user-global skills directory
-(`~/.acecode/skills`, for the settings page "open global skills directory"
-button). Returns `{"ok":true}`. Returns `501` when the daemon has no desktop
-callback.
+Opens an absolute directory in Explorer/Finder/xdg-open, or reveals an existing
+regular file in its containing folder. Windows Explorer and macOS Finder select
+the file; Linux opens the containing directory because there is no portable
+freedesktop selection protocol. The desktop callback validates that the path
+exists and is within an allowed root: a registered workspace, the daemon cwd,
+or the user-global skills directory (`~/.acecode/skills`, for the settings page
+"open global skills directory" button). Returns `{"ok":true}`. Returns `501`
+when the daemon has no desktop callback.
 
 ### `GET /api/workspaces/:hash/sessions?archived=1`
 
@@ -1080,8 +1082,11 @@ shape as `GET`.
 
 ## 7. Files
 
-All file routes validate `cwd` against the daemon cwd and registered workspace
-cwds. `path` is relative to `cwd` and must stay within it.
+Directory listing validates `cwd` against the daemon cwd and registered
+workspace cwds. Text and binary preview requests additionally accept a target
+inside an active no-workspace session root; this does not make that root
+listable. Every target is canonicalized and must stay inside its authorized
+workspace or active-session root.
 
 ### `GET /api/files?cwd=<abs>&path=<rel>&show_hidden=1&show_noise=1`
 
@@ -1110,6 +1115,11 @@ Returns `text/plain; charset=utf-8` file content. Error status examples:
 - `415` binary or too large
 - `500` IO error
 
+For a changed file in an active no-workspace session, `cwd` may be the file's
+containing cache directory and `path` its basename. The canonical target must
+remain under that active session's isolated root. Destroying the session
+revokes this preview-only allowance.
+
 ### `GET /api/files/blob?cwd=<abs>&path=<rel>`
 
 Returns raw bytes for browser-native preview types:
@@ -1118,7 +1128,8 @@ Returns raw bytes for browser-native preview types:
 - documents: `pdf`, `docx`, `xlsx`, `xlsm`
 
 The route caps preview bytes at 20 MB and sets `X-Content-Type-Options:
-nosniff`.
+nosniff`. It uses the same active no-workspace preview authorization as the
+text-content endpoint.
 
 ### `GET /api/git/info?cwd=<abs>`
 

@@ -65,6 +65,12 @@ function usagePath(opts = {}) {
   return text ? `/api/usage?${text}` : '/api/usage';
 }
 
+function expertsPath(workspaceHash = '', id = '') {
+  const base = id ? `/api/experts/${encodeURIComponent(id)}` : '/api/experts';
+  const hash = String(workspaceHash || '').trim();
+  return hash ? `${base}?workspace=${encodeURIComponent(hash)}` : base;
+}
+
 function desktopFeedbackSessionsPath(limit = 20) {
   const n = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(100, Number(limit))) : 20;
   return `/api/feedback/desktop/recent-sessions?limit=${encodeURIComponent(String(n))}`;
@@ -146,6 +152,11 @@ export function createApi(base = null) {
     getUsageStats:    (opts={})      => request('GET',    usagePath(opts), undefined, base),
     listWorkspaces:   ()             => request('GET',    '/api/workspaces', undefined, base),
     listLoops:        ()             => request('GET',    '/api/loops', undefined, base),
+    listExperts:      (workspace='') => request('GET',    expertsPath(workspace), undefined, base),
+    getExpert:        (id, workspace='') => request('GET', expertsPath(workspace, id), undefined, base),
+    createExpert:     (value, workspace='') => request('POST', expertsPath(workspace), value, base),
+    updateExpert:     (id, value, workspace='') => request('PUT', expertsPath(workspace, id), value, base),
+    deleteExpert:     (id, workspace='') => request('DELETE', expertsPath(workspace, id), undefined, base),
     getLoop:          (id)           => request('GET',    `/api/loops/${encodeURIComponent(id)}`, undefined, base),
     createLoop:       (value)        => request('POST',   '/api/loops', value, base),
     updateLoop:       (id, value)    => request('PUT',    `/api/loops/${encodeURIComponent(id)}`, value, base),

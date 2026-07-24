@@ -32,6 +32,7 @@
 #include "../session/session_writer_lease.hpp"
 #include "../daemon/platform.hpp"
 #include "../skills/skill_registry.hpp"
+#include "../experts/expert_registry.hpp"
 #include "../skills/skill_metadata.hpp"
 #include "../tool/ace_browser_bridge/browser_tools.hpp"
 #include "../tool/tool_executor.hpp"
@@ -413,6 +414,7 @@ struct WebServer::Impl {
     void register_pinned_sessions();
     void register_sessions();
     void register_models();
+    void register_experts();
     void register_loops();
     void register_ui_preferences();
     void register_history();

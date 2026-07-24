@@ -20,6 +20,7 @@ import {
 import { changesCache } from '../lib/gitChangesCache.js';
 import { GIT_STATE_CHANGED_EVENT } from '../lib/gitSessionPill.js';
 import { normalizeTreePath } from '../lib/fileTreeChangeStatus.js';
+import { joinWorkspacePath } from '../lib/desktopContextMenu.js';
 import { clsx } from '../lib/format.js';
 import { VsIcon } from './Icon.jsx';
 
@@ -233,6 +234,8 @@ export function GitChangesPanel({
             data-change-compact-file={row.path}
             data-desktop-review-kind="file"
             data-desktop-review-file={row.path || undefined}
+            data-desktop-review-absolute-path={cwd ? joinWorkspacePath(cwd, row.path) : undefined}
+            data-desktop-review-can-reveal={row.status === 'D' ? 'false' : 'true'}
             className={clsx(
               'ace-change-compact-row',
               selectedNormalized && normalizeTreePath(row.path) === selectedNormalized && 'is-selected',

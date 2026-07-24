@@ -1,459 +1,193 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
-import { LexicalComposer } from '@lexical/react/LexicalComposer';
-import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { PlainTextPlugin } from '@lexical/react/LexicalPlainTextPlugin';
-import { ContentEditable } from '@lexical/react/LexicalContentEditable';
-import { OnChangePlugin } from '@lexical/react/LexicalOnChangePlugin';
-import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
-import { LexicalErrorBoundary } from '@lexical/react/LexicalErrorBoundary';
 import {
-  $createLineBreakNode,
-  $createParagraphNode,
-  $createRangeSelection,
-  $createTextNode,
-  $getRoot,
-  $getSelection,
-  $setSelection,
-  $isElementNode,
-  $isRangeSelection,
-  $isTextNode,
-  COMMAND_PRIORITY_HIGH,
-  KEY_BACKSPACE_COMMAND,
-  KEY_DELETE_COMMAND,
-  KEY_ENTER_COMMAND,
-  PASTE_COMMAND,
-  TextNode,
-} from 'lexical';
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+} from 'react';
+import {
+  createEditor,
+  Editor,
+  Range,
+  Transforms,
+} from 'slate';
+import {
+  Editable,
+  ReactEditor,
+  Slate,
+  withReact,
+} from 'slate-react';
+import {
+  HistoryEditor,
+  withHistory,
+} from 'slate-history';
 import { clsx } from '../lib/format.js';
 import {
   clipboardHasRichText,
+  composerAdjacentTagDeletionRange,
+  composerDocumentFromText,
+  composerDocumentWithSynchronizedLeadingCommand,
+  composerLeadingCommandSignature,
+  composerPlainTextRangeFromSelection,
+  composerSelectionFromPlainTextRange,
+  composerTextFromDocument,
+  isComposerCommandTag,
+  isComposerInlineTag,
+  isComposerPathTag,
   normalizeComposerPlainText,
   plainTextFromClipboardData,
-  richComposerModelFromText,
 } from '../lib/richComposerModel.js';
-import { filesFromClipboardEvent } from '../lib/composerFileTransfer.js';
+import { filesFromClipboardEvent, filesFromTransfer } from '../lib/composerFileTransfer.js';
 import { slashCommandKindPresentation } from '../lib/slashCommands.js';
+import { CommandGlyph, FileTypeIcon, VsIcon } from './Icon.jsx';
 
-function commandIconFile(command) {
+function withComposerInlineTags(editor) {
+  const { isInline, isVoid, markableVoid } = editor;
+  editor.isInline = (element) => (
+    isComposerInlineTag(element) ? true : isInline(element)
+  );
+  editor.isVoid = (element) => (
+    isComposerInlineTag(element) ? true : isVoid(element)
+  );
+  editor.markableVoid = (element) => (
+    isComposerInlineTag(element) ? false : markableVoid?.(element) || false
+  );
+  return editor;
+}
+
+function commandTagTitle(command) {
   const presentation = slashCommandKindPresentation(command);
-  if (presentation.icon === 'tool') return 'Tool';
-  if (presentation.icon === 'command') return 'TerminalReadWrite';
-  return 'IntellisenseLightBulbSparkle';
+  return command?.description || presentation.label || command?.name || command?.token || '';
 }
 
-function applyCommandTokenDom(dom, command) {
-  const presentation = slashCommandKindPresentation(command);
-  dom.classList.add('ace-rich-command-token');
-  dom.dataset.slashChipKind = command?.kind || 'skill';
-  dom.dataset.slashChipIcon = presentation.icon || '';
-  dom.title = presentation.label || '';
-  dom.style.setProperty('--ace-rich-command-token-icon-url', `url("/vs-icons/${commandIconFile(command)}.svg")`);
+function CommandTagElement({ attributes, children, element }) {
+  const displayName = String(element?.name || element?.token || '').replace(/^\/+/, '');
+  return (
+    <span
+      {...attributes}
+      contentEditable={false}
+      draggable={false}
+      data-composer-inline-tag="command"
+      data-slash-chip-kind={element?.kind || 'skill'}
+      className="ace-cmd-token ace-slate-inline-tag"
+      title={commandTagTitle(element)}
+      onDragStart={(event) => event.preventDefault()}
+    >
+      {children}
+      <CommandGlyph kind={element?.kind || 'skill'} size={12} className="ace-cmd-token-glyph" />
+      <span className="ace-cmd-token-name">{displayName}</span>
+    </span>
+  );
 }
 
-export class SlashCommandTokenNode extends TextNode {
-  __command;
-
-  static getType() {
-    return 'slash-command-token';
-  }
-
-  static clone(node) {
-    return new SlashCommandTokenNode(node.__command, node.__key);
-  }
-
-  static importJSON(serializedNode) {
-    const node = $createSlashCommandTokenNode(serializedNode.command || { token: serializedNode.text || '' });
-    node.setFormat(serializedNode.format || 0);
-    node.setDetail(serializedNode.detail || 0);
-    node.setStyle(serializedNode.style || '');
-    return node;
-  }
-
-  constructor(command, key) {
-    super(command?.token || (command?.name ? `/${command.name}` : ''), key);
-    this.__mode = 1;
-    this.__command = {
-      token: command?.token || (command?.name ? `/${command.name}` : ''),
-      name: command?.name || '',
-      kind: command?.kind || 'skill',
-      description: command?.description || '',
-      rest: '',
-    };
-  }
-
-  afterCloneFrom(prevNode) {
-    super.afterCloneFrom(prevNode);
-    this.__command = { ...prevNode.__command };
-  }
-
-  createDOM(config) {
-    const dom = super.createDOM(config);
-    applyCommandTokenDom(dom, this.__command);
-    return dom;
-  }
-
-  updateDOM(prevNode, dom, config) {
-    const shouldReplace = super.updateDOM(prevNode, dom, config);
-    applyCommandTokenDom(dom, this.__command);
-    return shouldReplace;
-  }
-
-  exportJSON() {
-    return {
-      ...super.exportJSON(),
-      type: 'slash-command-token',
-      version: 1,
-      command: this.__command,
-    };
-  }
-
-  isTextEntity() {
-    return true;
-  }
-
-  getCommand() {
-    return this.__command;
-  }
+function PathTagElement({ attributes, children, element }) {
+  const path = String(element?.path || element?.token || '').replace(/^@(?:"(.*)"|(.*))$/, '$1$2');
+  return (
+    <span
+      {...attributes}
+      contentEditable={false}
+      draggable={false}
+      data-composer-inline-tag="path"
+      className="ace-cmd-token ace-slate-inline-tag ace-slate-path-tag"
+      title={element?.token || path}
+      onDragStart={(event) => event.preventDefault()}
+    >
+      {children}
+      {element?.directory
+        ? <VsIcon name="folder" size={12} className="ace-cmd-token-glyph" />
+        : <FileTypeIcon path={path} size={12} className="ace-cmd-token-glyph" />}
+      <span className="ace-cmd-token-name">{path}</span>
+    </span>
+  );
 }
 
-export function $createSlashCommandTokenNode(command) {
-  return new SlashCommandTokenNode(command);
+function ComposerElement(props) {
+  if (isComposerCommandTag(props.element)) return <CommandTagElement {...props} />;
+  if (isComposerPathTag(props.element)) return <PathTagElement {...props} />;
+  return (
+    <div {...props.attributes} className="ace-slate-composer-paragraph">
+      {props.children}
+    </div>
+  );
 }
 
-export function $isSlashCommandTokenNode(node) {
-  return node instanceof SlashCommandTokenNode;
-}
-
-function appendPlainText(parent, text) {
-  const normalized = normalizeComposerPlainText(text);
-  const parts = normalized.split('\n');
-  parts.forEach((part, index) => {
-    if (index > 0) parent.append($createLineBreakNode());
-    if (part) parent.append($createTextNode(part));
-  });
-}
-
-function setRootFromPlainText(text, commands, { selectEnd = false } = {}) {
-  const root = $getRoot();
-  root.clear();
-  const paragraph = $createParagraphNode();
-  const model = richComposerModelFromText(text, commands);
-  if (model.kind === 'command') {
-    paragraph.append($createSlashCommandTokenNode(model.command));
-    appendPlainText(paragraph, model.rest);
-  } else {
-    appendPlainText(paragraph, model.text);
-  }
-  root.append(paragraph);
-  if (selectEnd) root.selectEnd();
-}
-
-function serializeEditorText() {
-  return normalizeComposerPlainText($getRoot().getTextContent());
-}
-
-function firstContentChild() {
-  const root = $getRoot();
-  const firstBlock = root.getFirstChild();
-  if (!$isElementNode(firstBlock)) return null;
-  return firstBlock.getFirstChild();
-}
-
-function rootNeedsCommandSync(text, commands) {
-  const model = richComposerModelFromText(text, commands);
-  const first = firstContentChild();
-  if (model.kind !== 'command') return $isSlashCommandTokenNode(first);
-  if (!$isSlashCommandTokenNode(first)) return true;
-  return first.getCommand()?.token !== model.command.token;
-}
-
-function childrenForOffset() {
-  const root = $getRoot();
-  const firstBlock = root.getFirstChild();
-  if (!$isElementNode(firstBlock)) return { parent: firstBlock, children: [] };
-  return { parent: firstBlock, children: firstBlock.getChildren() };
-}
-
-function nodeTextSize(node) {
-  if (!node) return 0;
-  if (typeof node.getTextContentSize === 'function') return node.getTextContentSize();
-  return String(node.getTextContent?.() || '').length;
-}
-
-function pointForPlainTextOffset(offset) {
-  const target = Math.max(0, Number.isFinite(offset) ? offset : 0);
-  const { parent, children } = childrenForOffset();
-  if (!parent) {
-    const root = $getRoot();
-    return { key: root.getKey(), offset: root.getChildrenSize(), type: 'element' };
-  }
-  let cursor = 0;
-  for (let index = 0; index < children.length; index += 1) {
-    const child = children[index];
-    const size = nodeTextSize(child);
-    if (target <= cursor + size) {
-      const local = Math.max(0, Math.min(size, target - cursor));
-      if ($isSlashCommandTokenNode(child)) {
-        return { key: parent.getKey(), offset: index + (local > 0 ? 1 : 0), type: 'element' };
-      }
-      if ($isTextNode(child)) {
-        return { key: child.getKey(), offset: local, type: 'text' };
-      }
-      return { key: parent.getKey(), offset: index + (local > 0 ? 1 : 0), type: 'element' };
-    }
-    cursor += size;
-  }
-  return { key: parent.getKey(), offset: children.length, type: 'element' };
-}
-
-function selectPlainTextRange(start, end, direction = 'none') {
-  const safeStart = Math.max(0, Number.isFinite(start) ? start : 0);
-  const safeEnd = Math.max(0, Number.isFinite(end) ? end : safeStart);
-  const anchorOffset = direction === 'backward' ? safeEnd : safeStart;
-  const focusOffset = direction === 'backward' ? safeStart : safeEnd;
-  const anchor = pointForPlainTextOffset(anchorOffset);
-  const focus = pointForPlainTextOffset(focusOffset);
-  const selection = $createRangeSelection();
-  selection.anchor.set(anchor.key, anchor.offset, anchor.type);
-  selection.focus.set(focus.key, focus.offset, focus.type);
-  $setSelection(selection);
-}
-
-function plainTextOffsetForPoint(point) {
-  const node = point.getNode();
-  const { parent, children } = childrenForOffset();
-  if (!parent) return 0;
-  let offset = 0;
-  for (let index = 0; index < children.length; index += 1) {
-    const child = children[index];
-    const size = nodeTextSize(child);
-    if (child.is(node)) {
-      if ($isSlashCommandTokenNode(child)) return offset + (point.offset > 0 ? size : 0);
-      if ($isTextNode(child)) return offset + Math.max(0, Math.min(size, point.offset));
-      return offset + (point.offset > 0 ? size : 0);
-    }
-    offset += size;
-  }
-  if (node.is(parent)) {
-    const elementOffset = Math.max(0, Math.min(children.length, point.offset));
-    return children.slice(0, elementOffset).reduce((sum, child) => sum + nodeTextSize(child), 0);
-  }
-  return serializeEditorText().length;
-}
-
-function readPlainSelection() {
-  const selection = $getSelection();
-  if (!$isRangeSelection(selection)) {
-    const end = serializeEditorText().length;
+function currentPlainSelection(document, selection) {
+  if (!selection) {
+    const end = composerTextFromDocument(document).length;
     return { start: end, end, direction: 'none' };
   }
-  const anchor = plainTextOffsetForPoint(selection.anchor);
-  const focus = plainTextOffsetForPoint(selection.focus);
-  return {
-    start: Math.min(anchor, focus),
-    end: Math.max(anchor, focus),
-    direction: selection.isBackward() ? 'backward' : 'forward',
+  return composerPlainTextRangeFromSelection(document, selection);
+}
+
+function replaceEditorDocument(editor, nextDocument, {
+  selection = null,
+  selectEnd = true,
+  clearHistory = false,
+} = {}) {
+  const nextText = composerTextFromDocument(nextDocument);
+  const plainSelection = selection || {
+    start: selectEnd ? nextText.length : 0,
+    end: selectEnd ? nextText.length : 0,
+    direction: 'none',
   };
-}
+  const slateSelection = composerSelectionFromPlainTextRange(
+    nextDocument,
+    plainSelection.start,
+    plainSelection.end,
+    plainSelection.direction,
+  );
 
-function childAtElementPoint(point, direction) {
-  const node = point.getNode();
-  if (!$isElementNode(node)) return null;
-  const children = node.getChildren();
-  const index = direction === 'backward' ? point.offset - 1 : point.offset;
-  return index >= 0 && index < children.length ? children[index] : null;
-}
+  HistoryEditor.withoutSaving(editor, () => {
+    Editor.withoutNormalizing(editor, () => {
+      if (editor.selection) Transforms.deselect(editor);
+      for (let index = editor.children.length - 1; index >= 0; index -= 1) {
+        Transforms.removeNodes(editor, { at: [index] });
+      }
+      Transforms.insertNodes(editor, nextDocument, { at: [0] });
+      Transforms.select(editor, slateSelection);
+    });
+  });
 
-function adjacentCommandTokenForPoint(point, direction) {
-  const node = point.getNode();
-  if ($isSlashCommandTokenNode(node)) {
-    const size = nodeTextSize(node);
-    if (direction === 'backward' && point.offset > 0) return node;
-    if (direction === 'forward' && point.offset < size) return node;
+  if (clearHistory && HistoryEditor.isHistoryEditor(editor)) {
+    editor.history.undos.splice(0);
+    editor.history.redos.splice(0);
   }
-  if ($isTextNode(node)) {
-    const size = nodeTextSize(node);
-    if (direction === 'backward' && point.offset === 0) {
-      const previous = node.getPreviousSibling();
-      return $isSlashCommandTokenNode(previous) ? previous : null;
-    }
-    if (direction === 'backward' && point.offset === 1 && /^\s/.test(node.getTextContent())) {
-      const previous = node.getPreviousSibling();
-      return $isSlashCommandTokenNode(previous) ? previous : null;
-    }
-    if (direction === 'forward' && point.offset === size) {
-      const next = node.getNextSibling();
-      return $isSlashCommandTokenNode(next) ? next : null;
-    }
-  }
-  const adjacent = childAtElementPoint(point, direction);
-  return $isSlashCommandTokenNode(adjacent) ? adjacent : null;
 }
 
-function removeCommandToken(tokenNode) {
-  const next = tokenNode.getNextSibling();
-  tokenNode.remove();
-  if ($isTextNode(next)) {
-    const text = next.getTextContent();
-    if (text.length > 0 && /\s/.test(text[0])) {
-      next.setTextContent(text.slice(1));
-    }
-  }
-  selectPlainTextRange(0, 0);
-}
-
-function deleteAdjacentCommandToken(direction) {
-  const selection = $getSelection();
-  if (!$isRangeSelection(selection) || !selection.isCollapsed()) return false;
-  const token = adjacentCommandTokenForPoint(selection.anchor, direction);
-  if (!token) return false;
-  removeCommandToken(token);
+function deleteAdjacentTag(editor, direction) {
+  const range = composerAdjacentTagDeletionRange(editor.children, editor.selection, direction);
+  if (!range) return false;
+  Transforms.select(editor, composerSelectionFromPlainTextRange(
+    editor.children,
+    range.start,
+    range.end,
+  ));
+  Transforms.delete(editor);
   return true;
 }
 
-function ValueSyncPlugin({ value, commands }) {
-  const [editor] = useLexicalComposerContext();
-  const commandSignature = useMemo(
-    () => commands.map((command) => `${command?.kind || ''}:${command?.name || ''}`).join('\n'),
-    [commands],
-  );
-
-  useEffect(() => {
-    const next = normalizeComposerPlainText(value);
-    let needsUpdate = false;
-    editor.getEditorState().read(() => {
-      const current = serializeEditorText();
-      needsUpdate = current !== next || rootNeedsCommandSync(next, commands);
+function insertPlainText(editor, text) {
+  const parts = normalizeComposerPlainText(text).split('\n');
+  HistoryEditor.withNewBatch(editor, () => {
+    parts.forEach((part, index) => {
+      if (index > 0) editor.insertBreak();
+      if (part) Transforms.insertText(editor, part);
     });
-    if (!needsUpdate) return;
-    editor.update(() => setRootFromPlainText(next, commands, { selectEnd: true }));
-  }, [commandSignature, commands, editor, value]);
-
-  return null;
+  });
 }
 
-function EditableStatePlugin({ disabled }) {
-  const [editor] = useLexicalComposerContext();
-  useEffect(() => {
-    editor.setEditable(!disabled);
-  }, [disabled, editor]);
-  return null;
-}
-
-function KeyAndPastePlugin({ disabled, onSubmit, onPasteFiles, isComposingKeyEvent }) {
-  const [editor] = useLexicalComposerContext();
-
-  useEffect(() => editor.registerCommand(
-    KEY_ENTER_COMMAND,
-    (event) => {
-      if (disabled) {
-        event?.preventDefault?.();
-        return true;
-      }
-      if (!event || event.shiftKey || isComposingKeyEvent?.(event) || event.isComposing || event.keyCode === 229 || editor.isComposing()) {
-        return false;
-      }
-      event.preventDefault();
-      onSubmit?.();
-      return true;
-    },
-    COMMAND_PRIORITY_HIGH,
-  ), [disabled, editor, isComposingKeyEvent, onSubmit]);
-
-  useEffect(() => editor.registerCommand(
-    KEY_BACKSPACE_COMMAND,
-    (event) => {
-      if (disabled) {
-        event?.preventDefault?.();
-        return true;
-      }
-      const handled = deleteAdjacentCommandToken('backward');
-      if (handled) event?.preventDefault?.();
-      return handled;
-    },
-    COMMAND_PRIORITY_HIGH,
-  ), [disabled, editor]);
-
-  useEffect(() => editor.registerCommand(
-    KEY_DELETE_COMMAND,
-    (event) => {
-      if (disabled) {
-        event?.preventDefault?.();
-        return true;
-      }
-      const handled = deleteAdjacentCommandToken('forward');
-      if (handled) event?.preventDefault?.();
-      return handled;
-    },
-    COMMAND_PRIORITY_HIGH,
-  ), [disabled, editor]);
-
-  useEffect(() => editor.registerCommand(
-    PASTE_COMMAND,
-    (event) => {
-      if (disabled || !event) return false;
-      const files = filesFromClipboardEvent(event);
-      const text = plainTextFromClipboardData(event.clipboardData);
-      const hasRichText = clipboardHasRichText(event.clipboardData);
-      if (files.length === 0 && !text && !hasRichText) return false;
-      event.preventDefault();
-      event.stopPropagation();
-      if (files.length > 0) onPasteFiles?.(files);
-      if (text) {
-        editor.update(() => {
-          const selection = $getSelection();
-          if ($isRangeSelection(selection)) selection.insertRawText(text);
-        });
-      }
-      return true;
-    },
-    COMMAND_PRIORITY_HIGH,
-  ), [disabled, editor, onPasteFiles]);
-
-  return null;
-}
-
-function SelectionBridgePlugin({ composerRef, commands, onSelectionChange }) {
-  const [editor] = useLexicalComposerContext();
-  const latestTextRef = useRef('');
-  const selectionRef = useRef({ start: 0, end: 0, direction: 'none' });
-
-  useEffect(() => editor.registerUpdateListener(({ editorState }) => {
-    editorState.read(() => {
-      latestTextRef.current = serializeEditorText();
-      selectionRef.current = readPlainSelection();
-      onSelectionChange?.(selectionRef.current);
-    });
-  }), [editor, onSelectionChange]);
-
-  useImperativeHandle(composerRef, () => ({
-    focus() {
-      editor.focus();
-    },
-    setSelectionRange(start, end, direction) {
-      editor.update(() => selectPlainTextRange(start, Number.isFinite(end) ? end : start, direction));
-    },
-    get value() {
-      return latestTextRef.current;
-    },
-    get selectionStart() {
-      return selectionRef.current.start;
-    },
-    get selectionEnd() {
-      return selectionRef.current.end;
-    },
-    get selectionDirection() {
-      return selectionRef.current.direction || 'none';
-    },
-    getEditorStateText() {
-      return latestTextRef.current;
-    },
-    replaceText(next, { selectEnd = true } = {}) {
-      editor.update(() => setRootFromPlainText(next, commands, { selectEnd }));
-    },
-  }), [commands, editor]);
-
-  return null;
+function writeSelectedPlainText(event, editor) {
+  if (!editor.selection || Range.isCollapsed(editor.selection)) return false;
+  const text = composerTextFromDocument(editor.children);
+  const selection = composerPlainTextRangeFromSelection(editor.children, editor.selection);
+  try {
+    event.clipboardData?.setData('text/plain', text.slice(selection.start, selection.end));
+  } catch {
+    return false;
+  }
+  event.preventDefault();
+  return true;
 }
 
 function RichComposerShell({
@@ -473,68 +207,236 @@ function RichComposerShell({
   isComposingKeyEvent,
   onSelectionChange,
 }, ref) {
-  const initialConfig = useMemo(() => ({
-    namespace: 'ACECodeRichComposer',
-    nodes: [SlashCommandTokenNode],
-    onError(error) {
-      throw error;
-    },
-    editorState: () => {
-      setRootFromPlainText(value, commands, { selectEnd: false });
-    },
-  // Initial config must be stable for LexicalComposer after mount.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), []);
+  const commandsRef = useRef(commands);
+  commandsRef.current = commands;
+  const initialValueRef = useRef(null);
+  if (!initialValueRef.current) {
+    initialValueRef.current = composerDocumentFromText(value, commands);
+  }
+  const editor = useMemo(
+    () => withComposerInlineTags(withHistory(withReact(createEditor()))),
+    [],
+  );
+  const latestTextRef = useRef(composerTextFromDocument(initialValueRef.current));
+  const selectionRef = useRef({
+    start: latestTextRef.current.length,
+    end: latestTextRef.current.length,
+    direction: 'none',
+  });
 
-  const handleChange = useCallback((editorState) => {
-    editorState.read(() => {
-      const text = serializeEditorText();
-      onChange?.(text);
+  const commandSignature = useMemo(
+    () => (Array.isArray(commands) ? commands : [])
+      .map((command) => [
+        command?.token || '',
+        command?.name || '',
+        command?.kind || '',
+        command?.description || '',
+      ].join(':'))
+      .join('\n'),
+    [commands],
+  );
+
+  const publishSelection = useCallback((selection = editor.selection) => {
+    const next = currentPlainSelection(editor.children, selection);
+    selectionRef.current = next;
+    onSelectionChange?.(next);
+  }, [editor, onSelectionChange]);
+
+  useEffect(() => {
+    const nextText = normalizeComposerPlainText(value);
+    const currentDocument = editor.children;
+    const currentText = composerTextFromDocument(currentDocument);
+    const textChanged = currentText !== nextText;
+    let nextDocument = null;
+
+    if (textChanged) {
+      nextDocument = composerDocumentFromText(nextText, commands);
+    } else {
+      const synchronized = composerDocumentWithSynchronizedLeadingCommand(
+        currentDocument,
+        nextText,
+        commands,
+      );
+      if (
+        composerLeadingCommandSignature(synchronized)
+        !== composerLeadingCommandSignature(currentDocument)
+      ) {
+        nextDocument = synchronized;
+      }
+    }
+
+    if (!nextDocument) return;
+    const preservedSelection = textChanged
+      ? null
+      : currentPlainSelection(currentDocument, editor.selection);
+    replaceEditorDocument(editor, nextDocument, {
+      selection: preservedSelection,
+      selectEnd: true,
+      clearHistory: textChanged,
     });
-  }, [onChange]);
+    latestTextRef.current = nextText;
+    publishSelection(editor.selection);
+  }, [commandSignature, commands, editor, publishSelection, value]);
+
+  const handleValueChange = useCallback((nextDocument) => {
+    const text = composerTextFromDocument(nextDocument);
+    latestTextRef.current = text;
+    publishSelection(editor.selection);
+    onChange?.(text);
+  }, [editor, onChange, publishSelection]);
+
+  const handleSlateSelectionChange = useCallback((selection) => {
+    publishSelection(selection);
+  }, [publishSelection]);
+
+  useImperativeHandle(ref, () => ({
+    focus() {
+      if (!editor.selection) {
+        const end = latestTextRef.current.length;
+        Transforms.select(editor, composerSelectionFromPlainTextRange(editor.children, end, end));
+      }
+      ReactEditor.focus(editor);
+    },
+    setSelectionRange(start, end, direction) {
+      const selection = composerSelectionFromPlainTextRange(
+        editor.children,
+        start,
+        Number.isFinite(end) ? end : start,
+        direction,
+      );
+      Transforms.select(editor, selection);
+      publishSelection(selection);
+    },
+    get value() {
+      return latestTextRef.current;
+    },
+    get selectionStart() {
+      return selectionRef.current.start;
+    },
+    get selectionEnd() {
+      return selectionRef.current.end;
+    },
+    get selectionDirection() {
+      return selectionRef.current.direction || 'none';
+    },
+    getEditorStateText() {
+      return latestTextRef.current;
+    },
+    replaceText(next, { selectEnd = true } = {}) {
+      const nextDocument = composerDocumentFromText(next, commandsRef.current);
+      replaceEditorDocument(editor, nextDocument, {
+        selectEnd,
+        clearHistory: true,
+      });
+      latestTextRef.current = composerTextFromDocument(editor.children);
+      publishSelection(editor.selection);
+    },
+  }), [editor, publishSelection]);
+
+  const renderElement = useCallback((props) => <ComposerElement {...props} />, []);
+  const renderPlaceholder = useCallback(({ attributes, children }) => (
+    <span
+      {...attributes}
+      className={clsx(
+        'pointer-events-none absolute inset-0 leading-[20px] font-sans text-fg-mute',
+        placeholderClassName,
+      )}
+    >
+      {children}
+    </span>
+  ), [placeholderClassName]);
+
+  const handleKeyDown = useCallback((event) => {
+    onKeyDown?.(event);
+    if (event.defaultPrevented) return;
+    if (disabled) {
+      event.preventDefault();
+      return;
+    }
+
+    if (event.key === 'Enter' && !event.shiftKey) {
+      if (
+        isComposingKeyEvent?.(event)
+        || event.isComposing
+        || event.nativeEvent?.isComposing
+        || event.keyCode === 229
+        || ReactEditor.isComposing(editor)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      onSubmit?.();
+      return;
+    }
+
+    if (event.key === 'Backspace' && deleteAdjacentTag(editor, 'backward')) {
+      event.preventDefault();
+      return;
+    }
+    if (event.key === 'Delete' && deleteAdjacentTag(editor, 'forward')) {
+      event.preventDefault();
+    }
+  }, [disabled, editor, isComposingKeyEvent, onKeyDown, onSubmit]);
+
+  const handlePaste = useCallback((event) => {
+    if (disabled) {
+      event.preventDefault();
+      return;
+    }
+    const clipboardData = event.clipboardData || event.nativeEvent?.clipboardData;
+    const files = filesFromClipboardEvent(event);
+    const text = plainTextFromClipboardData(clipboardData);
+    const hasRichText = clipboardHasRichText(clipboardData);
+    if (files.length === 0 && !text && !hasRichText) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (files.length > 0) onPasteFiles?.(files);
+    if (text) insertPlainText(editor, text);
+  }, [disabled, editor, onPasteFiles]);
+
+  const handleCopy = useCallback((event) => {
+    writeSelectedPlainText(event, editor);
+  }, [editor]);
+
+  const handleCut = useCallback((event) => {
+    if (disabled || !writeSelectedPlainText(event, editor)) return;
+    Transforms.delete(editor);
+  }, [disabled, editor]);
+
+  const handleDrop = useCallback((event) => {
+    const files = filesFromTransfer(event.dataTransfer);
+    const types = Array.from(event.dataTransfer?.types || []);
+    if (files.length > 0 || types.includes('application/x-slate-fragment')) {
+      event.preventDefault();
+    }
+  }, []);
 
   return (
-    <LexicalComposer initialConfig={initialConfig}>
-      <div className="relative">
-        <PlainTextPlugin
-          contentEditable={(
-            <ContentEditable
-              aria-label={placeholder}
-              className={className}
-              style={style}
-              onKeyDown={onKeyDown}
-              onCompositionStart={onCompositionStart}
-              onCompositionEnd={onCompositionEnd}
-            />
-          )}
-          placeholder={(
-            <div className={clsx(
-              'pointer-events-none absolute inset-0 leading-[20px] font-sans text-fg-mute',
-              placeholderClassName,
-            )}
-            >
-              {placeholder}
-            </div>
-          )}
-          ErrorBoundary={LexicalErrorBoundary}
-        />
-      </div>
-      <HistoryPlugin />
-      <OnChangePlugin onChange={handleChange} />
-      <ValueSyncPlugin value={value} commands={commands} />
-      <EditableStatePlugin disabled={disabled} />
-      <KeyAndPastePlugin
-        disabled={disabled}
-        onSubmit={onSubmit}
-        onPasteFiles={onPasteFiles}
-        isComposingKeyEvent={isComposingKeyEvent}
+    <Slate
+      editor={editor}
+      initialValue={initialValueRef.current}
+      onValueChange={handleValueChange}
+      onSelectionChange={handleSlateSelectionChange}
+    >
+      <Editable
+        aria-label={placeholder}
+        aria-disabled={disabled ? 'true' : undefined}
+        readOnly={disabled}
+        placeholder={placeholder}
+        className={className}
+        style={style}
+        renderElement={renderElement}
+        renderPlaceholder={renderPlaceholder}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        onCopy={handleCopy}
+        onCut={handleCut}
+        onDrop={handleDrop}
+        onCompositionStart={onCompositionStart}
+        onCompositionEnd={onCompositionEnd}
+        spellCheck
       />
-      <SelectionBridgePlugin
-        composerRef={ref}
-        commands={commands}
-        onSelectionChange={onSelectionChange}
-      />
-    </LexicalComposer>
+    </Slate>
   );
 }
 

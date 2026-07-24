@@ -95,8 +95,11 @@ ToolImpl create_skill_view_tool(SkillRegistry& registry,
             return ToolResult{err.dump(), false};
         }
 
-        auto scoped_registry = workspace_registry_for_context(config, ctx);
-        SkillRegistry& active_registry = scoped_registry ? *scoped_registry : registry;
+        auto scoped_registry = ctx.skill_registry
+            ? nullptr : workspace_registry_for_context(config, ctx);
+        const SkillRegistry& active_registry = ctx.skill_registry
+            ? *ctx.skill_registry
+            : (scoped_registry ? *scoped_registry : registry);
 
         auto meta = active_registry.find(name);
         if (!meta) {

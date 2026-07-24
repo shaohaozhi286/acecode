@@ -20,6 +20,7 @@
 #include "../permissions.hpp"
 #include "../provider/llm_provider.hpp"
 #include "../config/saved_models.hpp"
+#include "../experts/expert_registry.hpp"
 #include "../skills/skill_registry.hpp"
 #include "../tool/tool_executor.hpp"
 #include "ask_user_question_prompter.hpp"
@@ -69,6 +70,10 @@ struct SessionEntry {
     int subagent_depth = 0;
     // 非空 = spawn_subagent 子会话的父会话 id(随 meta 持久化,resume 恢复)。
     std::string parent_session_id;
+    std::string expert_id;
+    std::string expert_member_id;
+    bool expert_missing = false;
+    std::optional<ExpertDefinition> expert;
     bool loop_execution = false;
     std::string loop_id;
     std::string loop_run_id;
@@ -99,6 +104,7 @@ struct SessionRegistryDeps {
     std::string                      cwd;
     const AppConfig*                 config = nullptr;
     const SkillRegistry*             skill_registry = nullptr;
+    const ExpertRegistry*            expert_registry = nullptr;
     const MemoryRegistry*            memory_registry = nullptr;
     const MemoryConfig*              memory_cfg = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg = nullptr;

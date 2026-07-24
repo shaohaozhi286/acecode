@@ -237,6 +237,8 @@ void SessionManager::start_session(const std::string& cwd,
     writer_lease_active_ = false;
     archived_ = false;
     parent_session_id_.clear();
+    expert_id_.clear();
+    expert_member_id_.clear();
     loop_id_.clear();
     loop_run_id_.clear();
     worktree_ = {};
@@ -294,6 +296,8 @@ bool SessionManager::ensure_created() {
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
     meta.parent_session_id = parent_session_id_;
+    meta.expert_id = expert_id_;
+    meta.expert_member_id = expert_member_id_;
     meta.loop_id = loop_id_;
     meta.loop_run_id = loop_run_id_;
     meta.worktree = worktree_;
@@ -522,6 +526,8 @@ std::vector<ChatMessage> SessionManager::resume_session(const std::string& sessi
         archived_ = meta.archived;
         no_workspace_ = meta.no_workspace;
         parent_session_id_ = meta.parent_session_id;
+        expert_id_ = meta.expert_id;
+        expert_member_id_ = meta.expert_member_id;
         loop_id_ = meta.loop_id;
         loop_run_id_ = meta.loop_run_id;
         worktree_ = meta.worktree;
@@ -624,6 +630,8 @@ void SessionManager::end_current_session() {
     todos_.clear();
     last_error_.clear();
     archived_ = false;
+    expert_id_.clear();
+    expert_member_id_.clear();
     loop_id_.clear();
     loop_run_id_.clear();
     checkpoint_store_.reset();
@@ -819,6 +827,8 @@ std::string SessionManager::fork_session_to_new_id(
     meta.forked_from     = forked_from_id;
     meta.fork_message_id = fork_message_id;
     meta.no_workspace    = no_workspace_;
+    meta.expert_id       = expert_id_;
+    meta.expert_member_id = expert_member_id_;
     SessionStorage::write_meta(new_meta, meta);
     {
         std::string index_error;
@@ -965,6 +975,8 @@ void SessionManager::update_meta() {
     meta.archived = archived_;
     meta.no_workspace = no_workspace_;
     meta.parent_session_id = parent_session_id_;
+    meta.expert_id = expert_id_;
+    meta.expert_member_id = expert_member_id_;
     meta.loop_id = loop_id_;
     meta.loop_run_id = loop_run_id_;
     meta.worktree = worktree_;
@@ -1125,6 +1137,25 @@ std::string SessionManager::current_parent_session_id() const {
     return parent_session_id_;
 }
 
+void SessionManager::set_expert_binding(std::string expert_id, std::string member_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    expert_id_ = std::move(expert_id);
+    expert_member_id_ = expert_id_.empty() ? std::string{} : std::move(member_id);
+    if (created_) {
+        update_meta();
+    }
+}
+
+std::string SessionManager::current_expert_id() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return expert_id_;
+}
+
+std::string SessionManager::current_expert_member_id() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return expert_member_id_;
+}
+
 void SessionManager::set_loop_origin(std::string loop_id, std::string loop_run_id) {
     std::lock_guard<std::mutex> lk(mu_);
     loop_id_ = std::move(loop_id);
@@ -1194,6 +1225,11 @@ void SessionManager::set_input_draft(std::string draft) {
         meta.todos = todos_;
         meta.archived = archived_;
         meta.no_workspace = no_workspace_;
+        meta.parent_session_id = parent_session_id_;
+        meta.expert_id = expert_id_;
+        meta.expert_member_id = expert_member_id_;
+        meta.loop_id = loop_id_;
+        meta.loop_run_id = loop_run_id_;
     }
     meta.input_draft = input_draft_;
     SessionStorage::write_meta(meta_path_str_, meta);

@@ -5,6 +5,7 @@
 #include "../../tool/mcp_manager.hpp"  // /api/mcp/toggle 运行时 enable/disable
 #include "../../utils/state_file.hpp"
 
+#include <fstream>
 #include <thread>
 
 namespace acecode::web {
@@ -330,17 +331,23 @@ void WebServer::Impl::register_feedback() {
                 acecode::desktop::WorkspaceMeta ws;
                 SessionMeta meta;
                 fs::path jsonl;
+                bool jsonl_exists = false;
             };
             std::vector<Match> matches;
             for (const auto& ws : workspaces) {
                 const std::string project_dir = SessionStorage::get_project_dir(ws.cwd);
                 auto candidates = SessionStorage::find_session_files(project_dir, session_id);
-                if (candidates.empty() || candidates.front().jsonl_path.empty()) continue;
+                const bool jsonl_exists =
+                    !candidates.empty() && !candidates.front().jsonl_path.empty();
+                const fs::path meta_path = path_from_utf8(
+                    jsonl_exists && !candidates.front().meta_path.empty()
+                        ? candidates.front().meta_path
+                        : SessionStorage::meta_path(project_dir, session_id));
+                std::error_code ec;
+                if (!jsonl_exists && !fs::is_regular_file(meta_path, ec)) continue;
 
                 SessionMeta meta = SessionStorage::read_meta(
-                    candidates.front().meta_path.empty()
-                        ? SessionStorage::meta_path(project_dir, session_id)
-                        : candidates.front().meta_path);
+                    path_to_utf8(meta_path));
                 if (meta.id.empty()) meta.id = session_id;
                 if (!workspace_hash.empty() && meta.no_workspace) {
                     return std::string{"session does not belong to requested workspace"};
@@ -348,7 +355,11 @@ void WebServer::Impl::register_feedback() {
                 matches.push_back(Match{
                     ws,
                     std::move(meta),
-                    path_from_utf8(candidates.front().jsonl_path),
+                    jsonl_exists
+                        ? path_from_utf8(candidates.front().jsonl_path)
+                        : path_from_utf8(
+                            SessionStorage::session_path(project_dir, session_id)),
+                    jsonl_exists,
                 });
             }
 
@@ -356,6 +367,22 @@ void WebServer::Impl::register_feedback() {
             if (matches.size() > 1) {
                 return std::string{
                     "session id exists in multiple workspaces; workspace_hash is required"};
+            }
+            if (!matches.front().jsonl_exists) {
+                // A brand-new Desktop session persists metadata before its
+                // first message. Match TUI /feedback by materializing an empty
+                // canonical transcript without truncating a concurrently
+                // created file.
+                std::ofstream empty_session(
+                    matches.front().jsonl, std::ios::binary | std::ios::app);
+                if (!empty_session.is_open()) {
+                    return std::string{"failed to create empty session JSONL"};
+                }
+                empty_session.close();
+                std::error_code ec;
+                if (!fs::is_regular_file(matches.front().jsonl, ec)) {
+                    return std::string{"failed to create empty session JSONL"};
+                }
             }
             *out_ws = matches.front().ws;
             *out_meta = std::move(matches.front().meta);

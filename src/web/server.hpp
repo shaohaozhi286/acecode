@@ -34,6 +34,7 @@ class PtySessionRegistry;
 class SessionClient;
 class SessionRegistry;
 class SkillRegistry;
+class ExpertRegistry;
 class ToolExecutor;
 } // namespace acecode
 
@@ -68,6 +69,7 @@ struct WebServerDeps {
     int                        desktop_protocol_version = 0;
     SessionClient*             session_client = nullptr;
     SessionRegistry*           session_registry = nullptr;
+    ExpertRegistry*            expert_registry = nullptr;
     HookManager*               hook_manager = nullptr;
     ToolExecutor*              tools = nullptr;
     // MCP 运行时管理器(daemon 持有)。/api/mcp/toggle 用它做免重启的运行时
@@ -83,7 +85,7 @@ struct WebServerDeps {
     std::mutex*                    provider_mu = nullptr;
     bool                       native_folder_picker_enabled = false;
     std::function<std::optional<std::string>()> native_folder_picker;
-    // POST /api/open-in-explorer 的执行回调:输入 UTF-8 绝对路径,成功返回
+    // POST /api/open-in-explorer 的执行回调:输入 UTF-8 绝对文件/目录路径,成功返回
     // std::nullopt,失败返回错误信息。null = 端点 501(与 native_folder_picker
     // 同款门控,仅 desktop 壳启动的 daemon 填入;webapp 兼容模式的右键菜单依赖它)。
     std::function<std::optional<std::string>(const std::string&)> open_in_explorer;

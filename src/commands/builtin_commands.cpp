@@ -402,6 +402,7 @@ static void cmd_help(CommandContext& ctx, const std::string& /*args*/) {
         << "  /side     - Alias for /btw\n"
         << "  /resume   - Resume a previous session\n"
         << "  /rewind   - Rewind to a previous user turn\n"
+        << "  /fork     - Fork from a previous user turn\n"
         << "  /mcp      - Manage MCP servers\n"
         << "  /skills   - List, invoke, or reload installed skills\n"
         << "  /memory   - List, view, edit, forget, or reload persistent user memory\n"
@@ -1501,6 +1502,7 @@ namespace {
 void clear_rewind_picker(TuiState& state) {
     state.rewind_picker_active = false;
     state.rewind_mode_active = false;
+    state.rewind_picker_operation = TuiState::RewindPickerOperation::Rewind;
     state.rewind_items.clear();
     state.rewind_selected = 0;
     state.rewind_view_offset = 0;
@@ -1526,10 +1528,16 @@ std::string format_code_restore_result(const FileCheckpointRestoreResult& result
     return oss.str();
 }
 
-std::string format_conversation_rewind_status(const TuiState::RewindItem& item,
-                                              const std::string& new_session_id) {
+std::string format_conversation_branch_status(
+    const TuiState::RewindItem& item,
+    const std::string& new_session_id,
+    TuiState::RewindPickerOperation operation) {
     std::ostringstream oss;
-    oss << "Conversation rewound to: " << item.preview;
+    if (operation == TuiState::RewindPickerOperation::Fork) {
+        oss << "Conversation forked before: " << item.preview;
+    } else {
+        oss << "Conversation rewound to: " << item.preview;
+    }
     if (!new_session_id.empty()) {
         oss << "\nNew session: " << new_session_id
             << "\nOriginal full session remains available in /resume.";
@@ -1539,8 +1547,12 @@ std::string format_conversation_rewind_status(const TuiState::RewindItem& item,
 
 } // namespace
 
-static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
+static void open_rewind_picker(
+    CommandContext& ctx,
+    TuiState::RewindPickerOperation operation) {
     std::lock_guard<std::mutex> lk(ctx.state.mu);
+    const bool is_fork =
+        operation == TuiState::RewindPickerOperation::Fork;
 
     if (!ctx.session_manager) {
         ctx.state.conversation.push_back({"system", "Session persistence is not available.", false});
@@ -1551,7 +1563,8 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
     if (ctx.state.is_waiting || ctx.state.tool_running || ctx.state.confirm_pending ||
         ctx.state.ask_pending || ctx.state.is_compacting) {
         ctx.state.conversation.push_back({"system",
-            "Rewind is unavailable while an agent turn, tool, confirmation, question, or compaction is active.",
+            std::string(is_fork ? "Fork" : "Rewind") +
+                " is unavailable while an agent turn, tool, confirmation, question, or compaction is active.",
             false});
         ctx.state.chat_follow_tail = true;
         return;
@@ -1559,12 +1572,17 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
 
     auto targets = collect_rewind_targets(ctx.agent_loop.messages());
     if (targets.empty()) {
-        ctx.state.conversation.push_back({"system", "No user turns are available to rewind.", false});
+        ctx.state.conversation.push_back({
+            "system",
+            std::string("No user turns are available to ") +
+                (is_fork ? "fork." : "rewind."),
+            false});
         ctx.state.chat_follow_tail = true;
         return;
     }
 
     clear_rewind_picker(ctx.state);
+    ctx.state.rewind_picker_operation = operation;
     // Show every collected user turn — viewport scrolling in the TUI handles
     // long lists, so no per-call cap is needed.
     ctx.state.rewind_items.reserve(targets.size());
@@ -1609,12 +1627,17 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
     auto* token_tracker = &ctx.token_tracker;
     auto* config = &ctx.config;
     ctx.state.rewind_callback =
-        [&state = ctx.state, sm, al, tools, token_tracker, config](
+        [&state = ctx.state, sm, al, tools, token_tracker, config, operation](
             TuiState::RewindItem item,
             TuiState::RewindRestoreMode mode) {
             // Caller holds state.mu, matching the /resume picker callback.
             if (mode == TuiState::RewindRestoreMode::NeverMind) {
-                state.conversation.push_back({"system", "Rewind cancelled.", false});
+                state.conversation.push_back({
+                    "system",
+                    operation == TuiState::RewindPickerOperation::Fork
+                        ? "Fork cancelled."
+                        : "Rewind cancelled.",
+                    false});
                 state.chat_follow_tail = true;
                 return;
             }
@@ -1640,7 +1663,12 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
                 auto messages = al->messages();
                 if (item.message_index >= messages.size()) {
                     state.conversation.push_back({"system",
-                        "Rewind failed: selected message is no longer available.", false});
+                        std::string(
+                            operation == TuiState::RewindPickerOperation::Fork
+                                ? "Fork"
+                                : "Rewind") +
+                            " failed: selected message is no longer available.",
+                        false});
                     state.chat_follow_tail = true;
                     return;
                 }
@@ -1660,7 +1688,8 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
                 }
                 state.conversation.push_back({
                     "system",
-                    format_conversation_rewind_status(item, new_session_id),
+                    format_conversation_branch_status(
+                        item, new_session_id, operation),
                     false});
 
                 state.input_mode = InputMode::Normal;
@@ -1689,6 +1718,14 @@ static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
     ctx.state.rewind_mode_selected = 0;
     ctx.state.rewind_picker_active = true;
     ctx.state.rewind_mode_active = false;
+}
+
+static void cmd_rewind(CommandContext& ctx, const std::string& /*args*/) {
+    open_rewind_picker(ctx, TuiState::RewindPickerOperation::Rewind);
+}
+
+static void cmd_fork(CommandContext& ctx, const std::string& /*args*/) {
+    open_rewind_picker(ctx, TuiState::RewindPickerOperation::Fork);
 }
 
 // /theme: 切换 TUI 配色主题.
@@ -1844,6 +1881,7 @@ void register_builtin_commands(CommandRegistry& registry) {
     registry.register_command({"resume", "Resume a previous session", cmd_resume});
     registry.register_command({"rewind", "Rewind to a previous user turn", cmd_rewind});
     registry.register_command({"checkpoint", "Alias for /rewind", cmd_rewind});
+    registry.register_command({"fork", "Fork from a previous user turn", cmd_fork});
     registry.register_command({"mcp", "Manage MCP servers", cmd_mcp});
     registry.register_command({"skills", "List, invoke, or reload installed skills", cmd_skills});
     register_memory_command(registry);

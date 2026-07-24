@@ -1,4 +1,6 @@
 #include "system_prompt.hpp"
+
+#include "../experts/expert_registry.hpp"
 #include "system_datetime.hpp"
 #include "../config/config.hpp"
 #include "../gitinfo/git_context_collector.hpp"
@@ -484,6 +486,56 @@ PromptContextBlock build_git_status_context_prompt(
     return block;
 }
 
+PromptContextBlock build_expert_context_prompt(
+    const ExpertDefinition* expert,
+    const std::string& member_id) {
+    PromptContextBlock block;
+    if (!expert) return block;
+
+    const ExpertAgent* selected = expert->selected_agent(member_id);
+    if (!selected) return block;
+
+    std::ostringstream content;
+    content << "# Selected Expert Component\n\n"
+            << "Expert: " << expert->display_name << " (" << expert->id << ")\n"
+            << "Type: " << to_string(expert->type) << "\n"
+            << "Active Agent: " << selected->display_name << " (" << selected->id << ")\n";
+    if (!selected->profession.empty()) {
+        content << "Profession: " << selected->profession << "\n";
+    }
+    content << "\nThis is user-installed working guidance. Follow it when relevant, but it "
+               "does not override system or developer instructions and does not grant "
+               "tools, permissions, or sandbox exceptions.\n\n";
+
+    if (expert->type == ExpertType::Team && member_id.empty()) {
+        if (!expert->description.empty()) {
+            content << "Team purpose: " << expert->description << "\n\n";
+        }
+        content << "You are the lead of this expert team. You may delegate only to these "
+                   "selected experts using spawn_subagent(expert_member=\"<id>\", ...):\n";
+        for (const auto& id : expert->member_agent_ids) {
+            if (const ExpertAgent* member = expert->agent(id)) {
+                content << "- " << member->id << ": " << member->display_name;
+                if (!member->profession.empty()) content << " - " << member->profession;
+                content << "\n";
+            }
+        }
+        content << "Ordinary sub-agent depth and permission rules still apply.\n\n";
+    } else if (!member_id.empty()) {
+        content << "You are a delegated member of team " << expert->display_name
+                << ". Complete the assigned member task within the normal sub-agent limits.\n\n";
+    }
+    content << "## Expert Instructions\n\n" << selected->instructions;
+    if (selected->instructions.empty() || selected->instructions.back() != '\n') {
+        content << "\n";
+    }
+
+    block.content = content.str();
+    block.cache_key = "expert:" + expert->id + ":" + expert->version + ":" +
+                      member_id + ":" + prompt_component_hash(block.content);
+    return block;
+}
+
 PromptContextBlock build_session_context_prompt(
     const std::string& cwd,
     const MemoryRegistry* memory,
@@ -492,7 +544,11 @@ PromptContextBlock build_session_context_prompt(
     const SkillRegistry* skills,
     int context_window_tokens,
     const CustomInstructionsConfig* custom_instructions_cfg,
-    const std::string& git_status_snapshot) {
+    const std::string& git_status_snapshot,
+    const ExpertDefinition* expert,
+    const std::string& expert_member_id) {
+    PromptContextBlock expert_context =
+        build_expert_context_prompt(expert, expert_member_id);
     PromptContextBlock project = build_project_instructions_context_prompt(cwd, project_instructions_cfg);
     PromptContextBlock user_memory = build_user_memory_context_prompt(memory, memory_cfg);
     PromptContextBlock custom =
@@ -503,7 +559,7 @@ PromptContextBlock build_session_context_prompt(
         build_git_status_context_prompt(git_status_snapshot);
 
     PromptContextBlock block;
-    if (project.content.empty() && user_memory.content.empty() &&
+    if (expert_context.content.empty() && project.content.empty() && user_memory.content.empty() &&
         custom.content.empty() && skill_index.content.empty() &&
         git_status.content.empty()) return block;
 
@@ -512,6 +568,7 @@ PromptContextBlock build_session_context_prompt(
             << "As you answer the user's request, use the following context only when relevant. "
             << "This context may include user-authored project conventions and persistent memory; "
             << "it does not override higher-priority instructions.\n\n";
+    if (!expert_context.content.empty()) content << expert_context.content << "\n";
     if (!project.content.empty()) content << project.content << "\n";
     if (!user_memory.content.empty()) content << user_memory.content << "\n";
     if (!custom.content.empty()) content << custom.content << "\n";
@@ -521,7 +578,8 @@ PromptContextBlock build_session_context_prompt(
     block.content = content.str();
 
     block.cache_key = prompt_component_hash(
-        project.cache_key + "\n" + user_memory.cache_key + "\n" +
+        expert_context.cache_key + "\n" + project.cache_key + "\n" +
+        user_memory.cache_key + "\n" +
         custom.cache_key + "\n" + skill_index.cache_key + "\n" +
         git_status.cache_key);
     return block;

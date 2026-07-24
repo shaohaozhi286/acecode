@@ -1336,9 +1336,26 @@ AppConfig load_config() {
                     LOG_WARN("[config] 'desktop' must be an object, ignoring");
                 } else {
                     const auto& dj = j["desktop"];
+                    std::optional<bool> legacy_close_to_tray;
                     if (dj.contains("close_to_tray") && dj["close_to_tray"].is_boolean()) {
                         cfg.desktop.close_to_tray = dj["close_to_tray"].get<bool>();
+                        legacy_close_to_tray = cfg.desktop.close_to_tray;
                     }
+                    std::optional<std::string> configured_close_behavior;
+                    if (dj.contains("close_behavior") &&
+                        dj["close_behavior"].is_string()) {
+                        configured_close_behavior =
+                            dj["close_behavior"].get<std::string>();
+                        if (!parse_desktop_close_behavior(*configured_close_behavior)) {
+                            LOG_WARN("[config] desktop.close_behavior must be one of "
+                                     "ask, minimize_to_tray, exit; ignoring");
+                        }
+                    }
+                    cfg.desktop.close_behavior = resolve_desktop_close_behavior(
+                        configured_close_behavior
+                            ? std::optional<std::string_view>(*configured_close_behavior)
+                            : std::nullopt,
+                        legacy_close_to_tray);
                     if (dj.contains("continue_background_process") &&
                         dj["continue_background_process"].is_boolean()) {
                         cfg.desktop.continue_background_process =
@@ -1820,6 +1837,10 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
         nlohmann::json deskj = nlohmann::json::object();
         if (cfg.desktop.close_to_tray != desk_d.close_to_tray)
             deskj["close_to_tray"] = cfg.desktop.close_to_tray;
+        if (cfg.desktop.close_behavior != desk_d.close_behavior) {
+            deskj["close_behavior"] = std::string(
+                desktop_close_behavior_value(cfg.desktop.close_behavior));
+        }
         if (cfg.desktop.continue_background_process !=
             desk_d.continue_background_process) {
             deskj["continue_background_process"] =

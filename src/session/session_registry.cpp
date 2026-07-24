@@ -34,6 +34,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -719,12 +720,20 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->cwd = opts.cwd.empty() ? deps_.cwd : opts.cwd;
     entry->subagent_depth = opts.subagent_depth;
     entry->parent_session_id = opts.parent_session_id;
+    entry->expert_id = opts.expert_id;
+    entry->expert_member_id = opts.expert_member_id;
     entry->loop_execution = opts.loop_execution;
     entry->loop_id = opts.loop_id;
     entry->loop_run_id = opts.loop_run_id;
     if (resumed_meta && !resumed_meta->parent_session_id.empty()) {
         // resume 路径:子会话身份从持久化 meta 恢复,深度限制随之生效。
         entry->parent_session_id = resumed_meta->parent_session_id;
+    }
+    if (resumed_meta) {
+        if (entry->expert_id.empty()) entry->expert_id = resumed_meta->expert_id;
+        if (entry->expert_member_id.empty()) {
+            entry->expert_member_id = resumed_meta->expert_member_id;
+        }
     }
     if (!entry->parent_session_id.empty() && entry->subagent_depth < 1) {
         entry->subagent_depth = 1;
@@ -748,9 +757,37 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->model_state = resolved_model.state;
     entry->provider_slot = std::make_shared<SessionEntry::ProviderSlot>();
     entry->provider_slot->provider = std::move(resolved_model.provider);
+    if (!entry->expert_id.empty()) {
+        if (deps_.expert_registry) {
+            entry->expert = deps_.expert_registry->find(entry->cwd, entry->expert_id);
+        }
+        if (!entry->expert_member_id.empty() &&
+            (!entry->expert ||
+             !entry->expert->is_declared_member(entry->expert_member_id))) {
+            entry->expert.reset();
+        }
+        if (!entry->expert) {
+            entry->expert_missing = true;
+            if (!resumed_meta) {
+                throw std::invalid_argument("unknown or invalid expert component: " +
+                                            entry->expert_id);
+            }
+        }
+    } else if (!entry->expert_member_id.empty()) {
+        entry->expert_missing = true;
+        if (!resumed_meta) {
+            throw std::invalid_argument(
+                "expert member requires a team expert binding");
+        }
+    }
     if (deps_.config) {
         entry->skill_registry = std::make_unique<SkillRegistry>();
-        initialize_skill_registry(*entry->skill_registry, *deps_.config, entry->cwd);
+        const std::vector<std::filesystem::path> expert_skill_roots =
+            entry->expert
+                ? entry->expert->selected_skill_roots(entry->expert_member_id)
+                          : std::vector<std::filesystem::path>{};
+        initialize_skill_registry(*entry->skill_registry, *deps_.config,
+                                  entry->cwd, expert_skill_roots);
     }
 
     // SessionManager
@@ -765,6 +802,10 @@ SessionRegistry::make_entry_locked(const std::string& id,
     if (!entry->parent_session_id.empty()) {
         // 子会话身份写进 meta(lazy:首条消息落盘时随初始 meta 一起写)。
         entry->sm->set_parent_session_id(entry->parent_session_id);
+    }
+    if (!entry->expert_id.empty()) {
+        entry->sm->set_expert_binding(entry->expert_id,
+                                      entry->expert_member_id);
     }
     if (opts.loop_execution) {
         entry->sm->set_loop_origin(opts.loop_id, opts.loop_run_id);
@@ -879,6 +920,8 @@ SessionRegistry::make_entry_locked(const std::string& id,
     entry->loop->set_memory_config(deps_.memory_cfg);
     entry->loop->set_project_instructions_config(deps_.project_instructions_cfg);
     entry->loop->set_custom_instructions_config(deps_.custom_instructions_cfg);
+    entry->loop->set_expert_context(entry->expert ? &*entry->expert : nullptr,
+                                    entry->expert_member_id);
     if (deps_.config) {
         entry->loop->set_git_context_config(&deps_.config->git_context);
     }
@@ -969,6 +1012,8 @@ bool SessionRegistry::resume(const std::string& id, const SessionOptions& opts) 
     // web resume 不传这两个字段,行为不变。
     entry_opts.model_name = resolved.model_name;
     entry_opts.permission_mode = resolved.permission_mode;
+    entry_opts.expert_id = meta.expert_id;
+    entry_opts.expert_member_id = meta.expert_member_id;
     auto entry = make_entry_locked(id, entry_opts, &meta);
     auto messages = entry->sm->resume_session(id);
     if (!entry->sm->last_error().empty()) {
@@ -1448,6 +1493,14 @@ std::vector<SessionInfo> SessionRegistry::list_active() const {
         info.active = true;
         info.no_workspace = entry->no_workspace;
         info.parent_session_id = entry->parent_session_id;
+        info.expert_id = entry->expert_id;
+        info.expert_member_id = entry->expert_member_id;
+        info.expert_missing = entry->expert_missing;
+        if (entry->expert) {
+            info.expert_display_name = entry->expert->display_name;
+            info.expert_type = to_string(entry->expert->type);
+            info.expert_source = entry->expert->source;
+        }
         if (entry->loop) {
             info.busy = entry->loop->is_busy();
             info.active_turn_id = entry->loop->active_turn_id();

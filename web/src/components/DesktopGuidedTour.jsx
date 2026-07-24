@@ -75,7 +75,7 @@ export function DesktopGuidedTour({ run, hasModel, onDismiss, onAbort }) {
     dismissKeyAction: false,
     overlayClickAction: false,
     overlayColor: 'rgba(0, 0, 0, 0.58)',
-    primaryColor: '#2563eb',
+    primaryColor: 'var(--ace-accent)',
     scrollDuration: reducedMotion ? 0 : 260,
     scrollOffset: 12,
     showProgress: true,

@@ -232,6 +232,12 @@ void SessionStorage::write_meta(const std::string& meta_path, const SessionMeta&
     if (!meta.parent_session_id.empty()) {
         j["parent_session_id"] = meta.parent_session_id;
     }
+    if (!meta.expert_id.empty()) {
+        j["expert_id"] = meta.expert_id;
+        if (!meta.expert_member_id.empty()) {
+            j["expert_member_id"] = meta.expert_member_id;
+        }
+    }
     if (!meta.loop_id.empty()) {
         j["loop_execution"] = {
             {"loop_id", meta.loop_id},
@@ -304,6 +310,8 @@ SessionMeta SessionStorage::read_meta(const std::string& meta_path) {
         meta.forked_from     = j.value("forked_from",     std::string{});
         meta.fork_message_id = j.value("fork_message_id", std::string{});
         meta.parent_session_id = j.value("parent_session_id", std::string{});
+        meta.expert_id = j.value("expert_id", std::string{});
+        meta.expert_member_id = j.value("expert_member_id", std::string{});
         if (j.contains("loop_execution") && j["loop_execution"].is_object()) {
             const auto& loop = j["loop_execution"];
             meta.loop_id = loop.value("loop_id", std::string{});

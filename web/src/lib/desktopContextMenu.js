@@ -1,4 +1,8 @@
 import { normalizeTreePath } from './fileTreeChangeStatus.js';
+import {
+  MERMAID_EXPORT_TARGET_SELECTOR,
+  mermaidExportTargetFromElement,
+} from './mermaidExport.js';
 
 export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   OPEN_IN_EXPLORER: 'open_in_explorer',
@@ -36,6 +40,9 @@ export const DESKTOP_CONTEXT_ACTIONS = Object.freeze({
   COPY_PREVIEW_TEXT: 'copy_preview_text',
   COPY_PREVIEW_METADATA: 'copy_preview_metadata',
   COPY_PREVIEW_IMAGE: 'copy_preview_image',
+  EXPORT_MERMAID_PNG: 'export_mermaid_png',
+  EXPORT_MERMAID_SVG: 'export_mermaid_svg',
+  EXPORT_MERMAID_SOURCE: 'export_mermaid_source',
   COPY_FILE_DIFF: 'copy_file_diff',
   COPY_ALL_DIFFS: 'copy_all_diffs',
   LOCATE_IN_FILE_TREE: 'locate_in_file_tree',
@@ -70,6 +77,7 @@ export const REVIEW_TARGET_SELECTOR = '[data-desktop-review-kind]';
 export const MESSAGE_TARGET_SELECTOR = '[data-desktop-message-role]';
 export const TOOL_TARGET_SELECTOR = '[data-desktop-tool-id]';
 export const ATTACHMENT_TARGET_SELECTOR = '[data-desktop-attachment-id]';
+export const MERMAID_TARGET_SELECTOR = MERMAID_EXPORT_TARGET_SELECTOR;
 
 export const SESSION_PIN_TOGGLE_EVENT = 'acecode:session-pin-toggle';
 export const DESKTOP_CONTEXT_ACTION_EVENT = 'acecode:desktop-context-action';
@@ -127,6 +135,10 @@ export function contextMenuOpenDelay({ hasVisibleMenu = false, hasPendingMenu = 
   return hasVisibleMenu || hasPendingMenu ? CONTEXT_MENU_REOPEN_DELAY_MS : 0;
 }
 
+export function shouldUseCustomContextMenu({ desktop = false, mermaidTarget = null } = {}) {
+  return !!desktop || !!mermaidTarget;
+}
+
 export function withMenuSeparators(items = []) {
   let lastGroup = '';
   return items.map((item, index) => {
@@ -152,9 +164,17 @@ export function buildDesktopContextMenuItems({
   messageTarget = null,
   toolTarget = null,
   attachmentTarget = null,
+  mermaidTarget = null,
   previewTabTarget = null,
 } = {}) {
   const items = [];
+
+  if (!editable && mermaidTarget) {
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_PNG, mermaidTarget, { group: GROUPS.CONTENT });
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SVG, mermaidTarget, { group: GROUPS.CONTENT });
+    addAction(items, DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SOURCE, mermaidTarget, { group: GROUPS.CONTENT });
+    return withMenuSeparators(items);
+  }
 
   if (!editable && previewTabTarget) {
     addAction(items, DESKTOP_CONTEXT_ACTIONS.CLOSE_PREVIEW_TAB, previewTabTarget, { group: GROUPS.OBJECT });
@@ -228,6 +248,12 @@ export function buildDesktopContextMenuItems({
         addAction(items, fileTarget.expanded ? DESKTOP_CONTEXT_ACTIONS.COLLAPSE_DIRECTORY : DESKTOP_CONTEXT_ACTIONS.EXPAND_DIRECTORY, fileTarget, { group: GROUPS.FILE });
       } else {
         addAction(items, DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE, fileTarget, { group: GROUPS.FILE });
+        addAction(
+          items,
+          DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER,
+          { path: fileTarget.absolutePath, kind: 'file' },
+          { group: GROUPS.FILE, enabled: !!fileTarget.absolutePath },
+        );
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH, fileTarget, { group: GROUPS.FILE, enabled: !!fileTarget.relativePath });
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_ABSOLUTE_PATH, fileTarget, { group: GROUPS.FILE, enabled: !!fileTarget.absolutePath });
         addAction(items, DESKTOP_CONTEXT_ACTIONS.LOCATE_FILE, fileTarget, { group: GROUPS.FILE, enabled: !!fileTarget.locatePath });
@@ -265,6 +291,15 @@ export function buildDesktopContextMenuItems({
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF, reviewTarget, { group: GROUPS.REVIEW });
         addAction(items, DESKTOP_CONTEXT_ACTIONS.COPY_RELATIVE_PATH, reviewTarget, { group: GROUPS.REVIEW, enabled: !!reviewTarget.file });
         addAction(items, DESKTOP_CONTEXT_ACTIONS.PREVIEW_FILE, reviewTarget, { group: GROUPS.REVIEW, enabled: !!reviewTarget.file });
+        addAction(
+          items,
+          DESKTOP_CONTEXT_ACTIONS.OPEN_IN_EXPLORER,
+          { path: reviewTarget.absolutePath, kind: 'file' },
+          {
+            group: GROUPS.REVIEW,
+            enabled: !!reviewTarget.absolutePath && reviewTarget.canReveal !== false,
+          },
+        );
         addAction(items, DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE, reviewTarget, { group: GROUPS.REVIEW, enabled: !!reviewTarget.file });
       }
     }
@@ -431,6 +466,8 @@ export function reviewTargetFromElement(target) {
     type: 'review',
     kind,
     file: getAttr(el, 'data-desktop-review-file', 'desktopReviewFile'),
+    absolutePath: getAttr(el, 'data-desktop-review-absolute-path', 'desktopReviewAbsolutePath'),
+    canReveal: getAttr(el, 'data-desktop-review-can-reveal', 'desktopReviewCanReveal') !== 'false',
     canRefresh: !!closest(target, '[data-desktop-review-refresh="true"]'),
   };
 }
@@ -484,6 +521,10 @@ export function attachmentTargetFromElement(target) {
   };
 }
 
+export function mermaidTargetFromElement(target) {
+  return mermaidExportTargetFromElement(target);
+}
+
 export function contextTargetsFromElement(target) {
   return {
     openInExplorerTarget: openInExplorerTargetFromElement(target),
@@ -496,6 +537,7 @@ export function contextTargetsFromElement(target) {
     messageTarget: messageTargetFromElement(target),
     toolTarget: toolTargetFromElement(target),
     attachmentTarget: attachmentTargetFromElement(target),
+    mermaidTarget: mermaidTargetFromElement(target),
   };
 }
 

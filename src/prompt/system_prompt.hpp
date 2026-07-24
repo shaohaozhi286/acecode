@@ -8,6 +8,7 @@
 namespace acecode {
 
 class SkillRegistry;
+struct ExpertDefinition;
 class MemoryRegistry;
 struct ProjectInstructionsConfig;
 struct CustomInstructionsConfig;
@@ -81,6 +82,10 @@ PromptContextBlock build_skills_index_context_prompt(
 PromptContextBlock build_git_status_context_prompt(
     const std::string& snapshot_text);
 
+PromptContextBlock build_expert_context_prompt(
+    const ExpertDefinition* expert,
+    const std::string& member_id = std::string());
+
 PromptContextBlock build_session_context_prompt(
     const std::string& cwd,
     const MemoryRegistry* memory,
@@ -89,7 +94,9 @@ PromptContextBlock build_session_context_prompt(
     const SkillRegistry* skills = nullptr,
     int context_window_tokens = 0,
     const CustomInstructionsConfig* custom_instructions_cfg = nullptr,
-    const std::string& git_status_snapshot = std::string());
+    const std::string& git_status_snapshot = std::string(),
+    const ExpertDefinition* expert = nullptr,
+    const std::string& expert_member_id = std::string());
 
 // Build dynamic request-local context. This is sent near the end of the
 // messages array for the current provider call only; it must not be persisted

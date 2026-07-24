@@ -32,6 +32,61 @@ const samples = {
   sequence: 'sequenceDiagram\nAlice->>Bob: Hello\nBob-->>Alice: Hi',
 };
 
+const reportedLabelBreakFlowchart = [
+  'graph TB',
+  '  RD[std::random_device<br/>真随机种子] --> MT[std::mt19937<br/>梅森旋转算法]',
+  '  MT --> UNI[std::uniform_int_distribution<br/>均匀分布整数]',
+].join('\n');
+
+const reportedStyledHttpFlowchart = [
+  'flowchart LR',
+  '    U[🧑 用户<br/>点击按钮] --> B[🌐 浏览器<br/>Chrome / Firefox]',
+  '    B --> D[📡 DNS 解析<br/>域名 → IP]',
+  '    D --> C[🔗 TCP 三次握手<br/>SYN → SYN-ACK → ACK]',
+  '    C --> T[🔒 TLS 握手<br/>证书验证 + 密钥交换]',
+  '    T --> L[⚖️ 负载均衡<br/>Nginx / HAProxy]',
+  '    L --> W1[🖥️ Web 服务器 1]',
+  '    L --> W2[🖥️ Web 服务器 2]',
+  '    L --> W3[🖥️ Web 服务器 3]',
+  '    W1 --> A[📋 API 网关<br/>路由 / 限流 / 鉴权]',
+  '    A --> S[🧠 应用服务<br/>业务逻辑]',
+  '    S --> M[🗄️ 缓存层<br/>Redis]',
+  '    S --> DB[💾 数据库<br/>MySQL / PostgreSQL]',
+  '    S --> Q[📤 消息队列<br/>Kafka / RabbitMQ]',
+  '    M --> S',
+  '    DB --> S',
+  '    Q --> S',
+  '    S --> R[JSON 响应]',
+  '    R --> U',
+  '',
+  '    subgraph 客户端[客户端 Client]',
+  '        U',
+  '        B',
+  '        D',
+  '    end',
+  '',
+  '    subgraph 传输[传输层 Transport]',
+  '        C',
+  '        T',
+  '    end',
+  '',
+  '    subgraph 服务端[服务端 Server]',
+  '        L',
+  '        W1',
+  '        W2',
+  '        W3',
+  '        A',
+  '        S',
+  '        M',
+  '        DB',
+  '        Q',
+  '    end',
+  '',
+  '    style 客户端 fill:#e1f5fe,stroke:#0288d1',
+  '    style 传输 fill:#fff3e0,stroke:#f57c00',
+  '    style 服务端 fill:#e8f5e9,stroke:#388e3c',
+].join('\n');
+
 const completeMermaid = [
   '```MerMaid theme=dark',
   samples.flowchart,
@@ -79,18 +134,90 @@ await test('source gate accepts exactly the intended five Mermaid families', () 
   assert.equal(inspectMermaidSource('gitGraph\ncommit').reason, 'unsupported-family');
 });
 
-await test('source gate rejects directives, active syntax, styling, HTML, and resources', () => {
+await test('source gate accepts only attribute-free Mermaid label line breaks', () => {
+  for (const lineBreak of ['<br>', '<br/>', '<br />', '<BR/>']) {
+    const source = `flowchart TD\nA[first${lineBreak}second] --> B`;
+    assert.deepEqual(inspectMermaidSource(source), {
+      ok: true,
+      family: 'flowchart',
+      source,
+    });
+  }
+
+  assert.deepEqual(inspectMermaidSource(reportedLabelBreakFlowchart), {
+    ok: true,
+    family: 'flowchart',
+    source: reportedLabelBreakFlowchart,
+  });
+
+  const unsafeHtml = [
+    'flowchart TD\nA[first<br class="x">second] --> B',
+    'flowchart TD\nA[first<br onclick="x">second] --> B',
+    'flowchart TD\nA[first<br/><img src=x>second] --> B',
+    'flowchart TD\nA[first<script>second</script>] --> B',
+    'flowchart TD\nA[first</br>second] --> B',
+    'flowchart TD\nA[first&lt;br&gt;second] --> B',
+  ];
+  for (const source of unsafeHtml) {
+    assert.equal(inspectMermaidSource(source).reason, 'html', source);
+  }
+});
+
+await test('source gate accepts official static Mermaid styling unchanged', () => {
+  const reusableStyles = [
+    'flowchart TD',
+    'A:::hot --> B',
+    'classDef hot fill:#f00,stroke:#333',
+    'class B hot',
+    'cssClass A hot',
+    'linkStyle 0 stroke:#00f,stroke-width:2px',
+    'style A color:#111',
+  ].join('\n');
+
+  for (const source of [reportedStyledHttpFlowchart, reusableStyles]) {
+    assert.deepEqual(inspectMermaidSource(source), {
+      ok: true,
+      family: 'flowchart',
+      source,
+    });
+  }
+});
+
+await test('source gate rejects interaction and unsafe CSS before Mermaid', () => {
+  const interactive = [
+    'flowchart TD\nA --> B\nclick A callback',
+    'flowchart TD\nA --> B\nhref A target',
+    'flowchart TD\nA --> B\ncall A handler',
+    'sequenceDiagram\nlinks Alice: {"Home": "/home"}',
+  ];
+  for (const source of interactive) {
+    assert.equal(inspectMermaidSource(source).reason, 'interactive', source);
+  }
+
+  const unsafeStyles = [
+    'flowchart TD\nA --> B\nstyle A width:expression(alert(1))',
+    'flowchart TD\nA --> B\nstyle A behavior:unsafe',
+    'flowchart TD\nA --> B\nstyle A -moz-binding:none',
+    'flowchart TD\nA --> B\nclassDef hot @import "theme.css"',
+    'flowchart TD\nA --> B\nclassDef hot @font-face',
+  ];
+  for (const source of unsafeStyles) {
+    assert.equal(inspectMermaidSource(source).reason, 'unsafe-style', source);
+  }
+  assert.equal(
+    inspectMermaidSource('flowchart TD\nA --> B\nstyle A fill:url(#paint)').reason,
+    'external-resource',
+  );
+});
+
+await test('source gate rejects directives, active syntax, unsafe HTML, and resources', () => {
   const rejected = [
     '---\nconfig:\n  theme: dark\n---\nflowchart TD\nA --> B',
     '%%{init: {"theme": "dark"}}%%\nflowchart TD\nA --> B',
     'flowchart TD\nA@{ img: "https://example.test/x.png" }',
     'flowchart TD\nA[<img src=x>] --> B',
     'flowchart TD\nA --> B\nclick A "https://example.test"',
-    'flowchart TD\nA --> B\nclassDef red fill:#f00',
-    'flowchart TD\nA --> B\nclass A red',
-    'flowchart TD\nA:::red --> B',
     'flowchart TD\nA[$$x^2$$] --> B',
-    'sequenceDiagram\nlinks Alice: {"Home": "/home"}',
     'sequenceDiagram\nAlice->>Bob: ![image](asset.png)',
   ];
   for (const source of rejected) assert.equal(inspectMermaidSource(source).ok, false, source);
@@ -152,6 +279,52 @@ await test('SVG sanitizer fails closed on active markup, foreign resources, and 
   assert.equal(sanitize(safeSvg.replace('<rect ', '<rect onload="alert(1)" ')), null);
   assert.equal(sanitize(safeSvg.replace('url(#arrow)', 'url(https://example.test/a.svg#arrow)')), null);
   assert.equal(sanitize(safeSvg.replace('0 0 160 80', '0 0 40000 80')), null);
+});
+
+await test('render adapter submits safe label breaks and gates other HTML before Mermaid', async () => {
+  const calls = [];
+  const runtime = {
+    initialize() { calls.push(['initialize']); },
+    async parse(source) { calls.push(['parse', source]); return true; },
+    async render(id, source) { calls.push(['render', id, source]); return { svg: safeSvg }; },
+  };
+  const render = createMermaidRenderAdapter({
+    runtime,
+    DOMParserType: DOMParser,
+    XMLSerializerType: XMLSerializer,
+  });
+
+  const result = await render(reportedLabelBreakFlowchart, 'light');
+  assert.equal(result.width, 160);
+  assert.equal(calls.find((call) => call[0] === 'parse')[1], reportedLabelBreakFlowchart);
+  assert.equal(calls.find((call) => call[0] === 'render')[2], reportedLabelBreakFlowchart);
+
+  const before = calls.length;
+  assert.equal(await render('flowchart TD\nA[safe<br/><img src=x>unsafe] --> B', 'light'), null);
+  assert.equal(calls.length, before);
+});
+
+await test('render adapter submits the exact styled HTTP flowchart and gates unsafe styles', async () => {
+  const calls = [];
+  const runtime = {
+    initialize() { calls.push(['initialize']); },
+    async parse(source) { calls.push(['parse', source]); return true; },
+    async render(id, source) { calls.push(['render', id, source]); return { svg: safeSvg }; },
+  };
+  const render = createMermaidRenderAdapter({
+    runtime,
+    DOMParserType: DOMParser,
+    XMLSerializerType: XMLSerializer,
+  });
+
+  const result = await render(reportedStyledHttpFlowchart, 'light');
+  assert.equal(result.width, 160);
+  assert.equal(calls.find((call) => call[0] === 'parse')[1], reportedStyledHttpFlowchart);
+  assert.equal(calls.find((call) => call[0] === 'render')[2], reportedStyledHttpFlowchart);
+
+  const before = calls.length;
+  assert.equal(await render('flowchart TD\nA --> B\nstyle A behavior:unsafe', 'light'), null);
+  assert.equal(calls.length, before);
 });
 
 await test('serialized render adapter gates before Mermaid and preserves fallback on failure', async () => {

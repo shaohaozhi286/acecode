@@ -49,3 +49,20 @@ export function buildDesktopFeedbackPayload({ feedbackText = '', selectedSession
   }
   return payload;
 }
+
+export function buildCurrentSessionDesktopFeedbackPayload({
+  feedbackText = '',
+  sessionId = '',
+  workspaceHash = '',
+  noWorkspace = false,
+} = {}) {
+  const id = String(sessionId || '').trim();
+  if (!id) return null;
+  return buildDesktopFeedbackPayload({
+    feedbackText,
+    selectedSession: {
+      id,
+      workspace_hash: noWorkspace ? '' : String(workspaceHash || '').trim(),
+    },
+  });
+}

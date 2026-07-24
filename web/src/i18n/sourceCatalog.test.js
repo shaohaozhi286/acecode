@@ -148,7 +148,7 @@ const moduleScopeFixtures = [
   },
   {
     file: 'lib/sidebarNavigation.js',
-    copy: ['新建任务', '循环任务', '搜索任务', '置顶任务', '任务', '工作区', 'MCP 服务器', '模型', '技能'],
+    copy: ['新建任务', '循环任务', '搜索任务', '置顶任务', '任务', '工作区', 'MCP 服务器', '技能', '专家组件'],
   },
   {
     file: 'lib/permissionMode.js',
@@ -158,7 +158,10 @@ const moduleScopeFixtures = [
     file: 'lib/settingsNavigation.js',
     copy: ['个人', '常规', '外观', '配置', '个性化', '使用情况', '集成', '连接器', '编码', '工具', '钩子', '已归档', '已归档会话', '支持', '问题反馈', '关于'],
   },
-  { file: 'components/SettingsPage.jsx', copy: ['小', '中', '大'] },
+  {
+    file: 'components/SettingsPage.jsx',
+    copy: ['蓝色', '橙色', '暗黑模式', '小', '中', '大'],
+  },
   { file: 'components/SidePanel.jsx', copy: ['变更'] },
 ];
 

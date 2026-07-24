@@ -23,6 +23,7 @@
 #include "config/saved_models.hpp"
 #include "permissions.hpp"
 #include "desktop/workspace_registry.hpp"
+#include "experts/expert_registry.hpp"
 #include "hooks/hook_manager.hpp"
 #include "loop/loop_store.hpp"
 #include "provider/cwd_model_override.hpp"
@@ -299,6 +300,7 @@ struct WebServerFixture {
     acecode::WebConfig web_cfg;
     acecode::DaemonConfig daemon_cfg;
     std::unique_ptr<acecode::desktop::WorkspaceRegistry> workspace_registry;
+    std::unique_ptr<acecode::ExpertRegistry> expert_registry;
 
     std::unique_ptr<acecode::SessionRegistry> registry;
     std::unique_ptr<acecode::LocalSessionClient> client;
@@ -357,6 +359,7 @@ struct WebServerFixture {
         std::filesystem::create_directories(feedback_dir);
         state_file_path = tmp_dir / "state.json";
         acecode::set_state_file_path_for_test(state_file_path.string());
+        expert_registry = std::make_unique<acecode::ExpertRegistry>(tmp_dir / "experts");
         cwd = cwd_dir.string();
         workspace_registry = std::make_unique<acecode::desktop::WorkspaceRegistry>();
         if (register_default_workspace) {
@@ -374,6 +377,7 @@ struct WebServerFixture {
         deps.cwd = cwd;
         deps.no_workspace_cache_root = no_workspace_cache_root.string();
         deps.config = &cfg;
+        deps.expert_registry = expert_registry.get();
         deps.template_permissions = &template_perm;
         registry = std::make_unique<acecode::SessionRegistry>(std::move(deps));
         client = std::make_unique<acecode::LocalSessionClient>(*registry);
@@ -401,6 +405,7 @@ struct WebServerFixture {
                 std::chrono::system_clock::now().time_since_epoch()).count();
         wdeps.session_client = client.get();
         wdeps.session_registry = registry.get();
+        wdeps.expert_registry = expert_registry.get();
         wdeps.hook_manager = hook_manager.get();
         wdeps.projects_dir = projects_dir.string();
         wdeps.workspace_registry = workspace_registry.get();
@@ -2302,6 +2307,64 @@ TEST(WebServerHttp, FilesEndpointAllowsRegisteredWorkspaceCwd) {
     EXPECT_EQ(content.text, "hello from registered workspace");
 }
 
+// 无工作区 session 的 cwd 不下发给前端。变更记录中的绝对文件路径会被拆成
+// containing directory + basename；预览端点应按活动 session 根授权，但不能
+// 顺带开放目录树、越界文件或已经销毁的 session cache。
+TEST(WebServerHttp, FilePreviewEndpointsAllowOnlyActiveNoWorkspaceArtifacts) {
+    WebServerFixture fx;
+
+    auto created = cpr::Post(cpr::Url{fx.url("/api/sessions")},
+                             cpr::Header{{"Content-Type", "application/json"}},
+                             cpr::Body{R"({"no_workspace":true})"});
+    ASSERT_EQ(created.status_code, 201) << created.text;
+    const auto sid = json::parse(created.text)["session_id"].get<std::string>();
+    const auto session_root = path_from_utf8(
+        acecode::no_workspace_session_cwd(
+            sid, fx.no_workspace_cache_root.string()));
+    const auto output_dir =
+        session_root / "opc-doc" / "outputs" / "00-orchestrator";
+    const auto markdown_path = output_dir / "session-summary.md";
+    const auto image_path = output_dir / "preview.png";
+    write_text(markdown_path, "# Session summary\n");
+    write_text(image_path, "preview-image-bytes");
+
+    const auto preview_cwd = acecode::path_to_utf8(output_dir);
+    auto content = cpr::Get(
+        cpr::Url{fx.url("/api/files/content")},
+        cpr::Parameters{{"cwd", preview_cwd}, {"path", "session-summary.md"}});
+    ASSERT_EQ(content.status_code, 200) << content.text;
+    EXPECT_EQ(content.text, "# Session summary\n");
+
+    auto blob = cpr::Get(
+        cpr::Url{fx.url("/api/files/blob")},
+        cpr::Parameters{{"cwd", preview_cwd}, {"path", "preview.png"}});
+    ASSERT_EQ(blob.status_code, 200) << blob.text;
+    EXPECT_EQ(blob.text, "preview-image-bytes");
+
+    auto listing = cpr::Get(
+        cpr::Url{fx.url("/api/files")},
+        cpr::Parameters{{"cwd", preview_cwd}, {"path", ""}});
+    ASSERT_EQ(listing.status_code, 400) << listing.text;
+    EXPECT_EQ(json::parse(listing.text)["error"], "unknown workspace");
+
+    const auto outside_path = fx.tmp_dir / "outside.md";
+    write_text(outside_path, "outside");
+    auto escaped = cpr::Get(
+        cpr::Url{fx.url("/api/files/content")},
+        cpr::Parameters{
+            {"cwd", preview_cwd},
+            {"path", acecode::path_to_utf8(outside_path)},
+        });
+    EXPECT_EQ(escaped.status_code, 400) << escaped.text;
+
+    fx.client->destroy_session(sid);
+    auto stale = cpr::Get(
+        cpr::Url{fx.url("/api/files/content")},
+        cpr::Parameters{{"cwd", preview_cwd}, {"path", "session-summary.md"}});
+    ASSERT_EQ(stale.status_code, 400) << stale.text;
+    EXPECT_EQ(json::parse(stale.text)["error"], "unknown workspace");
+}
+
 // 场景:/api/files/blob 除图片外也允许浏览器原生可打开的 PDF,供详情面板内嵌预览。
 TEST(WebServerHttp, FilesBlobEndpointServesPdfPreview) {
     WebServerFixture fx;
@@ -3475,6 +3538,208 @@ TEST(WebServerHttp, ResumeDiskSessionActivatesIt) {
     EXPECT_TRUE(found);
 }
 
+TEST(WebServerHttp, ExpertCrudAndSessionBindingRoundTrip) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+    json draft = {
+        {"id", "code-reviewer"},
+        {"type", "agent"},
+        {"display_name", "Code Reviewer"},
+        {"profession", "Review engineer"},
+        {"description", "Reviews changes before delivery."},
+        {"instructions", "Inspect the change and report concrete risks."},
+        {"quick_prompts", json::array({"Review this change"})},
+    };
+
+    auto created = cpr::Post(
+        cpr::Url{fx.url("/api/experts")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{draft.dump()});
+    ASSERT_EQ(created.status_code, 201) << created.text;
+    auto created_body = json::parse(created.text);
+    EXPECT_EQ(created_body["id"], "code-reviewer");
+    EXPECT_EQ(created_body["source"], "global");
+    EXPECT_TRUE(created_body["managed_global"].get<bool>());
+    ASSERT_TRUE(created_body["agents"].is_array());
+    EXPECT_EQ(created_body["agents"][0]["instructions"],
+              "Inspect the change and report concrete risks.");
+
+    auto listed = cpr::Get(cpr::Url{
+        fx.url("/api/experts?workspace=" + hash)});
+    ASSERT_EQ(listed.status_code, 200) << listed.text;
+    auto listed_body = json::parse(listed.text);
+    ASSERT_EQ(listed_body["experts"].size(), 1);
+    EXPECT_EQ(listed_body["experts"][0]["id"], "code-reviewer");
+    EXPECT_FALSE(listed_body["experts"][0]["agents"][0].contains("instructions"));
+
+    draft["display_name"] = "Updated Reviewer";
+    auto updated = cpr::Put(
+        cpr::Url{fx.url("/api/experts/code-reviewer?workspace=" + hash)},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{draft.dump()});
+    ASSERT_EQ(updated.status_code, 200) << updated.text;
+    EXPECT_EQ(json::parse(updated.text)["display_name"], "Updated Reviewer");
+
+    auto session = cpr::Post(
+        cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{{"expert_id", "code-reviewer"}}.dump()});
+    ASSERT_EQ(session.status_code, 201) << session.text;
+    const auto session_body = json::parse(session.text);
+    EXPECT_EQ(session_body["expert_id"], "code-reviewer");
+    const std::string session_id = session_body.value("id", "");
+    ASSERT_FALSE(session_id.empty());
+
+    auto sessions = cpr::Get(cpr::Url{
+        fx.url("/api/workspaces/" + hash + "/sessions")});
+    ASSERT_EQ(sessions.status_code, 200) << sessions.text;
+    const auto sessions_body = json::parse(sessions.text);
+    auto session_it = std::find_if(sessions_body.begin(), sessions_body.end(),
+        [&](const json& item) { return item.value("id", "") == session_id; });
+    ASSERT_NE(session_it, sessions_body.end());
+    EXPECT_EQ((*session_it)["expert"]["display_name"], "Updated Reviewer");
+    EXPECT_FALSE((*session_it)["expert"]["missing"].get<bool>());
+
+    auto invalid_session = cpr::Post(
+        cpr::Url{fx.url("/api/workspaces/" + hash + "/sessions")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{{"expert_id", "not-installed"}}.dump()});
+    ASSERT_EQ(invalid_session.status_code, 400) << invalid_session.text;
+    EXPECT_EQ(json::parse(invalid_session.text)["error"], "INVALID_EXPERT");
+
+    auto removed = cpr::Delete(cpr::Url{
+        fx.url("/api/experts/code-reviewer?workspace=" + hash)});
+    ASSERT_EQ(removed.status_code, 200) << removed.text;
+    EXPECT_TRUE(json::parse(removed.text)["ok"].get<bool>());
+    EXPECT_FALSE(std::filesystem::exists(fx.expert_registry->global_root() /
+                                         "code-reviewer"));
+}
+
+TEST(WebServerHttp, ExpertTeamsReferenceExistingExpertsThroughApi) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+    const std::string experts_url = "/api/experts?workspace=" + hash;
+
+    auto create_agent = [&](const std::string& id,
+                            const std::string& display_name) {
+        return cpr::Post(
+            cpr::Url{fx.url(experts_url)},
+            cpr::Header{{"Content-Type", "application/json"}},
+            cpr::Body{json{
+                {"id", id},
+                {"type", "agent"},
+                {"display_name", display_name},
+                {"profession", "Delivery"},
+                {"instructions", "Work as " + display_name + "."},
+            }.dump()});
+    };
+    auto reviewer = create_agent("reviewer", "Reviewer");
+    ASSERT_EQ(reviewer.status_code, 201) << reviewer.text;
+    auto tester = create_agent("tester", "Tester");
+    ASSERT_EQ(tester.status_code, 201) << tester.text;
+
+    json team = {
+        {"id", "delivery-team"},
+        {"type", "team"},
+        {"display_name", "Delivery Team"},
+        {"description", "Ship a verified change."},
+        {"lead_expert_id", "reviewer"},
+        {"member_expert_ids", json::array({"tester"})},
+    };
+    auto created = cpr::Post(
+        cpr::Url{fx.url(experts_url)},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{team.dump()});
+    ASSERT_EQ(created.status_code, 201) << created.text;
+    const auto created_body = json::parse(created.text);
+    EXPECT_TRUE(created_body["references_existing_experts"].get<bool>());
+    EXPECT_EQ(created_body["lead_expert_id"], "reviewer");
+    EXPECT_EQ(created_body["member_expert_ids"],
+              json::array({"tester"}));
+    ASSERT_EQ(created_body["agents"].size(), 2u);
+    EXPECT_EQ(created_body["agents"][0]["display_name"], "Reviewer");
+    EXPECT_EQ(created_body["agents"][1]["display_name"], "Tester");
+    EXPECT_FALSE(std::filesystem::exists(
+        fx.expert_registry->global_root() / "delivery-team" / "agents"));
+
+    team["id"] = "missing-team";
+    team["member_expert_ids"] = json::array({"not-installed"});
+    auto missing = cpr::Post(
+        cpr::Url{fx.url(experts_url)},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{team.dump()});
+    ASSERT_EQ(missing.status_code, 400) << missing.text;
+    EXPECT_EQ(json::parse(missing.text)["error"], "CREATE_FAILED");
+
+    team["id"] = "nested-team";
+    team["lead_expert_id"] = "delivery-team";
+    team["member_expert_ids"] = json::array({"reviewer"});
+    auto nested = cpr::Post(
+        cpr::Url{fx.url(experts_url)},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{team.dump()});
+    ASSERT_EQ(nested.status_code, 400) << nested.text;
+    EXPECT_EQ(json::parse(nested.text)["error"], "CREATE_FAILED");
+}
+
+TEST(WebServerHttp, ExpertsRejectInvalidWorkspaceAndWorkspaceMutations) {
+    WebServerFixture fx;
+    const std::string hash = acecode::compute_cwd_hash(fx.cwd);
+
+    auto invalid = cpr::Post(
+        cpr::Url{fx.url("/api/experts")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{{"id", "../escape"},
+                       {"display_name", "Invalid"},
+                       {"instructions", "Do not write this package."}}.dump()});
+    ASSERT_EQ(invalid.status_code, 400) << invalid.text;
+    EXPECT_EQ(json::parse(invalid.text)["error"], "INVALID_EXPERT");
+
+    auto unknown = cpr::Get(cpr::Url{
+        fx.url("/api/experts?workspace=missing-workspace")});
+    ASSERT_EQ(unknown.status_code, 404) << unknown.text;
+    EXPECT_EQ(json::parse(unknown.text)["error"], "UNKNOWN_WORKSPACE");
+
+    const auto package = fx.cwd_dir / ".acecode" / "experts" / "workspace-reviewer";
+    write_text(package / "agents" / "lead.md",
+               "---\nname: lead\n---\n\nUse workspace review rules.\n");
+    write_text(package / "expert.json", json{
+        {"name", "workspace-reviewer"},
+        {"version", "1.0.0"},
+        {"expertType", "agent"},
+        {"displayName", "Workspace Reviewer"},
+        {"agentName", "lead"},
+        {"agents", json::array({json{{"id", "lead"},
+                                      {"path", "agents/lead.md"}}})},
+    }.dump(2));
+
+    auto listed = cpr::Get(cpr::Url{
+        fx.url("/api/experts?workspace=" + hash)});
+    ASSERT_EQ(listed.status_code, 200) << listed.text;
+    const auto listed_body = json::parse(listed.text);
+    ASSERT_EQ(listed_body["experts"].size(), 1);
+    EXPECT_EQ(listed_body["experts"][0]["source"], "workspace");
+    EXPECT_FALSE(listed_body["experts"][0]["managed_global"].get<bool>());
+
+    json replacement = {
+        {"id", "workspace-reviewer"},
+        {"display_name", "Replacement"},
+        {"instructions", "Replacement instructions."},
+    };
+    auto update = cpr::Put(
+        cpr::Url{fx.url("/api/experts/workspace-reviewer?workspace=" + hash)},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{replacement.dump()});
+    ASSERT_EQ(update.status_code, 409) << update.text;
+    EXPECT_EQ(json::parse(update.text)["error"], "WORKSPACE_EXPERT_READ_ONLY");
+
+    auto remove = cpr::Delete(cpr::Url{
+        fx.url("/api/experts/workspace-reviewer?workspace=" + hash)});
+    ASSERT_EQ(remove.status_code, 409) << remove.text;
+    EXPECT_EQ(json::parse(remove.text)["error"], "WORKSPACE_EXPERT_READ_ONLY");
+    EXPECT_TRUE(std::filesystem::is_directory(package));
+}
+
 // 场景: /api/skills 对 daemon workspace 做全量扫描:workspace 项目链下的
 // skill 出现在结果里,带 source="project" 与 enabled=true(设置页技能 tab
 // 的「项目技能」分组依赖它)。全局根扫的是真实用户目录,内容因机器而异,
@@ -4002,6 +4267,51 @@ TEST(WebServerHttp, DesktopFeedbackUploadsSelectedSessionOnly) {
     EXPECT_EQ(metadata["source"], "desktop");
     EXPECT_EQ(metadata["selected_session_id"], sid);
     EXPECT_EQ(metadata["workspace_hash"], acecode::compute_cwd_hash(fx.cwd));
+    std::error_code ec;
+    std::filesystem::remove(received_zip, ec);
+}
+
+TEST(WebServerHttp, DesktopFeedbackMaterializesEmptySelectedSession) {
+    const std::string sid = "20260618-031500-abc0";
+    std::filesystem::path received_zip;
+    LocalUpdateServer upload_server([&](httplib::Server& s) {
+        s.Post("/", [&](const httplib::Request& req, httplib::Response& res) {
+            auto file = req.get_file_value("file");
+            received_zip = std::filesystem::temp_directory_path() /
+                           ("acecode_desktop_feedback_empty_" +
+                            std::to_string(std::chrono::steady_clock::now()
+                                               .time_since_epoch()
+                                               .count()) + ".zip");
+            write_text(received_zip, file.content);
+            res.set_content(R"({"success":true})", "application/json");
+        });
+    });
+
+    WebServerFixture fx;
+    fx.cfg.upgrade.base_url = upload_server.base_url();
+    acecode::SessionMeta meta;
+    meta.id = sid;
+    meta.cwd = fx.cwd;
+    meta.created_at = "2026-06-18T03:15:00Z";
+    meta.updated_at = "2026-06-18T03:15:00Z";
+    acecode::SessionStorage::write_meta(
+        acecode::SessionStorage::meta_path(fx.project_dir, sid), meta);
+    const auto session_jsonl = path_from_utf8(
+        acecode::SessionStorage::session_path(fx.project_dir, sid));
+    ASSERT_FALSE(std::filesystem::exists(session_jsonl));
+
+    auto r = cpr::Post(cpr::Url{fx.url("/api/feedback/desktop")},
+                       cpr::Header{{"Content-Type", "application/json"}},
+                       cpr::Body{json{{"feedback_text", "before first message"},
+                                      {"session_id", sid},
+                                      {"workspace_hash", acecode::compute_cwd_hash(fx.cwd)}}.dump()});
+    ASSERT_EQ(r.status_code, 200) << r.text;
+    auto body = json::parse(r.text);
+    EXPECT_EQ(body["selected_session_id"], sid);
+    EXPECT_TRUE(std::filesystem::is_regular_file(session_jsonl));
+    EXPECT_TRUE(zip_entry_exists(received_zip, "session/" + sid + ".jsonl"));
+    EXPECT_TRUE(read_zip_entry(received_zip, "session/" + sid + ".jsonl").empty());
+
     std::error_code ec;
     std::filesystem::remove(received_zip, ec);
 }

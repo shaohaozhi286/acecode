@@ -93,6 +93,7 @@ function ChangeReviewFileRow({ row, open, selected, cwd, onToggle, onOpenFile })
       data-desktop-review-kind="file"
       data-desktop-review-file={row.path || undefined}
       data-desktop-review-absolute-path={cwd ? joinWorkspacePath(cwd, row.path) : undefined}
+      data-desktop-review-can-reveal={status === 'D' ? 'false' : 'true'}
       data-desktop-review-additions={Number.isFinite(additions) ? String(additions) : undefined}
       data-desktop-review-deletions={Number.isFinite(deletions) ? String(deletions) : undefined}
       className={clsx('ace-change-file-row', selected && 'is-selected')}
@@ -416,6 +417,8 @@ export function ChangeReviewDetails({
               data-review-file-section={row.path}
               data-desktop-review-kind="file"
               data-desktop-review-file={row.path || undefined}
+              data-desktop-review-absolute-path={cwd ? joinWorkspacePath(cwd, row.path) : undefined}
+              data-desktop-review-can-reveal={row.status === 'D' ? 'false' : 'true'}
             >
               <ChangeReviewFileRow
                 row={row}

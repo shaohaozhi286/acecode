@@ -7,7 +7,9 @@ import {
   DESKTOP_CONTEXT_ACTION_EVENT,
   DESKTOP_CONTEXT_ACTIONS,
   SESSION_PIN_TOGGLE_EVENT,
+  shouldUseCustomContextMenu,
 } from '../lib/desktopContextMenu.js';
+import { exportMermaidAsset } from '../lib/mermaidExport.js';
 import { selectionContextFromWindowSelection } from '../lib/selectionChatContext.js';
 import { copyImageToSystemClipboard, copyTextToSystemClipboard } from '../lib/systemClipboard.js';
 import { isDesktopShell, isWebappCompat } from '../lib/desktopShellMode.js';
@@ -54,6 +56,9 @@ const ACTION_LABELS = {
   [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_TEXT]: '复制预览内容',
   [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_METADATA]: '复制预览信息',
   [DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE]: '复制图片',
+  [DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_PNG]: '导出 PNG 图片',
+  [DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SVG]: '导出 SVG',
+  [DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SOURCE]: '导出 Mermaid 源码',
   [DESKTOP_CONTEXT_ACTIONS.COPY_FILE_DIFF]: '复制此文件 diff',
   [DESKTOP_CONTEXT_ACTIONS.COPY_ALL_DIFFS]: '复制全部 diff',
   [DESKTOP_CONTEXT_ACTIONS.LOCATE_IN_FILE_TREE]: '在文件树中定位',
@@ -182,6 +187,16 @@ async function copyTextWithToast(text, label = '已复制') {
   } else {
     toast({ kind: 'err', text: '复制失败:' + (result?.error || '') });
   }
+}
+
+async function exportMermaidWithToast(target, format, label) {
+  const result = await exportMermaidAsset(target, format);
+  if (result?.ok) {
+    toast({ kind: 'ok', text: `已导出 ${label}` });
+  } else {
+    toast({ kind: 'err', text: '导出失败:' + (result?.error || '') });
+  }
+  return result;
 }
 
 export async function copyImageWithToast(target) {
@@ -322,6 +337,15 @@ async function runAction(item, target, rememberedText = '', rememberedSelectionC
     case DESKTOP_CONTEXT_ACTIONS.COPY_PREVIEW_IMAGE:
       await copyImageWithToast(actionTarget);
       break;
+    case DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_PNG:
+      await exportMermaidWithToast(actionTarget, 'png', 'PNG 图片');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SVG:
+      await exportMermaidWithToast(actionTarget, 'svg', 'SVG');
+      break;
+    case DESKTOP_CONTEXT_ACTIONS.EXPORT_MERMAID_SOURCE:
+      await exportMermaidWithToast(actionTarget, 'source', 'Mermaid 源码');
+      break;
     case DESKTOP_CONTEXT_ACTIONS.ADD_SELECTION_CONTEXT:
       if (!dispatchDesktopContextAction(action, actionTarget, {
         selectedText: rememberedText,
@@ -409,8 +433,6 @@ export function DesktopContextMenu() {
   }, [clearReopenTimer, setMenu]);
 
   useEffect(() => {
-    if (!desktop) return undefined;
-
     const rememberSelection = () => {
       const target = document.activeElement;
       const text = selectedTextForTarget(target);
@@ -426,6 +448,15 @@ export function DesktopContextMenu() {
       const rawTarget = event.target;
       if (rawTarget instanceof Element && rawTarget.closest('.ace-console-term')) return;
 
+      const candidateTargets = contextTargetsFromElement(rawTarget);
+      if (!shouldUseCustomContextMenu({
+        desktop,
+        mermaidTarget: candidateTargets.mermaidTarget,
+      })) {
+        close();
+        return;
+      }
+
       event.preventDefault();
       event.stopPropagation();
 
@@ -433,7 +464,7 @@ export function DesktopContextMenu() {
       targetRef.current = target;
       const editableTarget = editableElementFrom(target);
       const editable = !!editableTarget;
-      const contextTargets = editable ? {} : contextTargetsFromElement(target);
+      const contextTargets = editable ? {} : candidateTargets;
       const sessionPinTarget = contextTargets.sessionTarget
         ? {
             sessionId: contextTargets.sessionTarget.sessionId,
@@ -492,7 +523,7 @@ export function DesktopContextMenu() {
     };
   }, [clearReopenTimer, close, desktop, openWithSwitchGap]);
 
-  if (!desktop || !menu) return null;
+  if (!menu) return null;
 
   return (
     <div

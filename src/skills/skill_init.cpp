@@ -96,11 +96,14 @@ std::vector<std::filesystem::path> global_skill_scan_roots(const AppConfig& conf
 
 void initialize_skill_registry(SkillRegistry& skill_registry,
                                  const AppConfig& config,
-                                 const std::string& working_dir) {
+                                 const std::string& working_dir,
+                                 const std::vector<std::filesystem::path>&
+                                     prepended_roots) {
     std::error_code ec;
 
-    std::vector<std::filesystem::path> roots =
-        project_skill_scan_roots(config, working_dir);
+    std::vector<std::filesystem::path> roots = prepended_roots;
+    auto project_roots = project_skill_scan_roots(config, working_dir);
+    for (auto& root : project_roots) roots.emplace_back(std::move(root));
 
     // ~/.acecode/skills 是历史上自动创建的全局根,保持行为不变。
     std::filesystem::path default_acecode_skills_dir =

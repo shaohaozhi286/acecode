@@ -1,5 +1,6 @@
 #pragma once
 
+#include "desktop_close_behavior.hpp"
 #include "saved_models.hpp"
 
 #include <cstddef>
@@ -369,6 +370,9 @@ struct DesktopConfig {
     // Windows 关窗(× / Alt+F4 / aceDesktop_closeWindow)默认隐藏到托盘。
     // false 时回到关窗即退出。macOS 始终将关窗与真正退出分开。
     bool close_to_tray = true;
+    // Windows 关闭窗口时的三态行为。新配置默认询问；显式 legacy
+    // close_to_tray 会在加载时映射为对应的记住选择。
+    DesktopCloseBehavior close_behavior = DesktopCloseBehavior::Ask;
     // Desktop 真正退出后是否保留其管理的后台进程。默认关闭;关窗口不属于退出。
     bool continue_background_process = false;
 };

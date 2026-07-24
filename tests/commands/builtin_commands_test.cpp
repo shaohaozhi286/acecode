@@ -101,6 +101,28 @@ acecode::ChatMessage message(const std::string& role, const std::string& content
     return msg;
 }
 
+acecode::ChatMessage identified_user_message(
+    const std::string& id,
+    const std::string& content) {
+    auto msg = message("user", content);
+    msg.uuid = id;
+    msg.timestamp = "2026-07-23T00:00:00Z";
+    return msg;
+}
+
+void write_text_file(const fs::path& path, const std::string& content) {
+    fs::create_directories(path.parent_path());
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    ofs << content;
+}
+
+std::string read_text_file(const fs::path& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    std::string content;
+    std::getline(ifs, content, '\0');
+    return content;
+}
+
 acecode::ModelProfile model_profile(const std::string& name,
                                     const std::string& model,
                                     int context_window) {
@@ -452,6 +474,122 @@ TEST(BuiltinCommands, TurnBtwAndSideCommandsAreRegistered) {
     EXPECT_TRUE(registry.has_command("turn"));
     EXPECT_TRUE(registry.has_command("btw"));
     EXPECT_TRUE(registry.has_command("side"));
+}
+
+TEST(BuiltinCommands, ForkCommandIsRegisteredAndListedInHelp) {
+    ResumeCommandHarness harness("fork_help");
+
+    ASSERT_TRUE(harness.registry_.has_command("fork"));
+    EXPECT_EQ(harness.registry_.commands().at("fork").description,
+              "Fork from a previous user turn");
+    ASSERT_TRUE(harness.dispatch("/help"));
+    ASSERT_FALSE(harness.state_.conversation.empty());
+    EXPECT_NE(harness.state_.conversation.back().content.find("/fork"),
+              std::string::npos);
+}
+
+TEST(BuiltinCommands, ForkAndRewindOpenTheSameTargetListWithDifferentOperations) {
+    ResumeCommandHarness harness("fork_picker");
+    auto append = [&](const acecode::ChatMessage& msg) {
+        harness.loop_.push_message(msg);
+        harness.sm_.on_message(msg);
+    };
+    append(identified_user_message("u1", "first prompt"));
+    append(message("assistant", "first answer"));
+    append(identified_user_message("u2", "second prompt"));
+
+    ASSERT_TRUE(harness.dispatch("/rewind"));
+    ASSERT_TRUE(harness.state_.rewind_picker_active);
+    EXPECT_EQ(
+        harness.state_.rewind_picker_operation,
+        acecode::TuiState::RewindPickerOperation::Rewind);
+    const auto rewind_items = harness.state_.rewind_items;
+
+    ASSERT_TRUE(harness.dispatch("/fork"));
+    ASSERT_TRUE(harness.state_.rewind_picker_active);
+    EXPECT_EQ(
+        harness.state_.rewind_picker_operation,
+        acecode::TuiState::RewindPickerOperation::Fork);
+    ASSERT_EQ(harness.state_.rewind_items.size(), rewind_items.size());
+    for (size_t i = 0; i < rewind_items.size(); ++i) {
+        EXPECT_EQ(harness.state_.rewind_items[i].message_index,
+                  rewind_items[i].message_index);
+        EXPECT_EQ(harness.state_.rewind_items[i].message_uuid,
+                  rewind_items[i].message_uuid);
+        EXPECT_EQ(harness.state_.rewind_items[i].preview,
+                  rewind_items[i].preview);
+        EXPECT_EQ(harness.state_.rewind_items[i].display,
+                  rewind_items[i].display);
+    }
+
+    EXPECT_TRUE(acecode::TuiState::rewind_target_uses_mode_picker(
+        acecode::TuiState::RewindPickerOperation::Rewind, true));
+    EXPECT_FALSE(acecode::TuiState::rewind_target_uses_mode_picker(
+        acecode::TuiState::RewindPickerOperation::Fork, true));
+    EXPECT_FALSE(acecode::TuiState::rewind_target_uses_mode_picker(
+        acecode::TuiState::RewindPickerOperation::Fork, false));
+}
+
+TEST(BuiltinCommands, ForkCallbackCreatesBeforeTargetBranchWithoutRestoringFiles) {
+    ResumeCommandHarness harness("fork_callback");
+    auto append = [&](const acecode::ChatMessage& msg) {
+        harness.loop_.push_message(msg);
+        harness.sm_.on_message(msg);
+    };
+
+    append(identified_user_message("u1", "first prompt"));
+    append(message("assistant", "first answer"));
+    append(identified_user_message("u2", "change direction"));
+
+    const fs::path tracked = harness.cwd_ / "tracked.txt";
+    write_text_file(tracked, "before\n");
+    harness.sm_.begin_user_turn_checkpoint("u2");
+    harness.sm_.track_file_write_before(tracked.string());
+    write_text_file(tracked, "current\n");
+
+    append(message("assistant", "old branch answer"));
+    const std::string original_session_id =
+        harness.sm_.current_session_id();
+    ASSERT_FALSE(original_session_id.empty());
+
+    ASSERT_TRUE(harness.dispatch("/fork"));
+    ASSERT_TRUE(harness.state_.rewind_picker_active);
+    ASSERT_FALSE(harness.state_.rewind_items.empty());
+    const auto selected = harness.state_.rewind_items.front();
+    EXPECT_EQ(selected.message_uuid, "u2");
+    ASSERT_TRUE(selected.can_restore_code);
+    ASSERT_TRUE(harness.state_.rewind_callback);
+
+    {
+        std::lock_guard<std::mutex> lk(harness.state_.mu);
+        auto callback = harness.state_.rewind_callback;
+        callback(
+            selected,
+            acecode::TuiState::RewindRestoreMode::ConversationOnly);
+    }
+
+    EXPECT_EQ(read_text_file(tracked), "current\n");
+    EXPECT_NE(harness.sm_.current_session_id(), original_session_id);
+    ASSERT_EQ(harness.loop_.messages().size(), 2u);
+    EXPECT_EQ(harness.loop_.messages()[0].content, "first prompt");
+    EXPECT_EQ(harness.loop_.messages()[1].content, "first answer");
+    EXPECT_EQ(harness.state_.input_text, "change direction");
+    EXPECT_EQ(harness.state_.input_cursor,
+              harness.state_.input_text.size());
+    EXPECT_FALSE(harness.state_.is_waiting);
+    ASSERT_FALSE(harness.state_.conversation.empty());
+    EXPECT_NE(
+        harness.state_.conversation.back().content.find(
+            "Conversation forked before:"),
+        std::string::npos);
+
+    const auto project_dir =
+        acecode::SessionStorage::get_project_dir(harness.cwd_.string());
+    const auto original_messages = acecode::SessionStorage::load_messages(
+        acecode::SessionStorage::session_path(
+            project_dir, original_session_id));
+    ASSERT_GE(original_messages.size(), 4u);
+    EXPECT_EQ(original_messages.back().content, "old branch answer");
 }
 
 TEST(BuiltinCommands, DesktopCommandIsRegisteredAndListedInHelp) {

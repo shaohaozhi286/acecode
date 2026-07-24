@@ -35,6 +35,20 @@ run('Git and session details share one review-panel renderer', () => {
   }
 });
 
+run('File tree and Git/non-Git review rows expose shared Explorer reveal metadata', () => {
+  const fileTree = source('SidePanel.jsx');
+  const gitList = source('GitChangesPanel.jsx');
+  const sessionReview = source('ChangeReview.jsx');
+  const sharedDetails = source('ChangeReviewDetails.jsx');
+
+  assert.match(fileTree, /data-desktop-file-absolute-path=\{absolutePath \|\| undefined\}/);
+  assert.match(gitList, /data-desktop-review-absolute-path=\{cwd \? joinWorkspacePath\(cwd, row\.path\) : undefined\}/);
+  assert.match(gitList, /data-desktop-review-can-reveal=\{row\.status === 'D' \? 'false' : 'true'\}/);
+  assert.match(sessionReview, /data-desktop-review-absolute-path=\{cwd \? joinWorkspacePath\(cwd, group\.file\) : undefined\}/);
+  assert.match(sharedDetails, /data-desktop-review-absolute-path=\{cwd \? joinWorkspacePath\(cwd, row\.path\) : undefined\}/);
+  assert.match(sharedDetails, /data-desktop-review-can-reveal=\{(?:status|row\.status) === 'D' \? 'false' : 'true'\}/);
+});
+
 run('Top bar keeps quick actions but has no direct search, new-conversation, or loop buttons', () => {
   const topBar = source('TopBar.jsx');
   assert.doesNotMatch(topBar, /<QuickBtn[^>]*title="新对话"/);

@@ -54,8 +54,10 @@ import { GlobalFindOverlay } from './components/GlobalFindOverlay.jsx';
 import { canOpenConversationFind } from './lib/globalFind.js';
 import { ConsoleDock } from './components/ConsoleDock.jsx';
 import { DesktopGuidedTour } from './components/DesktopGuidedTour.jsx';
+import { DesktopCloseDialog } from './components/DesktopCloseDialog.jsx';
 import { UpdateDialog } from './components/UpdateDialog.jsx';
 import { LoopPage } from './components/LoopPage.jsx';
+import { ExpertComponentsPage } from './components/ExpertComponentsPage.jsx';
 import {
   CONSOLE_DOCK_DEFAULT_HEIGHT,
   clampDockHeight,
@@ -85,6 +87,14 @@ import {
 import { desktopUiMode } from './lib/desktopShellMode.js';
 import { shouldAutoFocusDesktopComposer } from './lib/composerCaretRestore.js';
 import { requestDesktopAppExit, showDesktopAboutDialog } from './lib/desktopAppActions.js';
+import {
+  DESKTOP_CLOSE_BEHAVIORS,
+  getDesktopCloseBehavior,
+  hideDesktopToTray,
+  performDesktopCloseChoice,
+  setDesktopCloseBehavior,
+  subscribeDesktopCloseRequest,
+} from './lib/desktopCloseBehavior.js';
 import {
   desktopUpdateRestartAvailable,
   requestDesktopUpdateRestart,
@@ -139,6 +149,10 @@ export function App() {
   const [consoleCwd, setConsoleCwd] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [settingsNavKey, setSettingsNavKey] = useState('general');
+  const [desktopCloseDialogOpen, setDesktopCloseDialogOpen] = useState(false);
+  const [rememberDesktopCloseChoice, setRememberDesktopCloseChoice] = useState(false);
+  const [desktopCloseBusy, setDesktopCloseBusy] = useState(false);
+  const [desktopTrayAvailable, setDesktopTrayAvailable] = useState(true);
   const [modelProfileRevision, setModelProfileRevision] = useState(0);
   const [permReqs,     setPermReqs]     = useState([]);
   const [questionReqs, setQuestionReqs] = useState([]);
@@ -216,9 +230,18 @@ export function App() {
   const guidedTourAutoAttemptedRef = useRef(false);
   const guidedTourHasActiveSession = !!(activeRef?.sessionId || activeRef?.id);
   const guidedTourBlocked = showSettings || searchOpen || updateDialogOpen
+    || desktopCloseDialogOpen
     || questionReqs.length > 0;
 
   useEffect(() => initInactiveSelection(), []);
+  useEffect(() => subscribeDesktopCloseRequest(() => {
+    setRememberDesktopCloseChoice(false);
+    setDesktopCloseBusy(false);
+    setDesktopCloseDialogOpen(true);
+    getDesktopCloseBehavior().then((state) => {
+      setDesktopTrayAvailable(state?.trayAvailable !== false);
+    });
+  }), []);
   useEffect(() => {
     document.documentElement.setAttribute('data-font-size', fontSize);
   }, [fontSize]);
@@ -231,6 +254,7 @@ export function App() {
     const chatVisible = view === 'single'
       && !!sessionId
       && !activeRef?.loop
+      && !activeRef?.expertComponents
       && !showSettings
       && !searchOpen
       && !updateDialogOpen
@@ -242,6 +266,7 @@ export function App() {
   }, [
     activeRef?.id,
     activeRef?.loop,
+    activeRef?.expertComponents,
     activeRef?.sessionId,
     activeRef?.workspaceHash,
     guidedTourPreparing,
@@ -909,6 +934,31 @@ export function App() {
     });
   }, []);
 
+  const chooseDesktopCloseAction = useCallback(async (behavior) => {
+    if (desktopCloseBusy) return;
+    setDesktopCloseBusy(true);
+    const result = await performDesktopCloseChoice({
+      behavior,
+      remember: rememberDesktopCloseChoice,
+      persist: setDesktopCloseBehavior,
+      hideToTray: hideDesktopToTray,
+      exitApp: requestDesktopAppExit,
+    });
+    if (!result?.ok) {
+      toast({
+        kind: 'err',
+        text: result?.stage === 'persist'
+          ? '保存关闭窗口设置失败:' + (result?.error || '未知错误')
+          : '关闭窗口操作失败:' + (result?.error || '未知错误'),
+      });
+      setDesktopCloseBusy(false);
+      return;
+    }
+    setDesktopCloseDialogOpen(false);
+    setRememberDesktopCloseChoice(false);
+    setDesktopCloseBusy(false);
+  }, [desktopCloseBusy, rememberDesktopCloseChoice]);
+
   const startUpdate = useCallback(async () => {
     if (!updateStatus?.update_available || updateStarting || updateJobIsActive(updateJob)) return;
     setUpdateStarting(true);
@@ -952,6 +1002,25 @@ export function App() {
   const openLoopPage = useCallback(() => {
     navigateToRef({ loop: true });
   }, [navigateToRef]);
+
+  const openExpertComponents = useCallback(() => {
+    const current = activeRefRef.current || {};
+    const base = homeRefFromWorkspace(current, current, health);
+    navigateToRef({
+      ...base,
+      home: false,
+      expertComponents: true,
+    });
+  }, [health, navigateToRef]);
+
+  const useExpertForNewTask = useCallback((expert) => {
+    const current = activeRefRef.current || {};
+    navigateToRef({
+      ...homeRefFromWorkspace(current, current, health),
+      expertId: expert?.id || '',
+      expert: expert || null,
+    });
+  }, [health, navigateToRef]);
 
   const replaceHomeWorkspace = useCallback((workspace) => {
     replaceActiveRef((current) => homeRefFromWorkspace(workspace, current, health));
@@ -1319,8 +1388,9 @@ export function App() {
   };
   const autoFocusChatOnDesktopWindowFocus = shouldAutoFocusDesktopComposer({
     desktopMode: desktopModeRef.current,
-    chatVisible: view === 'single' && !activeRef?.loop,
+    chatVisible: view === 'single' && !activeRef?.loop && !activeRef?.expertComponents,
     blockingSurfaceOpen: showSettings || searchOpen || updateDialogOpen
+      || desktopCloseDialogOpen
       || !!visibleQuestionReq || guidedTourPreparing || guidedTourRun,
   });
   const conversationFindEnabled = canOpenConversationFind({
@@ -1329,7 +1399,7 @@ export function App() {
     loop: !!activeRef?.loop,
     showSettings,
     searchOpen,
-    updateDialogOpen,
+    updateDialogOpen: updateDialogOpen || desktopCloseDialogOpen,
     permissionOpen: false,
     questionOpen: !!visibleQuestionReq,
     guidedTourPreparing,
@@ -1385,6 +1455,7 @@ export function App() {
           onSearchTasks={() => setSearchOpen(true)}
           workspaceActivationRequest={workspaceActivationRequest}
           onOpenSettingsSection={openSettingsSection}
+          onOpenExpertComponents={openExpertComponents}
           pendingPermissionSessionIds={pendingPermissionSessionIdsForSidebar}
           pendingQuestionSessionIds={pendingQuestionSessionIdsForSidebar}
         />
@@ -1411,7 +1482,13 @@ export function App() {
             {view === 'single' && activeRef?.loop && (
               <LoopPage onOpenSession={openLoopRun} />
             )}
-            {view === 'single' && !activeRef?.loop && (
+            {view === 'single' && activeRef?.expertComponents && (
+              <ExpertComponentsPage
+                workspaceHash={activeRef?.workspaceHash || ''}
+                onUseExpert={useExpertForNewTask}
+              />
+            )}
+            {view === 'single' && !activeRef?.loop && !activeRef?.expertComponents && (
               <ChatView
                 sessionRef={activeRef}
                 modelProfileRevision={modelProfileRevision}
@@ -1420,6 +1497,7 @@ export function App() {
                 onCommandWorkspaceChange={setCommandWorkspaceHash}
                 onConsoleCwdChange={setConsoleCwd}
                 onFindInConversation={openConversationFind}
+                onOpenModelSettings={() => openSettingsSection('models')}
                 health={health}
                 autoFocusOnDesktopWindowFocus={autoFocusChatOnDesktopWindowFocus}
                 showSidePanel
@@ -1497,6 +1575,22 @@ export function App() {
         onRetry={startUpdate}
         onRestart={restartAfterUpdate}
         onClose={() => setUpdateDialogOpen(false)}
+      />
+      <DesktopCloseDialog
+        open={desktopCloseDialogOpen}
+        remember={rememberDesktopCloseChoice}
+        busy={desktopCloseBusy}
+        trayAvailable={desktopTrayAvailable}
+        onRememberChange={setRememberDesktopCloseChoice}
+        onMinimizeToTray={() => chooseDesktopCloseAction(
+          DESKTOP_CLOSE_BEHAVIORS.MINIMIZE_TO_TRAY,
+        )}
+        onExit={() => chooseDesktopCloseAction(DESKTOP_CLOSE_BEHAVIORS.EXIT)}
+        onClose={() => {
+          if (desktopCloseBusy) return;
+          setDesktopCloseDialogOpen(false);
+          setRememberDesktopCloseChoice(false);
+        }}
       />
       <DesktopGuidedTour
         run={guidedTourRun && !guidedTourBlocked}

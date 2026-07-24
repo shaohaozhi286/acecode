@@ -61,6 +61,39 @@ void WebServer::Impl::register_files() {
             return with_cors(req, std::move(r));
         };
 
+        // 无工作区会话不会把真实 cwd 暴露给前端。变更记录里的绝对路径因此会被
+        // 前端拆成“所在目录 + 文件名”,不能通过 workspace cwd 的精确白名单。
+        // 仅预览端点允许在 UnknownWorkspace 后按活动 no-workspace session 根
+        // 重新校验；目录树和 Git 路由仍只认 allowed_file_cwds()。
+        auto validate_preview_path = [this](
+            const std::string& cwd,
+            const std::string& path)
+            -> std::variant<std::filesystem::path, FileError> {
+            auto validated = validate_path_within(cwd, path, allowed_file_cwds());
+            const auto* error = std::get_if<FileError>(&validated);
+            if (!error ||
+                error->kind != FileErrorKind::UnknownWorkspace ||
+                !deps.session_registry) {
+                return validated;
+            }
+
+            const auto requested_path =
+                path_from_utf8(cwd) / path_from_utf8(path);
+            const auto requested_path_utf8 = path_to_utf8(requested_path);
+            for (const auto& session : deps.session_registry->list_active()) {
+                if (!session.no_workspace || session.cwd.empty()) continue;
+                auto session_validated = validate_path_within(
+                    session.cwd,
+                    requested_path_utf8,
+                    {session.cwd});
+                if (std::holds_alternative<std::filesystem::path>(
+                        session_validated)) {
+                    return session_validated;
+                }
+            }
+            return validated;
+        };
+
         // GET /api/files?cwd=<abs>&path=<rel>&show_hidden=<0|1>
         CROW_ROUTE(app, "/api/files").methods(crow::HTTPMethod::GET)
         ([this, error_response](const crow::request& req) {
@@ -122,7 +155,7 @@ void WebServer::Impl::register_files() {
 
         // GET /api/files/content?cwd=<abs>&path=<rel>
         CROW_ROUTE(app, "/api/files/content").methods(crow::HTTPMethod::GET)
-        ([this, error_response](const crow::request& req) {
+        ([this, error_response, validate_preview_path](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
 
             std::string cwd_q;
@@ -136,8 +169,7 @@ void WebServer::Impl::register_files() {
                 return with_cors(req, std::move(r));
             }
 
-            auto allowed_cwds = allowed_file_cwds();
-            auto validated = validate_path_within(cwd_q, path_q, allowed_cwds);
+            auto validated = validate_preview_path(cwd_q, path_q);
             if (std::holds_alternative<FileError>(validated)) {
                 return error_response(req, std::get<FileError>(validated));
             }
@@ -155,7 +187,7 @@ void WebServer::Impl::register_files() {
 
         // GET /api/files/blob?cwd=<abs>&path=<rel>
         CROW_ROUTE(app, "/api/files/blob").methods(crow::HTTPMethod::GET)
-        ([this, error_response](const crow::request& req) {
+        ([this, error_response, validate_preview_path](const crow::request& req) {
             if (auto rej = require_auth(req)) return std::move(*rej);
 
             std::string cwd_q;
@@ -177,8 +209,7 @@ void WebServer::Impl::register_files() {
                 return with_cors(req, std::move(r));
             }
 
-            auto allowed_cwds = allowed_file_cwds();
-            auto validated = validate_path_within(cwd_q, path_q, allowed_cwds);
+            auto validated = validate_preview_path(cwd_q, path_q);
             if (std::holds_alternative<FileError>(validated)) {
                 return error_response(req, std::get<FileError>(validated));
             }

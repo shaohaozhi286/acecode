@@ -90,6 +90,7 @@ export const enUS = {
     descriptions: {
       init: 'Analyze this codebase and generate (or improve) AGENT.md',
       compact: 'Compress conversation history',
+      feedback: 'Send feedback with current-session Desktop diagnostics',
       goal: 'Create, view, pause, resume, edit, or clear the thread goal',
       plan: 'Enter plan mode or start planning a described task',
       turn: 'Guide the active turn at its next model boundary',
@@ -99,5 +100,13 @@ export const enUS = {
       rc: 'Alias for /remote-control',
       remoteControl: 'Activate a configured channel plugin or manage manual remote-control webhooks',
     },
+  },
+  feedbackCommand: {
+    requiresSession: 'Open a session before using /feedback.',
+    textOnly: '/feedback accepts text only. Remove attachments or context first.',
+    unknownSession: 'Could not identify the current session. Feedback was not sent.',
+    uploaded: 'Feedback uploaded.',
+    uploadedWithPackage: 'Feedback uploaded: {{packageName}}',
+    uploadFailed: 'Feedback upload failed: {{error}}',
   },
 };

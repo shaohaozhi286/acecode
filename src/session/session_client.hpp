@@ -152,6 +152,12 @@ struct SessionOptions {
     // 可选初始系统消息或 prompt 注入。v1 留空。
     std::string initial_user_message;
 
+    // Optional immutable expert binding for this session. expert_member_id is
+    // reserved for validated team-member child sessions created internally by
+    // spawn_subagent; ordinary clients select only expert_id.
+    std::string expert_id;
+    std::string expert_member_id;
+
     // 是否在 session 创建后立刻启动 agent loop 处理 initial_user_message。
     // 留 false 让客户端控制时机。
     bool auto_start = false;
@@ -219,6 +225,12 @@ struct SessionInfo {
     bool        no_workspace = false;
     std::string parent_session_id; // 非空 = spawn_subagent 子会话(后台任务)
     std::string active_turn_id;   // 非空 = 当前可接受 steering 的 regular turn
+    std::string expert_id;
+    std::string expert_member_id;
+    std::string expert_display_name;
+    std::string expert_type;
+    std::string expert_source;
+    bool        expert_missing = false;
 };
 
 // ----- AskUserQuestion 回应(client→server) -----

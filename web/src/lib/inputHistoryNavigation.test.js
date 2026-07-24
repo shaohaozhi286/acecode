@@ -174,14 +174,14 @@ run('非数组输入容错返回空历史', () => {
 });
 
 // 回归测试:desktop/web 输入框上下键翻历史,第一次填入历史文本后立刻失效。
-// bug 表现:按 ↑ 填入历史项 → Lexical ValueSyncPlugin 把同一文本同步进编辑器时
+// bug 表现:按 ↑ 填入历史项 → 编辑器把同一文本同步回受控 value 时
 // 触发 onChange 回声(文本与当前 value 相同)→ editedSinceHistory 被误置 true →
 // 再按 ↑/↓ 被 shouldNavigateInputHistory 拒绝,只能翻一条。
 // 期望:文本与当前 value 相同的 onChange 回声不算用户编辑;真实输入才算。
 run('onChange 回声(文本未变)不算用户编辑', () => {
-  // 场景:历史导航填入 'history b' 后,Lexical 同步回声携带同一文本
+  // 场景:历史导航填入 'history b' 后,编辑器同步回声携带同一文本
   assert.equal(isUserComposerEdit({ nextValue: 'history b', currentValue: 'history b' }), false);
-  // 场景:selection-only 变化(光标移动)时 Lexical 也回调 onChange,文本相同
+  // 场景:selection-only 变化(光标移动)时编辑器也回调 onChange,文本相同
   assert.equal(isUserComposerEdit({ nextValue: '', currentValue: '' }), false);
 });
 

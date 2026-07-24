@@ -64,7 +64,7 @@ import {
   SIDEBAR_DISCLOSURE_ICON,
   SIDEBAR_NAV_ITEMS,
   SIDEBAR_SECTION_IDS,
-  sidebarCustomMaxCount,
+  sidebarCustomTotalCount,
   sidebarSectionCounts,
   sidebarSectionIsVisible,
   sidebarSectionTitle,
@@ -259,7 +259,6 @@ function countObjectKeys(value) {
 const CUSTOM_SIDEBAR_ICON_FILES = Object.freeze({
   lightbulb: 'IntellisenseLightBulbSparkle',
   mcp: 'MCP',
-  code: 'Code',
 });
 
 function CustomSidebarIcon({ icon }) {
@@ -298,30 +297,30 @@ function CustomSidebarItem({ item, count, onClick }) {
   );
 }
 
-function CustomSidebarSection({ onOpenSettingsSection }) {
+function CustomSidebarSection({ workspaceHash = '', onOpenSettingsSection, onOpenExpertComponents }) {
   const [expanded, setExpanded] = usePreference(
     SIDEBAR_CUSTOM_STORAGE_KEY,
     DEFAULT_SIDEBAR_CUSTOM_EXPANDED,
     validateBooleanPreference,
   );
-  const [counts, setCounts] = useState({ skills: null, mcp: null, models: null });
+  const [counts, setCounts] = useState({ skills: null, mcp: null, experts: null });
 
   const refreshCounts = useCallback(async () => {
-    const [skills, mcp, models] = await Promise.allSettled([
+    const [skills, mcp, experts] = await Promise.allSettled([
       api.listSkills(),
       api.getMcp(),
-      api.listModels(),
+      api.listExperts(workspaceHash || '__local__'),
     ]);
     setCounts((previous) => ({
       skills: skills.status === 'fulfilled' && Array.isArray(skills.value)
         ? skills.value.length
         : previous.skills,
       mcp: mcp.status === 'fulfilled' ? countObjectKeys(mcp.value) : previous.mcp,
-      models: models.status === 'fulfilled' && Array.isArray(models.value)
-        ? models.value.length
-        : previous.models,
+      experts: experts.status === 'fulfilled'
+        ? (Array.isArray(experts.value?.experts) ? experts.value.experts.length : 0)
+        : previous.experts,
     }));
-  }, []);
+  }, [workspaceHash]);
 
   useEffect(() => {
     refreshCounts().catch(() => {});
@@ -329,19 +328,22 @@ function CustomSidebarSection({ onOpenSettingsSection }) {
     return () => window.clearInterval(timer);
   }, [refreshCounts]);
 
-  const maxCount = sidebarCustomMaxCount(counts);
+  const totalCount = sidebarCustomTotalCount(counts);
   return (
     <div className="ace-sidebar-custom-section border-t border-border shrink-0 py-2">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
         data-sidebar-custom-section="true"
-        className="w-full flex items-center px-3 py-1.5 text-[13px] text-fg-2 hover:text-fg transition"
+        className="w-full flex items-center gap-[5px] px-3 py-1.5 text-[13px] text-fg-2 hover:text-fg transition"
         aria-expanded={expanded}
       >
-        <span className="flex-1 min-w-0 text-left truncate">自定义</span>
-        {maxCount != null && (
-          <span className="mr-2 shrink-0 tabular-nums text-fg-mute">{maxCount}</span>
+        <span className="w-6 h-6 flex items-center justify-center shrink-0 text-fg-mute">
+          <VsIcon name="extension" size={16} />
+        </span>
+        <span className="flex-1 min-w-0 text-left truncate">扩展</span>
+        {totalCount != null && (
+          <span className="mr-2 shrink-0 tabular-nums text-fg-mute">{totalCount}</span>
         )}
         <SidebarDisclosure expanded={expanded} />
       </button>
@@ -352,7 +354,9 @@ function CustomSidebarSection({ onOpenSettingsSection }) {
               key={item.id}
               item={item}
               count={counts[item.id]}
-              onClick={() => onOpenSettingsSection?.(item.settingsSection)}
+              onClick={() => (item.action === 'experts'
+                ? onOpenExpertComponents?.()
+                : onOpenSettingsSection?.(item.settingsSection))}
             />
           ))}
         </div>
@@ -1072,6 +1076,7 @@ export function Sidebar({
   onSearchTasks,
   workspaceActivationRequest = null,
   onOpenSettingsSection,
+  onOpenExpertComponents,
   pendingPermissionSessionIds = new Set(),
   pendingQuestionSessionIds = new Set(),
 }) {
@@ -2524,7 +2529,11 @@ export function Sidebar({
             </div>
           )}
         </div>
-        <CustomSidebarSection onOpenSettingsSection={onOpenSettingsSection} />
+        <CustomSidebarSection
+          workspaceHash={activeRef?.workspaceHash || activeRef?.workspace_hash || ''}
+          onOpenSettingsSection={onOpenSettingsSection}
+          onOpenExpertComponents={onOpenExpertComponents}
+        />
       </div>
       </aside>
       <OpencodeImportDialog

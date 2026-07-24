@@ -6,6 +6,8 @@
 //
 // 设计:openspec/changes/enhance-desktop-tray-menu/design.md 决策 2。
 
+#include "config/desktop_close_behavior.hpp"
+
 #include <functional>
 
 namespace acecode::desktop {
@@ -17,6 +19,24 @@ enum class CloseDispatch {
     // 没有 handler / handler 返回 false → 走原 DestroyWindow 退出路径。
     FallthroughToDestroy,
 };
+
+enum class CloseRequestAction {
+    ShowPrompt,
+    HideToTray,
+    ExitApplication,
+};
+
+inline CloseRequestAction resolve_close_request_action(
+    DesktopCloseBehavior behavior,
+    bool tray_available) {
+    if (behavior == DesktopCloseBehavior::Exit) {
+        return CloseRequestAction::ExitApplication;
+    }
+    if (behavior == DesktopCloseBehavior::MinimizeToTray && tray_available) {
+        return CloseRequestAction::HideToTray;
+    }
+    return CloseRequestAction::ShowPrompt;
+}
 
 // 纯函数:决定 WM_CLOSE 时该怎么走。
 inline CloseDispatch dispatch_wm_close(const std::function<bool()>& handler) {

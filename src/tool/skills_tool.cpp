@@ -105,8 +105,11 @@ ToolImpl create_skills_list_tool(SkillRegistry& registry,
             return ToolResult{"[Error] Failed to parse tool arguments.", false};
         }
 
-        auto scoped_registry = workspace_registry_for_context(config, ctx);
-        SkillRegistry& active_registry = scoped_registry ? *scoped_registry : registry;
+        auto scoped_registry = ctx.skill_registry
+            ? nullptr : workspace_registry_for_context(config, ctx);
+        const SkillRegistry& active_registry = ctx.skill_registry
+            ? *ctx.skill_registry
+            : (scoped_registry ? *scoped_registry : registry);
         const std::string normalized_category = trim_ascii(requested_category);
         const auto all_skills = active_registry.list();
         const auto available_categories = category_array_from_skills(all_skills);

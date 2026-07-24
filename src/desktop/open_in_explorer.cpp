@@ -64,10 +64,31 @@ bool is_under_allowed_root(const fs::path& canonical_path,
     return !had_valid_root ? false : false;
 }
 
-bool platform_open_directory(const fs::path& path, std::string& error) {
+bool platform_open_target(const fs::path& path,
+                          OpenInExplorerTargetKind kind,
+                          std::string& error) {
 #ifdef _WIN32
     const std::wstring wide_path = path.wstring();
-    HINSTANCE result = ::ShellExecuteW(nullptr, L"open", wide_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    HINSTANCE result = nullptr;
+    if (kind == OpenInExplorerTargetKind::File) {
+        const std::wstring parameters = L"/select,\"" + wide_path + L"\"";
+        const std::wstring working_directory = path.parent_path().wstring();
+        result = ::ShellExecuteW(
+            nullptr,
+            L"open",
+            L"explorer.exe",
+            parameters.c_str(),
+            working_directory.c_str(),
+            SW_SHOWNORMAL);
+    } else {
+        result = ::ShellExecuteW(
+            nullptr,
+            L"open",
+            wide_path.c_str(),
+            nullptr,
+            nullptr,
+            SW_SHOWNORMAL);
+    }
     auto code = reinterpret_cast<intptr_t>(result);
     if (code > 32) return true;
     error = "ShellExecute failed: " + std::to_string(code);
@@ -78,13 +99,25 @@ bool platform_open_directory(const fs::path& path, std::string& error) {
 #  else
     const char* opener = "xdg-open";
 #  endif
-    const std::string native_path = acecode::path_to_utf8(path);
+    const fs::path launch_path =
+#  ifdef __APPLE__
+        path;
+#  else
+        kind == OpenInExplorerTargetKind::File ? path.parent_path() : path;
+#  endif
+    const std::string native_path = acecode::path_to_utf8(launch_path);
     pid_t pid = ::fork();
     if (pid < 0) {
         error = "fork failed";
         return false;
     }
     if (pid == 0) {
+#  ifdef __APPLE__
+        if (kind == OpenInExplorerTargetKind::File) {
+            ::execlp(opener, opener, "-R", native_path.c_str(), static_cast<char*>(nullptr));
+            ::_exit(127);
+        }
+#  endif
         ::execlp(opener, opener, native_path.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
     }
@@ -111,36 +144,103 @@ std::vector<std::string> append_allowed_open_root(
     return allowed_roots_utf8;
 }
 
-ValidatedOpenDirectory validate_open_directory_request(
+ValidatedOpenTarget validate_open_in_explorer_request(
     const std::string& path_utf8,
     const std::vector<std::string>& allowed_roots_utf8) {
     if (path_utf8.empty()) {
-        return {false, {}, "path required"};
+        return {false, {}, OpenInExplorerTargetKind::Directory, "path required"};
     }
 
     std::error_code ec;
     auto requested = acecode::path_from_utf8(path_utf8);
     if (requested.empty()) {
-        return {false, {}, "path required"};
+        return {false, {}, OpenInExplorerTargetKind::Directory, "path required"};
     }
     if (!requested.is_absolute()) {
-        return {false, {}, "path must be absolute"};
+        return {false, {}, OpenInExplorerTargetKind::Directory, "path must be absolute"};
     }
-    if (!fs::is_directory(requested, ec) || ec) {
-        return {false, {}, "path is not an existing directory"};
+    const bool requested_is_directory = fs::is_directory(requested, ec);
+    if (ec) {
+        return {false, {}, OpenInExplorerTargetKind::Directory, "failed to inspect path"};
+    }
+    const bool requested_is_file =
+        !requested_is_directory && fs::is_regular_file(requested, ec);
+    if (ec || (!requested_is_directory && !requested_is_file)) {
+        return {
+            false,
+            {},
+            OpenInExplorerTargetKind::Directory,
+            "path is not an existing file or directory",
+        };
     }
 
     auto canonical_path = fs::weakly_canonical(requested, ec);
     if (ec || canonical_path.empty()) {
-        return {false, {}, "failed to resolve path"};
+        return {false, {}, OpenInExplorerTargetKind::Directory, "failed to resolve path"};
     }
-    if (!fs::is_directory(canonical_path, ec) || ec) {
-        return {false, {}, "path is not an existing directory"};
+    const bool canonical_is_directory = fs::is_directory(canonical_path, ec);
+    if (ec) {
+        return {false, {}, OpenInExplorerTargetKind::Directory, "failed to inspect path"};
+    }
+    const bool canonical_is_file =
+        !canonical_is_directory && fs::is_regular_file(canonical_path, ec);
+    if (ec || (!canonical_is_directory && !canonical_is_file)) {
+        return {
+            false,
+            {},
+            OpenInExplorerTargetKind::Directory,
+            "path is not an existing file or directory",
+        };
     }
     if (!is_under_allowed_root(canonical_path, allowed_roots_utf8)) {
-        return {false, {}, "path is outside registered workspaces"};
+        return {
+            false,
+            {},
+            OpenInExplorerTargetKind::Directory,
+            "path is outside registered workspaces",
+        };
     }
-    return {true, canonical_path, {}};
+    return {
+        true,
+        canonical_path,
+        canonical_is_file
+            ? OpenInExplorerTargetKind::File
+            : OpenInExplorerTargetKind::Directory,
+        {},
+    };
+}
+
+ValidatedOpenDirectory validate_open_directory_request(
+    const std::string& path_utf8,
+    const std::vector<std::string>& allowed_roots_utf8) {
+    auto validated = validate_open_in_explorer_request(
+        path_utf8,
+        allowed_roots_utf8);
+    if (!validated.ok) return {false, {}, validated.error};
+    if (validated.kind != OpenInExplorerTargetKind::Directory) {
+        return {false, {}, "path is not an existing directory"};
+    }
+    return {true, std::move(validated.path), {}};
+}
+
+OpenInExplorerResult open_path_in_file_manager(
+    const std::string& path_utf8,
+    const std::vector<std::string>& allowed_roots_utf8,
+    OpenInExplorerLauncher launcher) {
+    auto validated = validate_open_in_explorer_request(
+        path_utf8,
+        allowed_roots_utf8);
+    if (!validated.ok) return {false, validated.error};
+
+    std::string error;
+    auto launch = launcher
+        ? std::move(launcher)
+        : OpenInExplorerLauncher(platform_open_target);
+    if (!launch(validated.path, validated.kind, error)) {
+        if (error.empty()) error = "failed to open path in file manager";
+        return {false, error};
+    }
+    return {true, {}};
 }
 
 OpenInExplorerResult open_directory_in_file_manager(
@@ -151,7 +251,14 @@ OpenInExplorerResult open_directory_in_file_manager(
     if (!validated.ok) return {false, validated.error};
 
     std::string error;
-    auto launch = launcher ? std::move(launcher) : DirectoryOpenLauncher(platform_open_directory);
+    auto launch = launcher
+        ? std::move(launcher)
+        : DirectoryOpenLauncher([](const fs::path& path, std::string& launch_error) {
+            return platform_open_target(
+                path,
+                OpenInExplorerTargetKind::Directory,
+                launch_error);
+        });
     if (!launch(validated.path, error)) {
         if (error.empty()) error = "failed to open directory";
         return {false, error};

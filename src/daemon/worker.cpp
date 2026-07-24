@@ -6,6 +6,7 @@
 #include "version.hpp"
 #include "../tool/spawn_subagent_tool.hpp"
 #include "../desktop/workspace_registry.hpp"
+#include "../experts/expert_registry.hpp"
 #include "../connectors/connector_auth_recovery.hpp"
 #include "guid.hpp"
 #include "heartbeat.hpp"
@@ -425,6 +426,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // 让 GET /api/skills 与 GET /api/commands 看到的 skill 集合与 TUI `/skills` 一致。
     acecode::SkillRegistry skill_registry;
     acecode::initialize_skill_registry(skill_registry, cfg, cwd);
+    acecode::ExpertRegistry expert_registry;
 
     acecode::ToolExecutor tools;
     acecode::register_session_builtin_tools(tools, cfg_mut);
@@ -464,6 +466,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     reg_deps.cwd                  = cwd;
     reg_deps.config               = &cfg_mut;
     reg_deps.skill_registry       = &skill_registry;
+    reg_deps.expert_registry      = &expert_registry;
     reg_deps.memory_registry      = nullptr;
     reg_deps.memory_cfg           = nullptr;
     reg_deps.project_instructions_cfg = &cfg_mut.project_instructions;
@@ -527,6 +530,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     web_deps.desktop_protocol_version = opts.desktop_protocol_version;
     web_deps.session_client     = &client;
     web_deps.session_registry   = &registry;
+    web_deps.expert_registry    = &expert_registry;
     web_deps.hook_manager       = &hook_manager;
     web_deps.tools              = &tools;
     web_deps.mcp_manager        = &mcp_runtime.manager();
@@ -550,9 +554,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
                 std::move(roots),
                 acecode::path_to_utf8(
                     acecode::path_from_utf8(acecode::get_acecode_dir()) / "skills"));
-            auto result = acecode::desktop::open_directory_in_file_manager(path, roots);
+            auto result = acecode::desktop::open_path_in_file_manager(path, roots);
             if (result.ok) return std::nullopt;
-            return result.error.empty() ? std::string("failed to open directory") : result.error;
+            return result.error.empty()
+                ? std::string("failed to open path in file manager")
+                : result.error;
         };
     }
     web_deps.skill_registry     = &skill_registry;

@@ -31,7 +31,19 @@ export function turnSteerRequestForText(text) {
   };
 }
 
+export function desktopFeedbackRequestForText(text) {
+  const value = String(text || '');
+  const match = /^\s*\/feedback(?=$|\s)([\s\S]*)$/i.exec(value);
+  if (!match) return null;
+  return {
+    feedbackText: match[1].trim(),
+    display_text: value.trim(),
+  };
+}
+
 export function inputRouteForText(text) {
+  const desktopFeedback = desktopFeedbackRequestForText(text);
+  if (desktopFeedback) return { kind: 'desktop_feedback', ...desktopFeedback };
   const sideQuestion = sideQuestionRequestForText(text);
   if (sideQuestion) return { kind: 'side_question', ...sideQuestion };
   const turnSteer = turnSteerRequestForText(text);
@@ -42,7 +54,9 @@ export function inputRouteForText(text) {
 }
 
 export function sessionCreateOptionsForText(text) {
-  if (sideQuestionRequestForText(text) || turnSteerRequestForText(text)) {
+  if (desktopFeedbackRequestForText(text)
+      || sideQuestionRequestForText(text)
+      || turnSteerRequestForText(text)) {
     return { auto_start: false };
   }
   const command = builtinCommandRequestForText(text);

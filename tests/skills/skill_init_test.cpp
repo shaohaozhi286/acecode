@@ -239,4 +239,29 @@ TEST_F(SkillInitOpencodeTest, ProjectAndGlobalScanRootsAreDisjoint) {
     EXPECT_FALSE(contains(global_roots, workspace / ".acecode" / "skills"));
 }
 
+TEST_F(SkillInitOpencodeTest, PrependedExpertRootIsSessionScopedAndPolicyAware) {
+    const fs::path expert_root = root / "expert-skills";
+    write_skill(expert_root, "expert-only", "bundled by expert");
+    write_skill(expert_root, "shared-skill", "expert wins");
+    write_skill(workspace / ".acecode" / "skills", "shared-skill", "project loses");
+
+    acecode::AppConfig cfg;
+    acecode::SkillRegistry selected;
+    acecode::initialize_skill_registry(selected, cfg, workspace.string(), {expert_root});
+    ASSERT_TRUE(selected.find("expert-only").has_value());
+    ASSERT_TRUE(selected.find("shared-skill").has_value());
+    EXPECT_EQ(selected.find("shared-skill")->description, "expert wins");
+
+    acecode::SkillRegistry ordinary;
+    initialize(ordinary, cfg);
+    EXPECT_FALSE(ordinary.find("expert-only").has_value());
+    ASSERT_TRUE(ordinary.find("shared-skill").has_value());
+    EXPECT_EQ(ordinary.find("shared-skill")->description, "project loses");
+
+    cfg.skills.disabled = {"expert-only"};
+    acecode::SkillRegistry disabled;
+    acecode::initialize_skill_registry(disabled, cfg, workspace.string(), {expert_root});
+    EXPECT_FALSE(disabled.find("expert-only").has_value());
+}
+
 } // namespace

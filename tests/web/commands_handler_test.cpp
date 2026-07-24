@@ -1,7 +1,7 @@
 // 覆盖 src/web/handlers/commands_handler.cpp::build_commands_payload。
 //
 // 该函数是 GET /api/commands 的纯逻辑层。回归点:
-//   - builtins 顺序意外被改(前端依赖 init→compact→goal→plan 这个固定顺序展示)
+//   - builtins 顺序意外被改(前端依赖 init→compact→feedback→goal→plan 展示)
 //   - 缺 workspace_cwd 时返回了 skills 字段(应该不返回,向后兼容旧客户端)
 //   - 传 workspace_cwd 时漏扫了 .agent/skills 项目目录
 //   - skills 没按字典序 → 用户看到的下拉条目跳来跳去
@@ -82,7 +82,7 @@ protected:
 } // namespace
 
 // 场景:不传 workspace_cwd 时**完全不输出** `skills` 字段(向后兼容)。
-// builtins 仍然在,顺序固定 init→compact→goal→plan。
+// builtins 仍然在,顺序固定 init→compact→feedback→goal→plan。
 TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     acecode::SkillRegistry registry;
     registry.set_scan_roots({tmp_root});
@@ -94,17 +94,18 @@ TEST_F(CommandsHandlerTest, NoWorkspaceCwdOmitsSkillsField) {
     EXPECT_FALSE(payload.contains("skills")) << "缺 workspace_cwd 不应输出 skills 字段";
     EXPECT_FALSE(payload.contains("commands")) << "缺 workspace_cwd 不应输出 commands 字段";
 
-    ASSERT_EQ(payload["builtins"].size(), 7u);
+    ASSERT_EQ(payload["builtins"].size(), 8u);
     EXPECT_EQ(payload["builtins"][0]["name"].get<std::string>(), "init");
     EXPECT_EQ(payload["builtins"][1]["name"].get<std::string>(), "compact");
-    EXPECT_EQ(payload["builtins"][2]["name"].get<std::string>(), "goal");
-    EXPECT_EQ(payload["builtins"][3]["name"].get<std::string>(), "plan");
-    EXPECT_EQ(payload["builtins"][4]["name"].get<std::string>(), "lsp");
+    EXPECT_EQ(payload["builtins"][2]["name"].get<std::string>(), "feedback");
+    EXPECT_EQ(payload["builtins"][3]["name"].get<std::string>(), "goal");
+    EXPECT_EQ(payload["builtins"][4]["name"].get<std::string>(), "plan");
+    EXPECT_EQ(payload["builtins"][5]["name"].get<std::string>(), "lsp");
     // 回归:B-Task 8 复审发现 rc/remote-control 只进了可执行白名单
     // (builtin_command_handler / 前端 parseExecutableBuiltinCommand),
     // builtins payload 漏加 → Web 输入框打 /r 没有下拉补全。
-    EXPECT_EQ(payload["builtins"][5]["name"].get<std::string>(), "rc");
-    EXPECT_EQ(payload["builtins"][6]["name"].get<std::string>(), "remote-control");
+    EXPECT_EQ(payload["builtins"][6]["name"].get<std::string>(), "rc");
+    EXPECT_EQ(payload["builtins"][7]["name"].get<std::string>(), "remote-control");
     for (const auto& builtin : payload["builtins"]) {
         EXPECT_FALSE(builtin["description"].get<std::string>().empty());
     }
@@ -202,7 +203,7 @@ TEST_F(CommandsHandlerTest, DisabledSkillsAreFiltered) {
         << "disabled skill 不应出现在响应里";
 }
 
-// 场景:builtins 描述非空,且与 init/compact/goal/plan 命令注册时的描述匹配。
+// 场景:builtins 描述非空,且与各入口的用户可见描述匹配。
 // 防止有人改了 init_command.cpp / builtin_commands.cpp 的描述忘了同步这里。
 TEST_F(CommandsHandlerTest, BuiltinDescriptionsMatchTuiRegistration) {
     acecode::SkillRegistry registry;
@@ -215,16 +216,18 @@ TEST_F(CommandsHandlerTest, BuiltinDescriptionsMatchTuiRegistration) {
     EXPECT_EQ(payload["builtins"][1]["description"].get<std::string>(),
               "Compress conversation history");
     EXPECT_EQ(payload["builtins"][2]["description"].get<std::string>(),
-              "Create, view, pause, resume, edit, or clear the thread goal");
+              "Send feedback with current-session Desktop diagnostics");
     EXPECT_EQ(payload["builtins"][3]["description"].get<std::string>(),
-              "Enter plan mode or start planning a described task");
+              "Create, view, pause, resume, edit, or clear the thread goal");
     EXPECT_EQ(payload["builtins"][4]["description"].get<std::string>(),
+              "Enter plan mode or start planning a described task");
+    EXPECT_EQ(payload["builtins"][5]["description"].get<std::string>(),
               "Show LSP server status (connected/broken/not installed)");
     // rc / remote-control 的描述与 src/commands/remote_control_command.cpp
     // 的 TUI 注册文案保持一致。
-    EXPECT_EQ(payload["builtins"][5]["description"].get<std::string>(),
-              "Alias for /remote-control");
     EXPECT_EQ(payload["builtins"][6]["description"].get<std::string>(),
+              "Alias for /remote-control");
+    EXPECT_EQ(payload["builtins"][7]["description"].get<std::string>(),
               "Activate a configured channel plugin or manage manual remote-control webhooks");
 }
 

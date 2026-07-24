@@ -82,6 +82,7 @@ run('composer footer preserves required left-to-right control order', () => {
 
   expectInOrder(footer, [
     'data-composer-control="add-context"',
+    'data-composer-control="expert"',
     'data-composer-control="permission"',
     'data-composer-control="selected-contexts"',
     '<ModelLoadIndicator load={modelLoad} />',
@@ -140,15 +141,46 @@ run('model selector leaves enough line height for lowercase descenders', () => {
   );
 });
 
-run('model refresh lives in the integrated model menu', () => {
+run('model settings and refresh use independent model-menu header actions', () => {
   const component = source('components/ComposerSessionControls.jsx');
+  const styles = source('styles/globals.css');
 
   expectInOrder(component, [
     'ace-composer-model-menu-header',
+    'ace-composer-model-settings',
+    '<VsIcon name="settings"',
+    '<span>模型设置</span>',
     'onRefreshModels &&',
     'aria-label="刷新模型列表"',
     'ace-composer-model-options',
   ]);
+  assert.doesNotMatch(component, /<span>选择模型<\/span>/);
+  assert.match(component, /const openModelSettings = \(\) => \{\s+setOpenMenu\(''\);\s+onOpenModelSettings\?\.\(\);\s+\};/s);
+  assert.match(
+    styles,
+    /\.ace-composer-model-settings\s*\{[^}]*align-self: stretch;[^}]*flex: 1 1 auto;/s,
+  );
+  assert.match(
+    styles,
+    /\.ace-composer-model-settings\s*\{[^}]*color: var\(--ace-fg-2\);[^}]*transition: color 0\.14s ease;/s,
+  );
+  assert.match(
+    styles,
+    /\.ace-composer-model-settings:hover\s*\{[^}]*color: var\(--ace-fg\);[^}]*\}/s,
+  );
+  assert.doesNotMatch(
+    styles,
+    /\.ace-composer-model-settings:hover\s*\{[^}]*background:/s,
+  );
+});
+
+run('both composer variants deep-link model settings through the app callback', () => {
+  const app = source('App.jsx');
+  const chatView = source('components/ChatView.jsx');
+  const callbackProps = chatView.match(/^\s+onOpenModelSettings,$/gm) || [];
+
+  assert.equal(callbackProps.length, 2);
+  assert.match(app, /onOpenModelSettings=\{\(\) => openSettingsSection\('models'\)\}/);
 });
 
 run('model selector shows its label without the legacy A glyph', () => {

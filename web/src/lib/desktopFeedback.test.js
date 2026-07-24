@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   NO_FEEDBACK_SESSION_KEY,
+  buildCurrentSessionDesktopFeedbackPayload,
   buildDesktopFeedbackPayload,
   feedbackSessionKey,
   normalizeDesktopFeedbackSessions,
@@ -64,5 +65,43 @@ run('desktop feedback payload includes exactly one selected session', () => {
       session_id: 's1',
       workspace_hash: 'w1',
     },
+  );
+});
+
+run('Desktop feedback command payload always includes the current workspace session', () => {
+  assert.deepEqual(
+    buildCurrentSessionDesktopFeedbackPayload({
+      feedbackText: 'current session',
+      sessionId: 's-current',
+      workspaceHash: 'w-current',
+    }),
+    {
+      feedback_text: 'current session',
+      session_id: 's-current',
+      workspace_hash: 'w-current',
+    },
+  );
+});
+
+run('Desktop feedback command preserves explicit no-workspace identity', () => {
+  assert.deepEqual(
+    buildCurrentSessionDesktopFeedbackPayload({
+      feedbackText: '',
+      sessionId: 's-noworkspace',
+      workspaceHash: 'must-not-leak',
+      noWorkspace: true,
+    }),
+    {
+      feedback_text: '',
+      session_id: 's-noworkspace',
+      workspace_hash: '',
+    },
+  );
+  assert.equal(
+    buildCurrentSessionDesktopFeedbackPayload({
+      feedbackText: 'missing session',
+      workspaceHash: 'w1',
+    }),
+    null,
   );
 });

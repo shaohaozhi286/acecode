@@ -583,7 +583,7 @@ export const InputBar = forwardRef(function InputBar({
   }, [capabilityOpen]);
 
   const handleComposerChange = (next) => {
-    // Lexical 的 onChange 回声(程序化设值同步 / 光标移动)文本与当前 value 相同,
+    // 编辑器的 onChange 回声(程序化设值同步 / 光标移动)文本与当前 value 相同,
     // 不算用户编辑 —— 否则历史导航刚填入的文本会被误标为已编辑,上下键随即失效。
     if (!isUserComposerEdit({ nextValue: next, currentValue: value })) return;
     updateValue(next);
@@ -765,6 +765,7 @@ export const InputBar = forwardRef(function InputBar({
 
   return (
     <div className={clsx(
+      'ace-inputbar-layer',
       isHero ? 'ace-inputbar-hero' : 'border-t border-border px-2.5 py-2 bg-surface shrink-0',
     )}>
       <input
