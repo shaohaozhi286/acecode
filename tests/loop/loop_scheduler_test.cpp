@@ -58,8 +58,11 @@ public:
     BuiltinCommandResult execute_builtin_command(
         const std::string&, const BuiltinCommandRequest&) override { return {}; }
     void respond_permission(const std::string&, const PermissionDecision&) override {}
-    void respond_question(const std::string&, const std::string&,
-                          const AskUserQuestionResponse&) override {}
+    QuestionResponseStatus respond_question(
+        const std::string&, const std::string&,
+        const AskUserQuestionResponse&) override {
+        return QuestionResponseStatus::Closed;
+    }
     void abort(const std::string&) override { aborted = true; }
 
     SessionOptions created_options;

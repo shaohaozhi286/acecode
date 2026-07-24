@@ -15,6 +15,7 @@
 //   - SessionClient 方法可阻塞(create/list);事件订阅是 push 模式(回调)
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <optional>
 #include <string>
@@ -235,9 +236,30 @@ struct SessionInfo {
 
 // ----- AskUserQuestion 回应(client→server) -----
 
+// 一个仍在等待整批回答的 AskUserQuestion 请求快照。created_at/deadline
+// 使用同一进程内的 steady clock，避免系统时钟调整导致 channel 侧重算超时。
+// order 是 prompter 内的创建顺序，用于订阅实时事件后再合并快照时保持 FIFO。
+struct PendingQuestionRequestSnapshot {
+    using Clock = std::chrono::steady_clock;
+
+    std::string request_id;
+    nlohmann::json questions = nlohmann::json::array();
+    std::uint64_t order = 0;
+    Clock::time_point created_at{};
+    std::optional<Clock::time_point> deadline;
+};
+
 // 注: 完整的结构体定义在 ask_user_question_prompter.hpp。这里 fwd 声明,
 // 让 SessionClient 接口不强依赖 prompter 头(它属于 daemon 实现细节)。
 struct AskUserQuestionResponse;
+
+// respond_question 的原子 first-wins 结果。Closed 同时覆盖未知、已回答、
+// 已超时和已结束 request id；UnknownSession 单独暴露路由失效。
+enum class QuestionResponseStatus {
+    Accepted,
+    Closed,
+    UnknownSession,
+};
 
 // ----- 主接口 -----
 
@@ -322,10 +344,19 @@ public:
                                      const PermissionDecision& decision) = 0;
 
     // 回应一个之前推送的 question_request(AskUserQuestion 工具)。线程安全。
-    // 未知 request_id / 已超时的请求 = no-op。
-    virtual void respond_question(const std::string& session_id,
-                                    const std::string& request_id,
-                                    const AskUserQuestionResponse& response) = 0;
+    // first-wins:只有真正写入 pending response 的调用返回 Accepted。
+    virtual QuestionResponseStatus respond_question(
+        const std::string& session_id,
+        const std::string& request_id,
+        const AskUserQuestionResponse& response) = 0;
+
+    // 获取 session 当前未决 QuestionRequest 的创建顺序快照。空 vector 表示
+    // session 支持该边界但当前没有请求；nullopt 表示未知 session 或实现不支持。
+    virtual std::optional<std::vector<PendingQuestionRequestSnapshot>>
+    snapshot_pending_questions(const std::string& session_id) {
+        (void)session_id;
+        return std::nullopt;
+    }
 
     // 请求中止当前轮(不销毁 session)。
     virtual void abort(const std::string& session_id) = 0;

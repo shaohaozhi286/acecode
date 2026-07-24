@@ -452,3 +452,124 @@ TEST(AskUserQuestionPrompter, SnapshotReplaysPendingShapeAndFirstAnswerWins) {
     EXPECT_TRUE(prompter.snapshot_pending_requests().empty());
     d.unsubscribe(sub);
 }
+
+TEST(AskUserQuestionPrompter, ConcurrentResponsesReportExactlyOneWinner) {
+    EventDispatcher d;
+    AskUserQuestionPrompter prompter(d);
+    ResponderState state;
+    auto sub = d.subscribe([&](const SessionEvent& event) {
+        if (event.kind != SessionEventKind::QuestionRequest) return;
+        {
+            std::lock_guard<std::mutex> lock(state.mu);
+            state.request_id =
+                event.payload.value("request_id", std::string{});
+            state.got = true;
+        }
+        state.cv.notify_all();
+    });
+
+    auto future = std::async(std::launch::async, [&] {
+        return prompter.prompt(sample_questions(), nullptr);
+    });
+    std::string request_id;
+    {
+        std::unique_lock<std::mutex> lock(state.mu);
+        ASSERT_TRUE(state.cv.wait_for(lock, 500ms, [&] { return state.got; }));
+        request_id = state.request_id;
+    }
+
+    auto response = [](const std::string& selected) {
+        AskUserQuestionResponse result;
+        AskUserQuestionAnswer answer;
+        answer.question_id = "Pick a color?";
+        answer.selected = {selected};
+        result.answers.push_back(std::move(answer));
+        return result;
+    };
+    const auto red = response("Red");
+    const auto blue = response("Blue");
+    std::atomic<bool> start{false};
+    std::atomic<int> accepted{0};
+    std::thread first([&] {
+        while (!start.load()) std::this_thread::yield();
+        if (prompter.notify_response(request_id, red)) ++accepted;
+    });
+    std::thread second([&] {
+        while (!start.load()) std::this_thread::yield();
+        if (prompter.notify_response(request_id, blue)) ++accepted;
+    });
+    start.store(true);
+    first.join();
+    second.join();
+
+    ASSERT_EQ(future.wait_for(500ms), std::future_status::ready);
+    const auto winner = future.get();
+    EXPECT_EQ(accepted.load(), 1);
+    ASSERT_EQ(winner.answers.size(), 1u);
+    ASSERT_EQ(winner.answers[0].selected.size(), 1u);
+    EXPECT_TRUE(winner.answers[0].selected[0] == "Red" ||
+                winner.answers[0].selected[0] == "Blue");
+    d.unsubscribe(sub);
+}
+
+TEST(AskUserQuestionPrompter, TypedSnapshotPreservesCreationFifoAndDeadline) {
+    EventDispatcher d;
+    AskUserQuestionPrompter prompter(d);
+    std::mutex mu;
+    std::condition_variable cv;
+    std::vector<std::string> request_ids;
+    auto sub = d.subscribe([&](const SessionEvent& event) {
+        if (event.kind != SessionEventKind::QuestionRequest) return;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            request_ids.push_back(
+                event.payload.value("request_id", std::string{}));
+        }
+        cv.notify_all();
+    });
+
+    auto first = std::async(std::launch::async, [&] {
+        return prompter.prompt(sample_questions(), nullptr, 5s);
+    });
+    {
+        std::unique_lock<std::mutex> lock(mu);
+        ASSERT_TRUE(cv.wait_for(lock, 500ms, [&] {
+            return request_ids.size() >= 1;
+        }));
+    }
+    auto second = std::async(std::launch::async, [&] {
+        return prompter.prompt(sample_questions(), nullptr, 5s);
+    });
+    {
+        std::unique_lock<std::mutex> lock(mu);
+        ASSERT_TRUE(cv.wait_for(lock, 500ms, [&] {
+            return request_ids.size() >= 2;
+        }));
+    }
+
+    const auto snapshot = prompter.snapshot_pending_question_requests();
+    ASSERT_EQ(snapshot.size(), 2u);
+    EXPECT_EQ(snapshot[0].request_id, request_ids[0]);
+    EXPECT_EQ(snapshot[1].request_id, request_ids[1]);
+    EXPECT_LT(snapshot[0].order, snapshot[1].order);
+    ASSERT_TRUE(snapshot[0].deadline.has_value());
+    ASSERT_TRUE(snapshot[1].deadline.has_value());
+    EXPECT_EQ(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            *snapshot[0].deadline - snapshot[0].created_at),
+        5s);
+    EXPECT_EQ(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            *snapshot[1].deadline - snapshot[1].created_at),
+        5s);
+
+    AskUserQuestionResponse cancelled;
+    cancelled.cancelled = true;
+    EXPECT_TRUE(prompter.notify_response(request_ids[0], cancelled));
+    EXPECT_TRUE(prompter.notify_response(request_ids[1], cancelled));
+    ASSERT_EQ(first.wait_for(500ms), std::future_status::ready);
+    ASSERT_EQ(second.wait_for(500ms), std::future_status::ready);
+    (void)first.get();
+    (void)second.get();
+    d.unsubscribe(sub);
+}

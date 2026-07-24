@@ -115,9 +115,12 @@ public:
     }
     void respond_permission(const std::string&,
                             const acecode::PermissionDecision&) override {}
-    void respond_question(const std::string&,
-                          const std::string&,
-                          const acecode::AskUserQuestionResponse&) override {}
+    acecode::QuestionResponseStatus respond_question(
+        const std::string&,
+        const std::string&,
+        const acecode::AskUserQuestionResponse&) override {
+        return acecode::QuestionResponseStatus::Closed;
+    }
     void abort(const std::string&) override {}
 };
 

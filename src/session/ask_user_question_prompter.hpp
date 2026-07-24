@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -64,9 +65,10 @@ public:
                                      const std::atomic<bool>* abort_flag,
                                      std::optional<std::chrono::milliseconds> timeout_override = std::nullopt);
 
-    // 由 SessionClient 间接调用。线程安全。未知 request_id = no-op。
-    void notify_response(const std::string& request_id,
-                          const AskUserQuestionResponse& response);
+    // 由 SessionClient 间接调用。线程安全。返回 true 表示本次响应原子赢得
+    // first-wins；未知、已回答、已超时或已关闭 request_id 返回 false。
+    bool notify_response(const std::string& request_id,
+                         const AskUserQuestionResponse& response);
 
     // 测试用 / 调试用: 当前 pending 数。
     std::size_t pending_count() const;
@@ -74,6 +76,10 @@ public:
     // 快照当前仍未应答的问题请求。用于 Web 客户端晚于 QuestionRequest
     // emit 才订阅会话时补发;调用方按 request_id 去重。
     std::vector<nlohmann::json> snapshot_pending_requests() const;
+
+    // SessionClient/channel 使用的强类型快照，附带创建顺序和整批 deadline。
+    std::vector<PendingQuestionRequestSnapshot>
+    snapshot_pending_question_requests() const;
 
 private:
     static std::string make_request_id();
@@ -85,12 +91,18 @@ private:
         std::mutex                  mu;
         std::condition_variable     cv;
         bool                        responded = false;
+        bool                        accepting = true;
         AskUserQuestionResponse    response;
         nlohmann::json              request_payload;
+        std::uint64_t               order = 0;
+        PendingQuestionRequestSnapshot::Clock::time_point created_at{};
+        std::optional<PendingQuestionRequestSnapshot::Clock::time_point> deadline;
     };
 
     mutable std::mutex                                         pending_mu_;
     std::unordered_map<std::string, std::shared_ptr<Pending>>  pending_;
+    std::deque<std::string>                                    pending_order_;
+    std::uint64_t                                              next_order_ = 0;
 };
 
 } // namespace acecode

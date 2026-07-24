@@ -286,6 +286,7 @@ TEST(KeepaliveDecider, HealthProbeDueAfterInterval) {
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -530,6 +531,63 @@ nlohmann::json read_json_file(const std::string& path) {
     return nlohmann::json::parse(ifs, nullptr, false);
 }
 
+nlohmann::json channel_questions(std::size_t count = 2) {
+    nlohmann::json questions = nlohmann::json::array({
+        {
+            {"id", "Choose the implementation?"},
+            {"text", "Choose the implementation?"},
+            {"header", "Implementation"},
+            {"multiSelect", false},
+            {"options", nlohmann::json::array({
+                {{"label", "Alpha"}, {"value", "Alpha"},
+                 {"description", "First approach"}},
+                {{"label", "Beta"}, {"value", "Beta"},
+                 {"description", "Second approach"}},
+            })},
+        },
+        {
+            {"id", "Add a note?"},
+            {"text", "Add a note?"},
+            {"header", "Note"},
+            {"multiSelect", false},
+            {"options", nlohmann::json::array({
+                {{"label", "Yes"}, {"value", "Yes"},
+                 {"description", "Include a note"}},
+                {{"label", "No"}, {"value", "No"},
+                 {"description", "Skip the note"}},
+            })},
+        },
+    });
+    while (questions.size() > count) questions.erase(questions.end() - 1);
+    return questions;
+}
+
+bool wait_for_outbound_text(
+    const std::shared_ptr<CaptureSender>& sender,
+    const std::string& needle,
+    std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        for (const auto& message : sender->sent()) {
+            if (message.text.find(needle) != std::string::npos) return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    for (const auto& message : sender->sent()) {
+        if (message.text.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+std::size_t outbound_index(const std::shared_ptr<CaptureSender>& sender,
+                           const std::string& needle) {
+    const auto messages = sender->sent();
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        if (messages[i].text.find(needle) != std::string::npos) return i;
+    }
+    return messages.size();
+}
+
 } // namespace
 
 TEST(SessionChannelBinderIntegration, BindRebindOffLifecycle) {
@@ -731,6 +789,19 @@ TEST(SessionChannelBinderIntegration, ConsecutiveOutboundFailuresTriggerReactiva
     ASSERT_TRUE(bind.ok) << bind.message;
     ASSERT_TRUE(hx.runner_log->wait_for_activations(1, std::chrono::seconds(5)));
 
+    auto entry = hx.registry.acquire(s1);
+    ASSERT_TRUE(entry && entry->ask_prompter);
+    auto initial_sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(initial_sender);
+    auto pending = std::async(std::launch::async, [&] {
+        return entry->ask_prompter->prompt(
+            channel_questions(1), nullptr, std::chrono::seconds(30));
+    });
+    ASSERT_TRUE(wait_for_outbound_text(
+        initial_sender, "Choose the implementation?"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const auto failed_before = hx.service.hub().stats().outbound_failed;
+
     // 连续 3 次出站失败 → 保活线程幂等重放 activate(⑤)。
     auto failing = std::make_shared<CaptureSender>();
     failing->succeed = false;
@@ -739,6 +810,28 @@ TEST(SessionChannelBinderIntegration, ConsecutiveOutboundFailuresTriggerReactiva
     hx.emit_assistant(s1, "fail 2");
     hx.emit_assistant(s1, "fail 3");
     EXPECT_TRUE(hx.runner_log->wait_for_activations(2, std::chrono::seconds(10)));
+    const auto reannounce_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (hx.service.hub().stats().outbound_failed < failed_before + 4 &&
+           std::chrono::steady_clock::now() < reannounce_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_GE(
+        hx.service.hub().stats().outbound_failed, failed_before + 4)
+        << "3 条显式失败之外，恢复成功后还应重发 1 条当前问题";
+
+    const auto snapshot = hx.client.snapshot_pending_questions(s1);
+    ASSERT_TRUE(snapshot.has_value());
+    ASSERT_EQ(snapshot->size(), 1u);
+    acecode::AskUserQuestionResponse cancelled;
+    cancelled.cancelled = true;
+    EXPECT_EQ(
+        hx.client.respond_question(
+            s1, snapshot->front().request_id, cancelled),
+        acecode::QuestionResponseStatus::Accepted);
+    ASSERT_EQ(pending.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    (void)pending.get();
 
     binder.shutdown();
     EXPECT_FALSE(hx.service.running());
@@ -953,4 +1046,243 @@ TEST(SessionChannelBinderIntegration, RebuildFromConfigRestoresNoWorkspaceBindin
     }
     binder.shutdown();
     hx.registry.destroy(sid);
+}
+
+TEST(SessionChannelBinderIntegration,
+     MultiQuestionChannelDraftUnblocksOnlyAfterFinalAnswer) {
+    BinderHarness hx("channel-question");
+    acecode::rc::SessionChannelBinder binder(hx.binder_deps());
+    const auto sid = hx.client.create_session({});
+    auto bind = binder.execute_command(sid, "");
+    ASSERT_TRUE(bind.ok) << bind.message;
+
+    auto sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(sender);
+    std::atomic<int> aq_user_messages{0};
+    const auto transcript_sub = hx.client.subscribe(
+        sid,
+        [&](const acecode::SessionEvent& event) {
+            if (event.kind == acecode::SessionEventKind::Message &&
+                event.payload.value("role", std::string{}) == "user" &&
+                event.payload.value("content", std::string{}).find("/aq") !=
+                    std::string::npos) {
+                ++aq_user_messages;
+            }
+        });
+    ASSERT_NE(transcript_sub, 0u);
+
+    auto entry = hx.registry.acquire(sid);
+    ASSERT_TRUE(entry && entry->ask_prompter);
+    auto pending = std::async(std::launch::async, [&] {
+        return entry->ask_prompter->prompt(
+            channel_questions(), nullptr, std::chrono::seconds(5));
+    });
+    ASSERT_TRUE(wait_for_outbound_text(sender, "Choose the implementation?"));
+
+    const auto first = hx.service.hub().handle_inbound(
+        "/aq 1", hx.cfg.remote_control.token);
+    ASSERT_TRUE(first.ok()) << first.message;
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(200)),
+              std::future_status::timeout);
+    ASSERT_TRUE(wait_for_outbound_text(sender, "已记录第 1/2 题"));
+    ASSERT_TRUE(wait_for_outbound_text(sender, "Add a note?"));
+
+    const auto final = hx.service.hub().handle_inbound(
+        "/aq deployment note", hx.cfg.remote_control.token);
+    ASSERT_TRUE(final.ok()) << final.message;
+    ASSERT_EQ(pending.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    const auto response = pending.get();
+    EXPECT_FALSE(response.cancelled);
+    EXPECT_FALSE(response.timed_out);
+    ASSERT_EQ(response.answers.size(), 2u);
+    EXPECT_EQ(response.answers[0].selected,
+              std::vector<std::string>({"Alpha"}));
+    EXPECT_EQ(response.answers[1].custom_text, "deployment note");
+    EXPECT_TRUE(wait_for_outbound_text(sender, "答案已提交，继续执行"));
+    EXPECT_EQ(aq_user_messages.load(), 0);
+
+    const auto thinking = outbound_index(sender, "思考中...");
+    const auto recorded = outbound_index(sender, "已记录第 1/2 题");
+    EXPECT_LT(thinking, recorded)
+        << "Hub acknowledgement must remain ahead of bridge output";
+
+    hx.client.unsubscribe(sid, transcript_sub);
+    binder.execute_command(sid, "off");
+    hx.registry.destroy(sid);
+}
+
+TEST(SessionChannelBinderIntegration,
+     WebAnswerWinsAndAuthoritativeCloseClearsChannelDraft) {
+    BinderHarness hx("question-web-first");
+    acecode::rc::SessionChannelBinder binder(hx.binder_deps());
+    const auto sid = hx.client.create_session({});
+    auto bind = binder.execute_command(sid, "");
+    ASSERT_TRUE(bind.ok) << bind.message;
+    auto sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(sender);
+
+    auto entry = hx.registry.acquire(sid);
+    ASSERT_TRUE(entry && entry->ask_prompter);
+    auto pending = std::async(std::launch::async, [&] {
+        return entry->ask_prompter->prompt(
+            channel_questions(), nullptr, std::chrono::seconds(5));
+    });
+    ASSERT_TRUE(wait_for_outbound_text(sender, "Choose the implementation?"));
+    ASSERT_TRUE(hx.service.hub().handle_inbound(
+        "/aq 1", hx.cfg.remote_control.token).ok());
+    ASSERT_TRUE(wait_for_outbound_text(sender, "Add a note?"));
+
+    const auto snapshot = hx.client.snapshot_pending_questions(sid);
+    ASSERT_TRUE(snapshot.has_value());
+    ASSERT_EQ(snapshot->size(), 1u);
+    acecode::AskUserQuestionResponse web_response;
+    acecode::AskUserQuestionAnswer first_answer;
+    first_answer.question_id = "Choose the implementation?";
+    first_answer.selected = {"Beta"};
+    web_response.answers.push_back(std::move(first_answer));
+    acecode::AskUserQuestionAnswer second_answer;
+    second_answer.question_id = "Add a note?";
+    second_answer.selected = {"No"};
+    web_response.answers.push_back(std::move(second_answer));
+    EXPECT_EQ(
+        hx.client.respond_question(
+            sid, snapshot->front().request_id, web_response),
+        acecode::QuestionResponseStatus::Accepted);
+
+    ASSERT_EQ(pending.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    const auto response = pending.get();
+    ASSERT_EQ(response.answers.size(), 2u);
+    EXPECT_EQ(response.answers[0].selected,
+              std::vector<std::string>({"Beta"}));
+    EXPECT_TRUE(wait_for_outbound_text(
+        sender, "问题已在 ACECode 页面完成，本端草稿已清除"));
+
+    ASSERT_TRUE(hx.service.hub().handle_inbound(
+        "/aq 2", hx.cfg.remote_control.token).ok());
+    EXPECT_TRUE(wait_for_outbound_text(sender, "当前没有待回答的问题"));
+
+    binder.execute_command(sid, "off");
+    hx.registry.destroy(sid);
+}
+
+TEST(SessionChannelBinderIntegration,
+     ConcurrentWebAndChannelAnswersKeepPrompterFirstWins) {
+    BinderHarness hx("question-race");
+    acecode::rc::SessionChannelBinder binder(hx.binder_deps());
+    const auto sid = hx.client.create_session({});
+    auto bind = binder.execute_command(sid, "");
+    ASSERT_TRUE(bind.ok) << bind.message;
+    auto sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(sender);
+
+    auto entry = hx.registry.acquire(sid);
+    ASSERT_TRUE(entry && entry->ask_prompter);
+    auto pending = std::async(std::launch::async, [&] {
+        return entry->ask_prompter->prompt(
+            channel_questions(1), nullptr, std::chrono::seconds(5));
+    });
+    ASSERT_TRUE(wait_for_outbound_text(sender, "Choose the implementation?"));
+    const auto snapshot = hx.client.snapshot_pending_questions(sid);
+    ASSERT_TRUE(snapshot.has_value());
+    ASSERT_EQ(snapshot->size(), 1u);
+
+    acecode::AskUserQuestionResponse web_response;
+    acecode::AskUserQuestionAnswer web_answer;
+    web_answer.question_id = "Choose the implementation?";
+    web_answer.selected = {"Beta"};
+    web_response.answers.push_back(std::move(web_answer));
+
+    std::atomic<bool> start{false};
+    acecode::QuestionResponseStatus web_status =
+        acecode::QuestionResponseStatus::Closed;
+    acecode::rc::InboundResult channel_status;
+    std::thread web([&] {
+        while (!start.load()) std::this_thread::yield();
+        web_status = hx.client.respond_question(
+            sid, snapshot->front().request_id, web_response);
+    });
+    std::thread channel([&] {
+        while (!start.load()) std::this_thread::yield();
+        channel_status = hx.service.hub().handle_inbound(
+            "/aq 1", hx.cfg.remote_control.token);
+    });
+    start.store(true);
+    web.join();
+    channel.join();
+
+    EXPECT_TRUE(channel_status.ok()) << channel_status.message;
+    ASSERT_EQ(pending.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    const auto response = pending.get();
+    ASSERT_EQ(response.answers.size(), 1u);
+    ASSERT_EQ(response.answers[0].selected.size(), 1u);
+    if (web_status == acecode::QuestionResponseStatus::Accepted) {
+        EXPECT_EQ(response.answers[0].selected[0], "Beta");
+    } else {
+        EXPECT_EQ(web_status, acecode::QuestionResponseStatus::Closed);
+        EXPECT_EQ(response.answers[0].selected[0], "Alpha");
+    }
+
+    binder.execute_command(sid, "off");
+    hx.registry.destroy(sid);
+}
+
+TEST(SessionChannelBinderIntegration,
+     RebindGenerationRejectsOldAnswersAndSnapshotRestoresPendingBatch) {
+    BinderHarness hx("question-rebind");
+    acecode::rc::SessionChannelBinder binder(hx.binder_deps());
+    const auto first_sid = hx.client.create_session({});
+    const auto second_sid = hx.client.create_session({});
+    auto first_bind = binder.execute_command(first_sid, "");
+    ASSERT_TRUE(first_bind.ok) << first_bind.message;
+    auto sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(sender);
+
+    auto entry = hx.registry.acquire(first_sid);
+    ASSERT_TRUE(entry && entry->ask_prompter);
+    auto pending = std::async(std::launch::async, [&] {
+        return entry->ask_prompter->prompt(
+            channel_questions(), nullptr, std::chrono::seconds(10));
+    });
+    ASSERT_TRUE(wait_for_outbound_text(sender, "Choose the implementation?"));
+    ASSERT_TRUE(hx.service.hub().handle_inbound(
+        "/aq 1", hx.cfg.remote_control.token).ok());
+    ASSERT_TRUE(wait_for_outbound_text(sender, "Add a note?"));
+
+    auto second_bind = binder.execute_command(second_sid, "");
+    ASSERT_TRUE(second_bind.ok) << second_bind.message;
+    sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(sender);
+    ASSERT_TRUE(hx.service.hub().handle_inbound(
+        "/aq 1", hx.cfg.remote_control.token).ok());
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(200)),
+              std::future_status::timeout);
+    EXPECT_TRUE(wait_for_outbound_text(sender, "当前没有待回答的问题"));
+
+    auto rebound = binder.execute_command(first_sid, "");
+    ASSERT_TRUE(rebound.ok) << rebound.message;
+    sender = std::make_shared<CaptureSender>();
+    hx.service.hub().set_outbound_sender(sender);
+    ASSERT_TRUE(hx.service.hub().handle_inbound(
+        "/aq --status", hx.cfg.remote_control.token).ok());
+    ASSERT_TRUE(wait_for_outbound_text(sender, "第 1/2 题"));
+    EXPECT_TRUE(wait_for_outbound_text(sender, "已记录 0/2 题"));
+
+    ASSERT_TRUE(hx.service.hub().handle_inbound(
+        "/aq 2", hx.cfg.remote_control.token).ok());
+    ASSERT_TRUE(hx.service.hub().handle_inbound(
+        "/aq restored", hx.cfg.remote_control.token).ok());
+    ASSERT_EQ(pending.wait_for(std::chrono::seconds(2)),
+              std::future_status::ready);
+    const auto response = pending.get();
+    ASSERT_EQ(response.answers.size(), 2u);
+    EXPECT_EQ(response.answers[0].selected,
+              std::vector<std::string>({"Beta"}));
+    EXPECT_EQ(response.answers[1].custom_text, "restored");
+
+    binder.execute_command(first_sid, "off");
+    hx.registry.destroy(first_sid);
+    hx.registry.destroy(second_sid);
 }

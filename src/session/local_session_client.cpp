@@ -95,15 +95,25 @@ void LocalSessionClient::respond_permission(const std::string& session_id,
     entry->prompter->notify_decision(decision.request_id, decision.choice);
 }
 
-void LocalSessionClient::respond_question(const std::string& session_id,
-                                              const std::string& request_id,
-                                              const AskUserQuestionResponse& response) {
+QuestionResponseStatus LocalSessionClient::respond_question(
+    const std::string& session_id,
+    const std::string& request_id,
+    const AskUserQuestionResponse& response) {
     auto entry = registry_.acquire(session_id);
     if (!entry || !entry->ask_prompter) {
         LOG_WARN("[client] respond_question on unknown session " + session_id);
-        return;
+        return QuestionResponseStatus::UnknownSession;
     }
-    entry->ask_prompter->notify_response(request_id, response);
+    return entry->ask_prompter->notify_response(request_id, response)
+               ? QuestionResponseStatus::Accepted
+               : QuestionResponseStatus::Closed;
+}
+
+std::optional<std::vector<PendingQuestionRequestSnapshot>>
+LocalSessionClient::snapshot_pending_questions(const std::string& session_id) {
+    auto entry = registry_.acquire(session_id);
+    if (!entry || !entry->ask_prompter) return std::nullopt;
+    return entry->ask_prompter->snapshot_pending_question_requests();
 }
 
 void LocalSessionClient::abort(const std::string& session_id) {

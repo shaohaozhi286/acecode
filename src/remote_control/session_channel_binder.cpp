@@ -3,6 +3,7 @@
 #include "session/session_registry.hpp"
 #include "utils/logger.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <sstream>
 #include <utility>
@@ -43,6 +44,44 @@ void ChannelBindingState::unbind() {
 bool ChannelBindingState::accepts(const std::string& session_id,
                                   std::uint64_t generation) const {
     return bound() && generation == generation_ && session_id == session_id_;
+}
+
+SessionChannelBinder::ContextLease::ContextLease(
+    std::shared_ptr<BindingContext> context)
+    : context_(std::move(context)) {
+    if (!context_) return;
+    std::lock_guard<std::mutex> lock(context_->mu);
+    if (!context_->active) return;
+    ++context_->in_flight;
+    entered_ = true;
+}
+
+SessionChannelBinder::ContextLease::~ContextLease() {
+    if (!entered_ || !context_) return;
+    std::lock_guard<std::mutex> lock(context_->mu);
+    if (context_->in_flight > 0) --context_->in_flight;
+    if (context_->in_flight == 0) context_->cv.notify_all();
+}
+
+void SessionChannelBinder::deactivate_context(
+    const std::shared_ptr<BindingContext>& context) {
+    if (!context) return;
+    std::unique_lock<std::mutex> lock(context->mu);
+    context->active = false;
+    context->outbound_ready.store(false);
+    context->cv.wait(lock, [&] { return context->in_flight == 0; });
+}
+
+void SessionChannelBinder::emit_question_texts(
+    const std::shared_ptr<BindingContext>& context,
+    RemoteControlHub* hub,
+    const ChannelQuestionAction& action) {
+    if (!context || !hub) return;
+    if (context->outbound_ready.load()) {
+        for (const auto& text : action.outbound_texts) {
+            hub->notify_assistant_text(text);
+        }
+    }
 }
 
 bool should_rebuild_binding(const std::string& bound_session_id, bool session_exists) {
@@ -290,51 +329,94 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
     }
     const int port = service.status().port;
 
-    // 换绑:先切状态机(世代 +1),旧订阅哪怕还有在途事件也会被 accepts()
-    // 拒掉;随后退订旧会话、订阅新会话。
+    // 换绑:先切 generation 并撤销旧 context。旧回调只捕获 shared context，
+    // 不捕获 binder；deactivate 等待已线性化的入站/事件完成后再退订，既不
+    // 跨 session 投递，也不会在 unsubscribe 的在途窗口访问析构后的 this。
     std::string old_session;
     SessionClient::SubscriptionId old_sub = 0;
+    std::shared_ptr<BindingContext> old_context;
     std::uint64_t generation = 0;
+    // Hub route 是入站 generation 的线性化点：先切断后续接受，再更新 binder
+    // 状态。此前已由 handle_inbound 快照接受的 callback 仍按旧 session 完成。
+    service.hub().clear_inbound_route();
     {
         std::lock_guard<std::mutex> lk(mu_);
         old_session = binding_.bound_session();
         old_sub = sub_id_;
         sub_id_ = 0;
+        old_context = std::move(binding_context_);
         generation = binding_.bind(session_id);
     }
+    deactivate_context(old_context);
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
 
-    // 入站(行为③):channel 文本走绑定会话的 SessionClient::send_input,
-    // AgentLoop::submit 自带 busy 排队语义 —— 与 Web 输入框提交同一条路径。
-    // session_id 与回调在 Hub 内原子发布;回调只捕获长生命周期 client 指针和
-    // 本世代 sid,不回读 binding_ / 不捕获 this。消息一旦被 Hub 接受,即使
-    // 紧接着 off/rebind,仍会投到接受瞬间的会话。
+    auto context = std::make_shared<BindingContext>();
+    context->session_id = session_id;
+    context->generation = generation;
     auto* inbound_client = deps_.client;
-    service.hub().set_inbound_route(session_id,
-                                    [inbound_client, session_id](const std::string& text) {
-        inbound_client->send_input(session_id, text);
-    });
-    // 出站结果观察(行为⑤):连续失败达到阈值 → 唤醒保活线程做幂等再激活。
-    service.hub().set_outbound_result_observer([this](bool ok) {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!active_channel_) return;
-        if (decider_.on_outbound_result(ok)) {
-            reactivate_now_ = true;
-            cv_.notify_all();
-        }
-    });
+    auto* hub = &service.hub();
 
-    // 出站(行为④):since_seq=0 只收订阅之后的新事件 —— 不回放激活前历史,
-    // 镜像 TUI 出站游标语义。回调先过 accepts()(session + generation),
-    // 未绑定会话的事件绝不流入 channel。
-    auto listener = [this, session_id, generation](const SessionEvent& evt) {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!binding_.accepts(session_id, generation)) return;
+    // 订阅仍使用 since_seq=0，不回放普通会话历史；QuestionRequest 通过下面
+    // 的 pending snapshot 单独补齐。listener 与入站 route 只捕获 context、
+    // client 和 hub，binder 析构后即使有在途 dispatcher 回调也不会 UAF。
+    auto listener = [context, inbound_client, hub](const SessionEvent& evt) {
+        ContextLease lease(context);
+        if (!lease) return;
+        std::lock_guard<std::mutex> action_lock(context->action_mu);
+
+        if (evt.kind == SessionEventKind::QuestionRequest) {
+            std::string error;
+            auto request = ChannelQuestionBridge::request_from_event(
+                evt.payload,
+                evt.seq,
+                ChannelQuestionBridge::Clock::now(),
+                &error);
+            ChannelQuestionAction question_action;
+            if (request.has_value()) {
+                // 实时帧可能在 dispatcher 队列中等待；LocalSessionClient 的
+                // pending 快照持有 prompter 创建时的 steady-clock deadline，
+                // 不能把 observed_at + timeout 当成新的整批计时起点。支持
+                // 快照但已找不到该请求时，说明它已被另一端回答或关闭。
+                if (auto pending = inbound_client->snapshot_pending_questions(
+                        context->session_id)) {
+                    auto exact = std::find_if(
+                        pending->begin(),
+                        pending->end(),
+                        [&](const PendingQuestionRequestSnapshot& candidate) {
+                            return candidate.request_id == request->request_id;
+                        });
+                    if (exact == pending->end()) return;
+                    request = *exact;
+                }
+                question_action =
+                    context->questions->add_request(std::move(*request));
+            } else {
+                question_action.outbound_texts.push_back(
+                    "无法展示待回答问题：" + error);
+            }
+            emit_question_texts(context, hub, question_action);
+            return;
+        }
+        if (evt.kind == SessionEventKind::QuestionClosed) {
+            const std::string request_id =
+                evt.payload.value("request_id", std::string{});
+            if (request_id.empty()) {
+                LOG_WARN("[remote-control] ignored QuestionClosed without request id");
+                return;
+            }
+            auto question_action = context->questions->close_request(
+                request_id,
+                evt.payload.value("reason", std::string{"closed"}));
+            emit_question_texts(context, hub, question_action);
+            return;
+        }
 
         auto action = classify_session_event(evt.kind, evt.payload);
         switch (action.kind) {
         case OutboundEventAction::Kind::AssistantText:
-            deps_.service->hub().notify_assistant_text(action.text);
+            if (context->outbound_ready.load()) {
+                hub->notify_assistant_text(action.text);
+            }
             break;
         case OutboundEventAction::Kind::ToolCall:  // 已不再产出(工具全部抑制)
         case OutboundEventAction::Kind::None:
@@ -343,6 +425,7 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
     };
     auto sub = deps_.client->subscribe(session_id, listener, /*since_seq=*/0);
     if (sub == 0) {
+        deactivate_context(context);
         {
             std::lock_guard<std::mutex> lk(mu_);
             binding_.unbind();
@@ -351,6 +434,14 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
         service.hub().clear_inbound_route();
         if (started_now) service.stop();
         return {false, "Session " + session_id + " is not active; cannot bind."};
+    }
+
+    // subscribe 先于 snapshot，避免晚绑定漏问；listener 在 outbound_ready=false
+    // 时只更新 bridge，不出站。二者按 request id 去重、按 request_order 排序，
+    // QuestionClosed tombstone 可压住“关闭早于快照”的竞态。
+    if (auto pending = deps_.client->snapshot_pending_questions(session_id)) {
+        std::lock_guard<std::mutex> action_lock(context->action_mu);
+        (void)context->questions->merge_snapshot(std::move(*pending));
     }
 
     ChannelActivationRequest request;
@@ -366,6 +457,7 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
     auto host = make_plugin_host();
     auto activation = host.activate(*manifest, request, timeout_ms, &error);
     if (!activation.ok) {
+        deactivate_context(context);
         deps_.client->unsubscribe(session_id, sub);
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -382,13 +474,66 @@ SessionChannelBinder::bind_session(const std::string& session_id) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         sub_id_ = sub;
+        binding_context_ = context;
         active_channel_ = ActiveChannel{channel_name, *manifest, request,
                                         timeout_ms, generation};
         decider_ = KeepaliveDecider(deps_.failure_threshold, deps_.health_interval);
         decider_.note_reactivated(KeepaliveDecider::Clock::now());
         reactivate_now_ = false;
+        channel_recovery_pending_ = false;
         cv_.notify_all();
     }
+
+    // 把普通输入与 /aq 控制面作为同一原子 Hub route 发布。Hub 已在调用本
+    // callback 前排入“思考中...”；这里的文本/下一题继续进入同一个 FIFO。
+    {
+        std::lock_guard<std::mutex> action_lock(context->action_mu);
+        context->outbound_ready.store(true);
+        auto current = context->questions->announce_current();
+        emit_question_texts(context, hub, current);
+    }
+    service.hub().set_inbound_route(
+        session_id,
+        [context, inbound_client, hub](const std::string& text) {
+            ContextLease lease(context);
+            if (!lease) return;
+
+            ChannelQuestionAction action;
+            {
+                std::lock_guard<std::mutex> action_lock(context->action_mu);
+                action = context->questions->handle_input(text);
+                if (action.handled) {
+                    emit_question_texts(context, hub, action);
+                }
+            }
+            if (!action.handled) {
+                inbound_client->send_input(context->session_id, text);
+                return;
+            }
+            if (!action.submission.has_value()) return;
+
+            // respond_question 可能唤醒 prompter 并同步/并发回发
+            // QuestionClosed；此处不持 binder/context action 锁。
+            const auto request_id = action.submission->request_id;
+            const auto status = inbound_client->respond_question(
+                context->session_id,
+                request_id,
+                action.submission->response);
+            std::lock_guard<std::mutex> action_lock(context->action_mu);
+            auto completion = context->questions->complete_submission(
+                request_id, status);
+            emit_question_texts(context, hub, completion);
+        });
+    // 出站结果观察(行为⑤):连续失败达到阈值 → 唤醒保活线程做幂等再激活。
+    service.hub().set_outbound_result_observer([this](bool ok) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!active_channel_) return;
+        if (decider_.on_outbound_result(ok)) {
+            reactivate_now_ = true;
+            channel_recovery_pending_ = true;
+            cv_.notify_all();
+        }
+    });
 
     persist_binding(session_id, token);
     ensure_keepalive_thread();
@@ -426,17 +571,21 @@ SessionChannelBinder::CommandOutcome SessionChannelBinder::unbind_and_stop() {
     std::string old_session;
     SessionClient::SubscriptionId old_sub = 0;
     std::optional<ActiveChannel> active;
+    std::shared_ptr<BindingContext> old_context;
+    service.hub().clear_inbound_route();
     {
         std::lock_guard<std::mutex> lk(mu_);
         old_session = binding_.bound_session();
         old_sub = sub_id_;
         sub_id_ = 0;
+        old_context = std::move(binding_context_);
         active = active_channel_;
         active_channel_.reset();
         binding_.unbind();
         reactivate_now_ = false;
+        channel_recovery_pending_ = false;
     }
-    service.hub().clear_inbound_route();
+    deactivate_context(old_context);
     service.hub().set_outbound_result_observer({});
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
 
@@ -481,14 +630,18 @@ void SessionChannelBinder::shutdown() {
 
     std::string old_session;
     SessionClient::SubscriptionId old_sub = 0;
+    std::shared_ptr<BindingContext> old_context;
     {
         std::lock_guard<std::mutex> lk(mu_);
         old_session = binding_.bound_session();
         old_sub = sub_id_;
         sub_id_ = 0;
+        old_context = std::move(binding_context_);
         binding_.unbind();
         active_channel_.reset();
+        channel_recovery_pending_ = false;
     }
+    deactivate_context(old_context);
     if (old_sub != 0) deps_.client->unsubscribe(old_session, old_sub);
 }
 
@@ -597,20 +750,50 @@ void SessionChannelBinder::keepalive_loop() {
             if (snapshot.has_value()) {
                 std::string error;
                 auto host = make_plugin_host();
+                const auto previous_outbound_url =
+                    deps_.service->status().outbound_url;
                 auto activation = host.activate(snapshot->manifest, snapshot->request,
                                                 snapshot->timeout_ms, &error);
-                std::lock_guard<std::mutex> state(mu_);
-                if (active_channel_.has_value() &&
-                    active_channel_->generation == snapshot->generation) {
-                    if (activation.ok) {
-                        // 幂等再激活成功即视为探活通过;outbound_url 可能已变
-                        //(插件重启换端口),热更新出站通道。
-                        deps_.service->set_outbound_url(activation.status.outbound_url);
-                    } else {
-                        LOG_WARN("[remote-control] channel keepalive reactivation "
-                                 "failed: " + error);
+                std::shared_ptr<BindingContext> announce_context;
+                {
+                    std::lock_guard<std::mutex> state(mu_);
+                    if (active_channel_.has_value() &&
+                        active_channel_->generation == snapshot->generation) {
+                        if (activation.ok) {
+                            // 幂等再激活成功即视为探活通过;outbound_url 可能已变
+                            //(插件重启换端口),热更新出站通道。只有真实恢复或
+                            // 地址变化才重发当前问题，避免周期探活每分钟刷屏。
+                            deps_.service->set_outbound_url(
+                                activation.status.outbound_url);
+                            const bool recovered =
+                                fire ||
+                                channel_recovery_pending_ ||
+                                previous_outbound_url !=
+                                    activation.status.outbound_url;
+                            channel_recovery_pending_ = false;
+                            if (recovered) {
+                                announce_context = binding_context_;
+                            }
+                        } else {
+                            channel_recovery_pending_ = true;
+                            LOG_WARN(
+                                "[remote-control] channel keepalive reactivation "
+                                "failed: " + error);
+                        }
+                        decider_.note_reactivated(
+                            KeepaliveDecider::Clock::now());
                     }
-                    decider_.note_reactivated(KeepaliveDecider::Clock::now());
+                }
+                if (announce_context) {
+                    ContextLease lease(announce_context);
+                    if (lease) {
+                        std::lock_guard<std::mutex> action_lock(
+                            announce_context->action_mu);
+                        auto current =
+                            announce_context->questions->announce_current();
+                        emit_question_texts(
+                            announce_context, &deps_.service->hub(), current);
+                    }
                 }
             }
         }

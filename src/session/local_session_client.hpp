@@ -39,9 +39,12 @@ public:
         const BuiltinCommandRequest& request) override;
     void respond_permission(const std::string& session_id,
                               const PermissionDecision& decision) override;
-    void respond_question(const std::string& session_id,
-                            const std::string& request_id,
-                            const AskUserQuestionResponse& response) override;
+    QuestionResponseStatus respond_question(
+        const std::string& session_id,
+        const std::string& request_id,
+        const AskUserQuestionResponse& response) override;
+    std::optional<std::vector<PendingQuestionRequestSnapshot>>
+    snapshot_pending_questions(const std::string& session_id) override;
     void abort(const std::string& session_id) override;
 
 private:

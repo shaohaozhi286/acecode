@@ -26,6 +26,7 @@
 // 由集成测试(假 plugin runner + 真 SessionRegistry)与 e2e 覆盖。
 
 #include "channel_plugin.hpp"
+#include "channel_question_bridge.hpp"
 #include "remote_control_service.hpp"
 
 #include "../config/config.hpp"
@@ -33,11 +34,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -191,6 +194,34 @@ public:
     std::string bound_session_id() const;
 
 private:
+    struct BindingContext {
+        std::mutex mu;
+        std::condition_variable cv;
+        bool active = true;
+        std::size_t in_flight = 0;
+        std::mutex action_mu;
+        std::atomic<bool> outbound_ready{false};
+        std::string session_id;
+        std::uint64_t generation = 0;
+        std::shared_ptr<ChannelQuestionBridge> questions =
+            std::make_shared<ChannelQuestionBridge>();
+    };
+
+    class ContextLease {
+    public:
+        explicit ContextLease(std::shared_ptr<BindingContext> context);
+        ~ContextLease();
+
+        ContextLease(const ContextLease&) = delete;
+        ContextLease& operator=(const ContextLease&) = delete;
+
+        explicit operator bool() const { return entered_; }
+
+    private:
+        std::shared_ptr<BindingContext> context_;
+        bool entered_ = false;
+    };
+
     struct ActiveChannel {
         std::string name;
         ChannelPluginManifest manifest;
@@ -210,6 +241,12 @@ private:
     void ensure_keepalive_thread();
     void keepalive_loop();
     ChannelPluginHost make_plugin_host() const;
+    static void deactivate_context(
+        const std::shared_ptr<BindingContext>& context);
+    static void emit_question_texts(
+        const std::shared_ptr<BindingContext>& context,
+        RemoteControlHub* hub,
+        const ChannelQuestionAction& action);
 
     SessionChannelBinderDeps deps_;
 
@@ -222,9 +259,11 @@ private:
 
     ChannelBindingState binding_;
     SessionClient::SubscriptionId sub_id_ = 0;
+    std::shared_ptr<BindingContext> binding_context_;
     std::optional<ActiveChannel> active_channel_;
     KeepaliveDecider decider_;
     bool reactivate_now_ = false;
+    bool channel_recovery_pending_ = false;
     bool stop_requested_ = false;
     bool shut_down_ = false;
     std::thread keepalive_thread_;
