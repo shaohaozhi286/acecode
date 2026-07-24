@@ -678,6 +678,10 @@ void WebServer::Impl::register_sessions() {
 
             std::uint64_t since = 0;
             if (auto s = req.url_params.get("since")) since = parse_seq(s);
+            const std::string workspace_hash_hint =
+                req.url_params.get("workspace")
+                ? std::string(req.url_params.get("workspace"))
+                : std::string{};
 
             // 用 subscribe(since_seq) 触发 replay,回调里收集事件;然后立刻
             // unsubscribe。因为 EventDispatcher 的 replay 是同步的,subscribe
@@ -722,17 +726,29 @@ void WebServer::Impl::register_sessions() {
                     }
                 }
 
-                std::vector<std::string> project_dirs{
-                    SessionStorage::get_project_dir(deps.cwd),
-                };
+                std::vector<std::string> project_dirs;
+                auto append_project_dir =
+                    [&project_dirs](const std::string& cwd) {
+                        if (cwd.empty()) return;
+                        const auto project_dir =
+                            SessionStorage::get_project_dir(cwd);
+                        if (std::find(
+                                project_dirs.begin(),
+                                project_dirs.end(),
+                                project_dir) == project_dirs.end()) {
+                            project_dirs.push_back(project_dir);
+                        }
+                    };
+                if (!workspace_hash_hint.empty()) {
+                    if (auto workspace =
+                            resolve_workspace(workspace_hash_hint)) {
+                        append_project_dir(workspace->cwd);
+                    }
+                }
+                append_project_dir(deps.cwd);
                 if (auto no_workspace_meta = find_no_workspace_session_meta(id)) {
                     if (!no_workspace_meta->cwd.empty()) {
-                        const auto no_workspace_project_dir =
-                            SessionStorage::get_project_dir(no_workspace_meta->cwd);
-                        if (std::find(project_dirs.begin(), project_dirs.end(),
-                                      no_workspace_project_dir) == project_dirs.end()) {
-                            project_dirs.push_back(no_workspace_project_dir);
-                        }
+                        append_project_dir(no_workspace_meta->cwd);
                     }
                 }
                 for (const auto& project_dir : project_dirs) {

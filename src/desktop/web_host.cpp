@@ -56,6 +56,10 @@ std::function<bool()> g_close_handler;
 // eval 回前端。主线程 only(WebView2 事件与 AppKit 拖放均在 GUI 主线程)。
 std::function<void(std::vector<std::string>)> g_file_drop_handler;
 
+// A second Desktop process can carry more intent than "show the window".
+// main.cpp uses this GUI-thread callback to consume its one-shot open request.
+std::function<void()> g_existing_instance_focus_handler;
+
 #ifdef __APPLE__
 std::function<void(bool)> g_mac_window_state_handler;
 bool g_mac_last_known_maximized = false;
@@ -221,6 +225,9 @@ id install_mac_focus_existing_observer(webview::webview& w) {
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(__unused NSNotification* note) {
                     show_mac_window(window);
+                    if (g_existing_instance_focus_handler) {
+                        g_existing_instance_focus_handler();
+                    }
                 }];
 }
 
@@ -1082,6 +1089,9 @@ LRESULT CALLBACK host_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
                     ::ShowWindow(hwnd, SW_SHOW);
                 }
                 ::SetForegroundWindow(hwnd);
+                if (g_existing_instance_focus_handler) {
+                    g_existing_instance_focus_handler();
+                }
                 return 0;
             }
             break;
@@ -2003,6 +2013,10 @@ void WebHost::set_window_focus_handler(WindowFocusHandler handler) {
 #else
     (void)handler;
 #endif
+}
+void WebHost::set_existing_instance_focus_handler(
+    ExistingInstanceFocusHandler handler) {
+    g_existing_instance_focus_handler = std::move(handler);
 }
 bool WebHost::close_window() {
 #ifdef _WIN32

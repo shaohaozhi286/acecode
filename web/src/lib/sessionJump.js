@@ -68,6 +68,13 @@ export function sessionJumpNoWorkspace(target = {}, fallback = {}) {
   );
 }
 
+export function sessionJumpReadOnly(target = {}, fallback = {}) {
+  return !!(
+    target.readOnly || target.read_only ||
+    fallback.readOnly || fallback.read_only
+  );
+}
+
 export function sessionJumpWorkspaceHash(target = {}, fallback = {}) {
   if (sessionJumpNoWorkspace(target, fallback)) return '';
   return firstText(
@@ -86,12 +93,13 @@ export function openSessionTargetFromSearch(search = '') {
   const sessionId = firstText(params.get('open'));
   if (!sessionId) return null;
   const noWorkspace = boolParam(params.get('no_workspace')) || boolParam(params.get('noWorkspace'));
+  const readOnly = boolParam(params.get('read_only')) || boolParam(params.get('readOnly'));
   const workspaceHash = noWorkspace ? '' : firstText(
     params.get('workspace'),
     params.get('workspace_hash'),
     params.get('workspaceHash'),
   );
-  const target = { sessionId, workspaceHash, noWorkspace };
+  const target = { sessionId, workspaceHash, noWorkspace, readOnly };
   const ordinal = sessionJumpMessageOrdinal({
     message_ordinal: params.get('message_ordinal'),
     messageOrdinal: params.get('messageOrdinal'),
@@ -105,7 +113,7 @@ export function openSessionTargetFromSearch(search = '') {
 export function stripOpenSessionParams(search = '') {
   const raw = text(search);
   const params = new URLSearchParams(raw.startsWith('?') ? raw.slice(1) : raw);
-  for (const key of ['open', 'workspace', 'workspace_hash', 'workspaceHash', 'no_workspace', 'noWorkspace', 'message_ordinal', 'messageOrdinal']) {
+  for (const key of ['open', 'workspace', 'workspace_hash', 'workspaceHash', 'no_workspace', 'noWorkspace', 'read_only', 'readOnly', 'message_ordinal', 'messageOrdinal']) {
     params.delete(key);
   }
   return params.toString();
@@ -117,6 +125,7 @@ export function desktopOpenSessionUrl({
   sessionId,
   workspaceHash = '',
   noWorkspace = false,
+  readOnly = false,
   messageOrdinal = null,
   protocol = 'http:',
 } = {}) {
@@ -128,6 +137,7 @@ export function desktopOpenSessionUrl({
   const ws = text(workspaceHash);
   if (noWorkspace) params.set('no_workspace', '1');
   else if (ws) params.set('workspace', ws);
+  if (readOnly) params.set('read_only', '1');
   const ordinal = ordinalValue(messageOrdinal);
   if (ordinal !== null) params.set('message_ordinal', String(ordinal));
   const scheme = text(protocol).replace(/:$/, '') || 'http';
@@ -137,6 +147,7 @@ export function desktopOpenSessionUrl({
 export function sessionRefFromJumpTarget(target = {}, resumeResult = {}, fallback = {}) {
   const id = sessionJumpId(resumeResult) || sessionJumpId(target) || sessionJumpId(fallback);
   const noWorkspace = sessionJumpNoWorkspace(resumeResult, target) || sessionJumpNoWorkspace(target, fallback);
+  const readOnly = sessionJumpReadOnly(resumeResult, target) || sessionJumpReadOnly(target, fallback);
   const workspaceHash = noWorkspace ? '' : (
     sessionJumpWorkspaceHash(resumeResult) ||
     sessionJumpWorkspaceHash(target) ||
@@ -148,6 +159,17 @@ export function sessionRefFromJumpTarget(target = {}, resumeResult = {}, fallbac
     contextId: firstText(resumeResult.context_id, resumeResult.contextId, target.context_id, target.contextId, fallback.contextId) || 'default',
     sessionId: id,
   };
+  if (readOnly) {
+    ref.readOnly = true;
+    ref.externalSurface = firstText(
+      resumeResult.externalSurface,
+      resumeResult.external_surface,
+      target.externalSurface,
+      target.external_surface,
+      fallback.externalSurface,
+      fallback.external_surface,
+    ) || 'tui';
+  }
 
   const cwd = noWorkspace ? '' : firstText(resumeResult.cwd, target.cwd, fallback.cwd);
   if (cwd || noWorkspace) ref.cwd = cwd;

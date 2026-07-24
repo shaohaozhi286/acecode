@@ -1828,6 +1828,47 @@ TEST(WebServerHttp, WorkspaceScopedSessionLifecycle) {
     EXPECT_EQ(sessions[0]["cwd"], other_cwd);
 }
 
+TEST(WebServerHttp, WorkspaceHintLoadsInactiveTranscriptFromRequestedProject) {
+    WebServerFixture fx;
+    const auto other_cwd_path = fx.tmp_dir / "transcript-workspace";
+    std::filesystem::create_directories(other_cwd_path);
+    const std::string other_cwd = other_cwd_path.string();
+    const std::string other_hash = acecode::compute_cwd_hash(other_cwd);
+
+    auto post_workspace = cpr::Post(
+        cpr::Url{fx.url("/api/workspaces")},
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{json{{"cwd", other_cwd}}.dump()});
+    ASSERT_EQ(post_workspace.status_code, 201) << post_workspace.text;
+
+    const auto other_project_dir =
+        acecode::SessionStorage::get_project_dir(other_cwd);
+    RemoveTreeOnExit project_cleanup{
+        path_from_utf8(other_project_dir),
+    };
+    acecode::SessionManager writer;
+    writer.start_session(other_cwd, "stub", "stub-model");
+    acecode::ChatMessage user;
+    user.role = "user";
+    user.content = "workspace-targeted transcript";
+    writer.on_message(user);
+    const std::string session_id = writer.current_session_id();
+    ASSERT_FALSE(session_id.empty());
+    writer.finalize();
+
+    auto response = cpr::Get(cpr::Url{fx.url(
+        "/api/sessions/" + session_id +
+        "/messages?since=0&workspace=" + other_hash)});
+    ASSERT_EQ(response.status_code, 200) << response.text;
+    const auto payload = json::parse(response.text);
+    ASSERT_TRUE(payload.is_object());
+    ASSERT_TRUE(payload.contains("messages"));
+    ASSERT_EQ(payload["messages"].size(), 1u);
+    EXPECT_EQ(
+        payload["messages"][0]["content"],
+        "workspace-targeted transcript");
+}
+
 TEST(WebServerHttp, OpencodeImportRoutesPreviewStartPollAndRejectUnknownWorkspace) {
     auto db_root = std::filesystem::temp_directory_path() /
                    ("acecode_opencode_route_" + std::to_string(std::random_device{}()));

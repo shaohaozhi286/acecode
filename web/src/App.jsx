@@ -80,6 +80,7 @@ import {
   sessionJumpId,
   sessionJumpMessageOrdinal,
   sessionJumpNoWorkspace,
+  sessionJumpReadOnly,
   sessionJumpWorkspaceHash,
   sessionRefFromJumpTarget,
   stripOpenSessionParams,
@@ -319,8 +320,9 @@ export function App() {
     const sessionId = sessionJumpId(target);
     if (!sessionId) return false;
     const noWorkspace = sessionJumpNoWorkspace(target);
+    const readOnly = sessionJumpReadOnly(target);
     const targetHash = sessionJumpWorkspaceHash(target);
-    const shouldResume = options.forceResume || target?.active !== true;
+    const shouldResume = !readOnly && (options.forceResume || target?.active !== true);
     const commitRef = options.replace ? replaceActiveRef : navigateToRef;
     const resumeWith = async (client, workspaceHash) => {
       if (!shouldResume) return {};
@@ -349,6 +351,7 @@ export function App() {
             token: r.token,
             sessionId,
             workspaceHash: targetHash,
+            readOnly,
             messageOrdinal: sessionJumpMessageOrdinal(target),
             protocol: window.location?.protocol || 'http:',
           });
@@ -521,7 +524,7 @@ export function App() {
   // 跨 workspace:activateAndOpenSession → 激活 workspace 后 resume + 整页 navigate
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.aceDesktop_focusSessionFromBridge = function focusSessionFromBridge(sessionId, workspaceHash) {
+    window.aceDesktop_focusSessionFromBridge = function focusSessionFromBridge(sessionId, workspaceHash, readOnly = false) {
       if (!sessionId) return;
       const hasWorkspaceArg = workspaceHash !== undefined;
       const targetHash = hasWorkspaceArg ? String(workspaceHash || '') : (activeRefRef.current?.workspaceHash || '');
@@ -529,15 +532,19 @@ export function App() {
         sessionId: String(sessionId),
         workspaceHash: targetHash,
         noWorkspace: hasWorkspaceArg && !targetHash,
+        readOnly: readOnly === true,
+        externalSurface: readOnly === true ? 'tui' : '',
       }, { allowDesktopActivate: false }).catch(() => {});
     };
-    window.aceDesktop_activateAndOpenSession = async (workspaceHash, sessionId) => {
+    window.aceDesktop_activateAndOpenSession = async (workspaceHash, sessionId, readOnly = false) => {
       if (!sessionId) return;
       const targetHash = String(workspaceHash || '');
       await resumeAndOpenSession({
         sessionId: String(sessionId),
         workspaceHash: targetHash,
         noWorkspace: !targetHash,
+        readOnly: readOnly === true,
+        externalSurface: readOnly === true ? 'tui' : '',
       });
     };
     return () => {

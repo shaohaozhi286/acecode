@@ -109,4 +109,7 @@ export const zhCN = {
     uploadedWithPackage: '反馈已上传：{{packageName}}',
     uploadFailed: '反馈上传失败：{{error}}',
   },
+  externalSession: {
+    tuiReadOnly: '此会话正在 TUI 中运行。Desktop 已切到只读视图，并会自动同步已保存的消息。',
+  },
 };

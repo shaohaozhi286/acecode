@@ -84,6 +84,16 @@ function sessionUserMessageSearchPath(query = '', limit = 50) {
   return `/api/session-search/user-messages?${qs.toString()}`;
 }
 
+function sessionMessagesPath(id, since = 0, base = null) {
+  const params = new URLSearchParams();
+  params.set('since', String(since));
+  const workspaceHash = String(
+    base?.workspaceHash || base?.workspace_hash || '',
+  ).trim();
+  if (workspaceHash) params.set('workspace', workspaceHash);
+  return `/api/sessions/${encodeURIComponent(id)}/messages?${params.toString()}`;
+}
+
 export function sessionDraftPath(id, workspaceHash = '') {
   const sid = encodeURIComponent(id);
   const hash = String(workspaceHash || '').trim();
@@ -234,7 +244,7 @@ export function createApi(base = null) {
       request('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`, attachment, base),
     executeCommand:   (id, command)  => request('POST',   `/api/sessions/${encodeURIComponent(id)}/commands`, command, base),
     askSideQuestion:  (id, question) => request('POST',   `/api/sessions/${encodeURIComponent(id)}/side-question`, { question }, base),
-    getMessages:      (id, since=0)  => request('GET',    `/api/sessions/${encodeURIComponent(id)}/messages?since=${since}`, undefined, base),
+    getMessages:      (id, since=0)  => request('GET',    sessionMessagesPath(id, since, base), undefined, base),
     exportSession:    (id, workspaceHash = '') => request(
       'POST',
       `/api/sessions/${encodeURIComponent(id)}/export-markdown`,

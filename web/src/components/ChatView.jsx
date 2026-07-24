@@ -531,6 +531,9 @@ function isRealWorkspaceHash(hash) {
 export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSessionPromoted, onHomeWorkspaceChange, onCommandWorkspaceChange, onConsoleCwdChange, onFindInConversation, onOpenModelSettings, health, autoFocusOnDesktopWindowFocus = false, onPermissionRequest, onQuestionRequest, permissionRequests = [], onPermissionDecision, questionRequest, onQuestionResolve, onPermissionModeChanged, onSubagentTasksChange, showSidePanel = false, sidePanelWidth = 280, onSidePanelResize, previewPanelWidth = 640, previewPanelAutoFit = false, onPreviewPanelResize, onPreviewPanelVisibleChange, sidePanelCollapsed = false, sidePanelListCollapsed = false, onToggleSidePanel, onToggleSidePanelList, onRevealSidePanelList, sidePanelMaximized = false, onToggleSidePanelMaximized, showAceCodeAvatar = false }) {
   const ref = useMemo(() => normalizeSessionRef(sessionRef, sessionId), [sessionRef, sessionId]);
   const sid = ref?.sessionId || ref?.id || '';
+  const readOnlyExternalSession = !!(
+    ref?.readOnly || ref?.read_only
+  );
   const sidRef = useRef(sid);
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
   // 模型池负载:每 30s 轮询一次缓存快照,失败静默(监控不可用不影响主流程)。
@@ -548,7 +551,8 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
   const completedTurnSelfHealScheduleRef = useRef(null);
 
   const transcript = useSessionTranscript(ref, {
-    live: true,
+    live: !readOnlyExternalSession,
+    refreshIntervalMs: readOnlyExternalSession ? 1500 : 0,
     onPermissionRequest,
     onQuestionRequest: (payload) => {
       onQuestionRequest?.(payload);
@@ -3566,7 +3570,7 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
               refreshKey={`${turns}:${busy ? 1 : 0}`}
             />
           )}
-          {sid && (
+          {sid && !readOnlyExternalSession && (
             <button
               type="button"
               data-desktop-session-id={sid || undefined}
@@ -3869,52 +3873,63 @@ export function ChatView({ sessionRef, sessionId, modelProfileRevision = 0, onSe
         onGuide={guideQueued}
         guideDisabled={!busy || !activeTurnId}
       />
-      <InputBar
-        ref={inputRef}
-        pathReferenceApi={api}
-        cwd={ref?.cwd || health?.cwd || ''}
-        busy={busy}
-        goal={goal}
-        goalStopping={goalStopping}
-        history={composerHistory}
-        value={composerValue}
-        onChange={handleComposerChange}
-        onSubmit={submit}
-        onAbort={stopCurrentWork}
-        {...composerInputProps}
-        disabled={!!questionForView || composerSubmitting}
-        placeholder={questionForView ? '请先回答上方问题…' : undefined}
-        sessionControls={{
-          model: currentModelLabel,
-          modelOptions: displayedModelOptions,
-          selectedModelName: currentModelName,
-          modelLoad: currentModelLoad,
-          modelSwitching,
-          modelRefreshing,
-          onModelChange: changeComposerModel,
-          onRefreshModels: refreshSessionModels,
-          onOpenModelSettings,
-          tokenBudget,
-          permissionMode,
-          permissionSwitching,
-          onPermissionModeChange: changeComposerPermissionMode,
-          expertOptions: displayedExperts,
-          selectedExpertId: boundExpertId,
-          expertLocked: true,
-        }}
-      />
-      <GitSessionPill
-        key={`session-${sid}`}
-        api={api}
-        cwd={ref?.cwd || health?.cwd || ''}
-        variant="bar"
-        sessionStarted={rawItems.length > 0}
-        worktreeSession={localWorktree && localWorktree.sid === sid
-          ? { name: localWorktree.name }
-          : (ref?.worktree || null)}
-        busy={busy}
-        onIntentChange={handleGitPillIntentChange}
-      />
+      {readOnlyExternalSession ? (
+        <div
+          role="status"
+          className="min-h-11 shrink-0 border-t border-border bg-surface px-4 py-2.5 text-[12px] leading-5 text-fg-mute"
+        >
+          {tr('externalSession.tuiReadOnly')}
+        </div>
+      ) : (
+        <>
+          <InputBar
+            ref={inputRef}
+            pathReferenceApi={api}
+            cwd={ref?.cwd || health?.cwd || ''}
+            busy={busy}
+            goal={goal}
+            goalStopping={goalStopping}
+            history={composerHistory}
+            value={composerValue}
+            onChange={handleComposerChange}
+            onSubmit={submit}
+            onAbort={stopCurrentWork}
+            {...composerInputProps}
+            disabled={!!questionForView || composerSubmitting}
+            placeholder={questionForView ? '请先回答上方问题…' : undefined}
+            sessionControls={{
+              model: currentModelLabel,
+              modelOptions: displayedModelOptions,
+              selectedModelName: currentModelName,
+              modelLoad: currentModelLoad,
+              modelSwitching,
+              modelRefreshing,
+              onModelChange: changeComposerModel,
+              onRefreshModels: refreshSessionModels,
+              onOpenModelSettings,
+              tokenBudget,
+              permissionMode,
+              permissionSwitching,
+              onPermissionModeChange: changeComposerPermissionMode,
+              expertOptions: displayedExperts,
+              selectedExpertId: boundExpertId,
+              expertLocked: true,
+            }}
+          />
+          <GitSessionPill
+            key={`session-${sid}`}
+            api={api}
+            cwd={ref?.cwd || health?.cwd || ''}
+            variant="bar"
+            sessionStarted={rawItems.length > 0}
+            worktreeSession={localWorktree && localWorktree.sid === sid
+              ? { name: localWorktree.name }
+              : (ref?.worktree || null)}
+            busy={busy}
+            onIntentChange={handleGitPillIntentChange}
+          />
+        </>
+      )}
       </div>
       {previewPanelVisible && !previewPanelMaximized && (
         <div

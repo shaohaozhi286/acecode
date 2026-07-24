@@ -61,6 +61,10 @@ fs::path create_desktop_executable(const fs::path& directory) {
     return executable;
 }
 
+acecode::desktop::DesktopOpenRequest open_request() {
+    return {"/workspace/current", "20260724-120000-session"};
+}
+
 } // namespace
 
 TEST(DesktopCommand, ResolvesDesktopBesideAcecodeExecutable) {
@@ -83,7 +87,7 @@ TEST(DesktopCommand, RejectsEmptyAndMissingDesktopPathsWithoutSpawning) {
         return true;
     };
 
-    auto empty = acecode::launch_sibling_desktop({}, spawner);
+    auto empty = acecode::launch_sibling_desktop({}, open_request(), spawner);
     EXPECT_FALSE(empty.ok);
     EXPECT_NE(empty.error.find("cannot resolve"), std::string::npos);
 
@@ -93,7 +97,8 @@ TEST(DesktopCommand, RejectsEmptyAndMissingDesktopPathsWithoutSpawning) {
 #else
     const fs::path acecode_executable = temp.path() / "acecode";
 #endif
-    auto missing = acecode::launch_sibling_desktop(acecode_executable, spawner);
+    auto missing = acecode::launch_sibling_desktop(
+        acecode_executable, open_request(), spawner);
     EXPECT_FALSE(missing.ok);
     EXPECT_NE(missing.error.find("does not exist"), std::string::npos);
     EXPECT_EQ(spawn_calls, 0);
@@ -111,6 +116,7 @@ TEST(DesktopCommand, RejectsDirectoryAtDesktopExecutablePath) {
     bool spawned = false;
     auto result = acecode::launch_sibling_desktop(
         acecode_executable,
+        open_request(),
         [&](const std::vector<std::string>&) {
             spawned = true;
             return true;
@@ -133,6 +139,7 @@ TEST(DesktopCommand, SpawnsOnlyTheExactSiblingExecutable) {
 
     auto result = acecode::launch_sibling_desktop(
         acecode_executable,
+        open_request(),
         [&](const std::vector<std::string>& argv) {
             spawned_argv = argv;
             return true;
@@ -140,8 +147,12 @@ TEST(DesktopCommand, SpawnsOnlyTheExactSiblingExecutable) {
 
     EXPECT_TRUE(result.ok) << result.error;
     EXPECT_EQ(result.executable, desktop_executable);
-    ASSERT_EQ(spawned_argv.size(), 1u);
+    ASSERT_EQ(spawned_argv.size(), 5u);
     EXPECT_EQ(fs::path(spawned_argv.front()), desktop_executable);
+    EXPECT_EQ(spawned_argv[1], "--open-workspace");
+    EXPECT_EQ(spawned_argv[2], open_request().cwd);
+    EXPECT_EQ(spawned_argv[3], "--open-session");
+    EXPECT_EQ(spawned_argv[4], open_request().session_id);
 }
 
 TEST(DesktopCommand, ReportsDetachedSpawnFailure) {
@@ -155,6 +166,7 @@ TEST(DesktopCommand, ReportsDetachedSpawnFailure) {
 
     auto result = acecode::launch_sibling_desktop(
         acecode_executable,
+        open_request(),
         [](const std::vector<std::string>&) { return false; });
 
     EXPECT_FALSE(result.ok);
@@ -176,6 +188,7 @@ TEST(DesktopCommand, RejectsNonExecutablePosixDesktopFile) {
     bool spawned = false;
     auto result = acecode::launch_sibling_desktop(
         acecode_executable,
+        open_request(),
         [&](const std::vector<std::string>&) {
             spawned = true;
             return true;
@@ -186,3 +199,26 @@ TEST(DesktopCommand, RejectsNonExecutablePosixDesktopFile) {
     EXPECT_FALSE(spawned);
 }
 #endif
+
+TEST(DesktopCommand, RejectsInvalidOpenRequestWithoutSpawning) {
+    TempDir temp;
+#ifdef _WIN32
+    const fs::path acecode_executable = temp.path() / "acecode.exe";
+#else
+    const fs::path acecode_executable = temp.path() / "acecode";
+#endif
+    create_desktop_executable(temp.path());
+    bool spawned = false;
+
+    auto result = acecode::launch_sibling_desktop(
+        acecode_executable,
+        acecode::desktop::DesktopOpenRequest{temp.path().string(), {}},
+        [&](const std::vector<std::string>&) {
+            spawned = true;
+            return true;
+        });
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.find("session id"), std::string::npos);
+    EXPECT_FALSE(spawned);
+}

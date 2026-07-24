@@ -23,6 +23,7 @@
 #include "folder_picker.hpp"
 #include "locale.hpp"
 #include "notifications.hpp"
+#include "open_request.hpp"
 #include "open_in_explorer.hpp"
 #include "pick_active.hpp"
 #include "single_instance.hpp"
@@ -50,10 +51,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -174,21 +177,28 @@ bool is_webapp_arg(const std::string& arg) {
     return arg == "--webapp";
 }
 
+bool desktop_webapp_requested(const std::vector<std::string>& argv) {
+    for (std::size_t index = argv.empty() ? 0 : 1;
+         index < argv.size();
+         ++index) {
+        if (is_webapp_arg(argv[index])) return true;
+    }
+    return false;
+}
+
 #ifdef _WIN32
-bool desktop_webapp_requested() {
+std::vector<std::string> desktop_process_arguments() {
     int argc = 0;
     LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
-    if (!argv) return false;
+    if (!argv) return {};
 
-    bool requested = false;
-    for (int i = 1; i < argc; ++i) {
-        if (is_webapp_arg(acecode::wide_to_utf8(argv[i]))) {
-            requested = true;
-            break;
-        }
+    std::vector<std::string> result;
+    result.reserve(static_cast<std::size_t>((std::max)(argc, 0)));
+    for (int index = 0; index < argc; ++index) {
+        result.push_back(acecode::wide_to_utf8(argv[index]));
     }
     ::LocalFree(argv);
-    return requested;
+    return result;
 }
 
 std::string desktop_exe_dir() {
@@ -199,11 +209,13 @@ std::string desktop_exe_dir() {
     return acecode::wide_to_utf8(fs::path(wpath).parent_path().wstring());
 }
 #elif defined(__APPLE__)
-bool desktop_webapp_requested(int argc, char** argv) {
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] && is_webapp_arg(argv[i])) return true;
+std::vector<std::string> desktop_process_arguments(int argc, char** argv) {
+    std::vector<std::string> result;
+    result.reserve(static_cast<std::size_t>((std::max)(argc, 0)));
+    for (int index = 0; index < argc; ++index) {
+        result.emplace_back(argv[index] ? argv[index] : "");
     }
-    return false;
+    return result;
 }
 
 std::string desktop_exe_dir() {
@@ -225,11 +237,13 @@ std::string desktop_exe_dir() {
     return acecode::path_to_utf8(resolved.parent_path());
 }
 #else
-bool desktop_webapp_requested(int argc, char** argv) {
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] && is_webapp_arg(argv[i])) return true;
+std::vector<std::string> desktop_process_arguments(int argc, char** argv) {
+    std::vector<std::string> result;
+    result.reserve(static_cast<std::size_t>((std::max)(argc, 0)));
+    for (int index = 0; index < argc; ++index) {
+        result.emplace_back(argv[index] ? argv[index] : "");
     }
-    return false;
+    return result;
 }
 
 std::string desktop_exe_dir() {
@@ -638,11 +652,15 @@ int run_browser_fallback(const std::string& url,
 
 #ifdef _WIN32
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    const bool force_webapp = desktop_webapp_requested();
+    const auto process_arguments = desktop_process_arguments();
 #else
 int main(int argc, char** argv) {
-    const bool force_webapp = desktop_webapp_requested(argc, argv);
+    const auto process_arguments = desktop_process_arguments(argc, argv);
 #endif
+    const bool force_webapp = desktop_webapp_requested(process_arguments);
+    const auto startup_open_parse =
+        acecode::desktop::parse_desktop_open_request_arguments(
+            process_arguments);
     // 顶层 try/catch:wWinMain 是 Windows 子系统的 EXE 入口,任何未捕获的
     // C++ 异常会触发 std::terminate → 系统弹"未经处理的异常"调试器对话框,
     // 普通用户既看不懂也无从下手。把整个 body 包成 IIFE lambda 让 catch 兜
@@ -652,7 +670,11 @@ int main(int argc, char** argv) {
     // 注意 logger 初始化也在 lambda 内,因为它本身也可能抛(磁盘满 / 路径
     // 受 GPO 锁)。catch 里依然先调 LOG_ERROR(失败时是 no-op,不影响
     // MessageBox 给用户提示)。
-    auto run = [force_webapp]() -> int {
+    auto run = [
+        force_webapp,
+        startup_open_request = startup_open_parse.request,
+        startup_open_request_error = startup_open_parse.error
+    ]() -> int {
     using namespace acecode::desktop;
 
     // desktop 自己的日志路径: ~/.acecode/logs/desktop-<date>.log。和 daemon
@@ -661,6 +683,10 @@ int main(int argc, char** argv) {
     acecode::Logger::instance().init_with_rotation(acecode::get_logs_dir(), "desktop", false);
     acecode::Logger::instance().set_level(acecode::LogLevel::Dbg);
     LOG_INFO("[desktop] starting acecode-desktop");
+    if (!startup_open_request_error.empty()) {
+        LOG_WARN("[desktop] ignored invalid open request: " +
+                 startup_open_request_error);
+    }
     const fs::path desktop_restart_target = current_desktop_executable_path();
     if (desktop_restart_target.empty()) {
         LOG_WARN("[desktop] could not resolve installed executable path; automatic restart will be unavailable");
@@ -673,10 +699,21 @@ int main(int argc, char** argv) {
              (acecode::desktop::enable_desktop_dpi_awareness() ? "enabled" : "not enabled"));
 #endif
 
+    const std::int64_t desktop_instance_started_at_ms =
+        acecode::daemon::now_unix_ms();
+
     // 单例锁:per-user。已有实例时把对方拉前 + 自己 exit(0),避免多份 desktop /
     // 多份 daemon 子进程同时存在。设计见 src/desktop/single_instance.hpp。
     SingleInstance singleton;
     if (!singleton.try_acquire()) {
+        if (startup_open_request.has_value()) {
+            std::string handoff_error;
+            if (!publish_pending_desktop_open_request(
+                    *startup_open_request, &handoff_error)) {
+                LOG_WARN("[desktop] failed to publish open request to existing "
+                         "instance: " + handoff_error);
+            }
+        }
         LOG_INFO("[desktop] another acecode-desktop instance is running, focusing it");
         focus_existing_instance(); // POSIX 端是 stub,返回 false 也只是 exit
         return 0;
@@ -746,7 +783,22 @@ int main(int argc, char** argv) {
     // 2. 决定 active workspace
     std::string last_active = acecode::read_last_active_workspace_hash();
     std::string proc_cwd = current_cwd();
-    std::string active_hash = pick_active(last_active, proc_cwd, registry);
+    std::optional<WorkspaceMeta> startup_open_workspace;
+    if (startup_open_request.has_value()) {
+        if (!is_existing_directory(startup_open_request->cwd)) {
+            LOG_WARN("[desktop] requested TUI workspace is unavailable: " +
+                     startup_open_request->cwd);
+        } else {
+            startup_open_workspace =
+                registry.register_new(proj_dir, startup_open_request->cwd);
+            LOG_INFO("[desktop] registered requested TUI workspace hash=" +
+                     startup_open_workspace->hash + " cwd=" +
+                     startup_open_workspace->cwd);
+        }
+    }
+    std::string active_hash = startup_open_workspace.has_value()
+        ? startup_open_workspace->hash
+        : pick_active(last_active, proc_cwd, registry);
 
     if (!active_hash.empty()) {
         auto active_meta = registry.get(active_hash);
@@ -858,6 +910,16 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (startup_open_workspace.has_value() &&
+        startup_open_request.has_value() &&
+        url != onboarding_url()) {
+        url = append_query_param(
+            url, "open", startup_open_request->session_id);
+        url = append_query_param(
+            url, "workspace", startup_open_workspace->hash);
+        url = append_query_param(url, "read_only", "1");
+    }
+
     if (force_webapp) {
         return run_browser_fallback(url, splash, pool, "--webapp requested", "");
     }
@@ -908,6 +970,7 @@ int main(int argc, char** argv) {
     };
 
     std::atomic<bool> page_ready_notified{false};
+    std::function<void()> consume_pending_open_request;
     bool tray_ok = init_tray_icon(
         /*on_show=*/[&bring_window_foreground]() { bring_window_foreground(); },
         /*on_quit=*/[&host]() {
@@ -963,7 +1026,8 @@ int main(int argc, char** argv) {
     // bridge 调用都走同一份 JS 派发逻辑。
     auto focus_session = [&host, &active_mu, &active_hash_dynamic, &bring_window_foreground](
                               const std::string& workspace_hash,
-                              const std::string& session_id) {
+                              const std::string& session_id,
+                              bool read_only) {
         bring_window_foreground();
         std::string current_active;
         {
@@ -977,17 +1041,57 @@ int main(int argc, char** argv) {
         std::string js;
         const bool same_workspace = (workspace_hash.empty() ||
                                      workspace_hash == current_active);
+        const std::string read_only_lit = read_only ? "true" : "false";
         if (same_workspace) {
             js = "(function(){try{if(window.aceDesktop_focusSessionFromBridge){"
-                 "window.aceDesktop_focusSessionFromBridge(" + sid_lit + "," + ws_lit + ");}"
+                 "window.aceDesktop_focusSessionFromBridge(" + sid_lit + "," +
+                 ws_lit + "," + read_only_lit + ");}"
                  "}catch(e){}})();";
         } else {
             js = "(function(){try{if(window.aceDesktop_activateAndOpenSession){"
-                 "window.aceDesktop_activateAndOpenSession(" + ws_lit + "," + sid_lit + ");}"
+                 "window.aceDesktop_activateAndOpenSession(" + ws_lit + "," +
+                 sid_lit + "," + read_only_lit + ");}"
                  "}catch(e){}})();";
         }
         host.eval(js);
     };
+
+    consume_pending_open_request =
+        [
+            &registry,
+            &proj_dir,
+            &focus_session,
+            desktop_instance_started_at_ms
+        ]() {
+            std::string request_error;
+            auto request =
+                take_pending_desktop_open_request(
+                    &request_error,
+                    {},
+                    desktop_instance_started_at_ms);
+            if (!request_error.empty()) {
+                LOG_WARN("[desktop] pending open request: " + request_error);
+            }
+            if (!request.has_value()) return;
+            if (!is_existing_directory(request->cwd)) {
+                LOG_WARN("[desktop] pending TUI workspace is unavailable: " +
+                         request->cwd);
+                return;
+            }
+
+            auto workspace = registry.register_new(proj_dir, request->cwd);
+            LOG_INFO("[desktop] opening TUI-owned session " +
+                     request->session_id + " in workspace " + workspace.hash);
+            focus_session(
+                workspace.hash, request->session_id, /*read_only=*/true);
+        };
+    host.set_existing_instance_focus_handler(
+        [&page_ready_notified, &consume_pending_open_request]() {
+            if (!page_ready_notified.load()) return;
+            if (consume_pending_open_request) {
+                consume_pending_open_request();
+            }
+        });
 
     auto notification_authorization_json =
         [](const NotificationAuthorizationState& state) {
@@ -1040,7 +1144,8 @@ int main(int argc, char** argv) {
     const bool notifications_ok = init_notifications(notification_options);
     if (notifications_ok) {
         set_click_handler([focus_session](const NotifyPayload& payload) {
-            focus_session(payload.workspace_hash, payload.session_id);
+            focus_session(
+                payload.workspace_hash, payload.session_id, /*read_only=*/false);
         });
     } else {
         LOG_WARN("[desktop] native notifications unavailable");
@@ -1052,7 +1157,8 @@ int main(int argc, char** argv) {
         // tray 菜单 session click 也走 focus_session。
         set_tray_session_click_handler(
             [focus_session](const std::string& workspace_hash, const std::string& session_id) {
-                focus_session(workspace_hash, session_id);
+                focus_session(
+                    workspace_hash, session_id, /*read_only=*/false);
             });
 
         // tray 菜单 "新建会话":拉前 + 调前端钩子(没注册时安全 no-op)。
@@ -1080,6 +1186,9 @@ int main(int argc, char** argv) {
     // 前端首屏完成后关闭 Win32 透明 logo splash,再把屏幕外的主窗口移回前台。
     host.bind("aceDesktop_pageReady", [&](const std::string& /*req*/) -> std::string {
         close_splash_once();
+        if (consume_pending_open_request) {
+            consume_pending_open_request();
+        }
         return nlohmann::json{{"ok", true}}.dump();
     });
 

@@ -1326,10 +1326,15 @@ export function useSessionTranscript(sessionRef, options = {}) {
   const api = useMemo(() => createApi(ref), [ref?.port, ref?.token, ref?.workspaceHash]);
   const liveMode = options.live ?? 'auto';
   const isLive = !!sid && canLiveMonitorSession(ref, liveMode);
+  const refreshIntervalMs = Math.max(
+    0,
+    Number(options.refreshIntervalMs) || 0,
+  );
   const initialTitle = sid ? sessionDisplayTitle(ref) : '';
   const [state, setState] = useState(() => createTranscriptState({ title: initialTitle, isLive, loadState: sid ? 'loading' : 'idle' }));
   const stateRef = useRef(state);
   const optionsRef = useRef(options);
+  const refreshSignatureRef = useRef('');
 
   useEffect(() => { optionsRef.current = options; }, [options]);
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -1372,12 +1377,17 @@ export function useSessionTranscript(sessionRef, options = {}) {
       loadState: sid ? 'loading' : 'idle',
     });
     stateRef.current = reset;
+    refreshSignatureRef.current = '';
     setState(reset);
     if (!sid) return undefined;
 
     let off = false;
     api.getMessages(sid, 0).then((data) => {
       if (off) return;
+      const messages = Array.isArray(data?.messages) ? data.messages : [];
+      refreshSignatureRef.current = `${messages.length}:${
+        messages.length > 0 ? JSON.stringify(messages[messages.length - 1]) : ''
+      }`;
       const loaded = loadTranscriptHistory(stateRef.current, data || {});
       // 防回退:实时 WS 可能在 getMessages(0) 解析期间已累积了更完整的当前
       // 回合内容,而这份 REST 快照更旧(messages 尚未含进行中的 assistant)。
@@ -1439,6 +1449,45 @@ export function useSessionTranscript(sessionRef, options = {}) {
 
     return () => { off = true; };
   }, [api, isLive, ref, sid]);
+
+  useEffect(() => {
+    if (!sid || refreshIntervalMs < 250) return undefined;
+    let stopped = false;
+    let inFlight = false;
+    const refresh = () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      api.getMessages(sid, 0)
+        .then((data) => {
+          if (stopped) return;
+          const messages = Array.isArray(data?.messages) ? data.messages : [];
+          const signature = `${messages.length}:${
+            messages.length > 0
+              ? JSON.stringify(messages[messages.length - 1])
+              : ''
+          }`;
+          if (signature === refreshSignatureRef.current) return;
+          refreshSignatureRef.current = signature;
+          const loaded = loadTranscriptHistory(stateRef.current, data || {});
+          const nextState = {
+            ...loaded.state,
+            isLive,
+            loadState: 'loaded',
+          };
+          stateRef.current = nextState;
+          setState(nextState);
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+    const timer = window.setInterval(refresh, refreshIntervalMs);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [api, isLive, refreshIntervalMs, sid]);
 
   useEffect(() => {
     if (!sid || !isLive) return undefined;

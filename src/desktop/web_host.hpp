@@ -123,6 +123,13 @@ public:
     using WindowFocusHandler = std::function<void()>;
     void set_window_focus_handler(WindowFocusHandler handler);
 
+    // Invoked when a second Desktop process asks this singleton instance to
+    // foreground itself. The callback runs on the GUI thread after the native
+    // focus signal is received.
+    using ExistingInstanceFocusHandler = std::function<void()>;
+    void set_existing_instance_focus_handler(
+        ExistingInstanceFocusHandler handler);
+
     // 关闭请求(× / Alt+F4 / aceDesktop_closeWindow)。会先派发到
     // close_request_handler;handler 返回 true 表示已消化(典型如"隐藏到托盘"),
     // 返回 false / 未注册 → 走原 DestroyWindow 退出路径。

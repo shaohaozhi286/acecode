@@ -3,6 +3,7 @@ import {
   desktopOpenSessionUrl,
   openSessionTargetFromSearch,
   sessionJumpMessageOrdinal,
+  sessionJumpReadOnly,
   sessionRefFromJumpTarget,
   stripOpenSessionParams,
 } from './sessionJump.js';
@@ -19,7 +20,12 @@ function test(name, fn) {
 
 test('open session search params preserve workspace identity', () => {
   const target = openSessionTargetFromSearch('?token=t1&open=s1&workspace=w1');
-  assert.deepEqual(target, { sessionId: 's1', workspaceHash: 'w1', noWorkspace: false });
+  assert.deepEqual(target, {
+    sessionId: 's1',
+    workspaceHash: 'w1',
+    noWorkspace: false,
+    readOnly: false,
+  });
   assert.equal(stripOpenSessionParams('?token=t1&open=s1&workspace=w1'), 'token=t1');
 });
 
@@ -42,6 +48,31 @@ test('desktop open session URL can target no-workspace sessions', () => {
     noWorkspace: true,
   });
   assert.equal(url, 'http://127.0.0.1:4567/?token=tok&open=s1&no_workspace=1');
+});
+
+test('desktop open session URL preserves explicit TUI-owned read-only mode', () => {
+  const url = desktopOpenSessionUrl({
+    port: 4567,
+    token: 'tok',
+    sessionId: 's1',
+    workspaceHash: 'w1',
+    readOnly: true,
+  });
+  assert.equal(
+    url,
+    'http://127.0.0.1:4567/?token=tok&open=s1&workspace=w1&read_only=1',
+  );
+
+  const target = openSessionTargetFromSearch(
+    '?token=tok&open=s1&workspace=w1&read_only=1',
+  );
+  assert.equal(sessionJumpReadOnly(target), true);
+  assert.equal(stripOpenSessionParams(
+    '?token=tok&open=s1&workspace=w1&read_only=1',
+  ), 'token=tok');
+  const ref = sessionRefFromJumpTarget(target);
+  assert.equal(ref.readOnly, true);
+  assert.equal(ref.externalSurface, 'tui');
 });
 
 test('session ref from jump target merges resume result and search metadata', () => {
@@ -87,6 +118,7 @@ test('desktop open session URL preserves matched message ordinal', () => {
     sessionId: 's1',
     workspaceHash: 'w1',
     noWorkspace: false,
+    readOnly: false,
     search_match: { kind: 'user_message', message_ordinal: 12, messageOrdinal: 12 },
   });
   assert.equal(stripOpenSessionParams('?token=t1&open=s1&workspace=w1&message_ordinal=12'), 'token=t1');

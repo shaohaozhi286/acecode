@@ -786,6 +786,36 @@ await run('Desktop feedback API methods use dedicated feedback endpoints', async
   }
 });
 
+await run('workspace-scoped transcript reads carry the workspace hash', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ messages: [] }),
+    };
+  };
+  try {
+    const client = createApi({
+      origin: 'http://127.0.0.1:4567',
+      token: 'tok',
+      workspaceHash: 'workspace/hash',
+    });
+    await client.getMessages('session id', 0);
+
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].url,
+      'http://127.0.0.1:4567/api/sessions/session%20id/messages?since=0&workspace=workspace%2Fhash',
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 await run('getSkillRoot uses workspace query and auth token', async () => {
   const previousFetch = globalThis.fetch;
   const calls = [];

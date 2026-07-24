@@ -627,10 +627,12 @@ TEST(BuiltinCommands, DesktopCommandValidatesArgumentsAndReportsLaunchResult) {
     ResumeCommandHarness harness("desktop_launch_result");
     int launch_calls = 0;
     const fs::path desktop_path = harness.cwd_ / "acecode-desktop.exe";
+    acecode::desktop::DesktopOpenRequest captured_request;
     acecode::register_desktop_command(
         harness.registry_,
-        [&] {
+        [&](const acecode::desktop::DesktopOpenRequest& request) {
             ++launch_calls;
+            captured_request = request;
             return acecode::DesktopLaunchResult{true, desktop_path, {}};
         });
 
@@ -641,6 +643,9 @@ TEST(BuiltinCommands, DesktopCommandValidatesArgumentsAndReportsLaunchResult) {
 
     ASSERT_TRUE(harness.dispatch("/desktop"));
     EXPECT_EQ(launch_calls, 1);
+    EXPECT_EQ(captured_request.cwd, harness.cwd_.string());
+    EXPECT_FALSE(captured_request.session_id.empty());
+    EXPECT_EQ(captured_request.session_id, harness.sm_.current_session_id());
     EXPECT_NE(harness.state_.conversation.back().content.find(
                   "ACECode Desktop started:"),
               std::string::npos);
@@ -650,7 +655,7 @@ TEST(BuiltinCommands, DesktopCommandValidatesArgumentsAndReportsLaunchResult) {
 
     acecode::register_desktop_command(
         harness.registry_,
-        [] {
+        [](const acecode::desktop::DesktopOpenRequest&) {
             return acecode::DesktopLaunchResult{
                 false, {}, "synthetic launch failure"};
         });

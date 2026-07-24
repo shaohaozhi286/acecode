@@ -53,8 +53,14 @@ fs::path sibling_desktop_executable(const fs::path& acecode_executable) {
 
 DesktopLaunchResult launch_sibling_desktop(
     const fs::path& acecode_executable,
+    const desktop::DesktopOpenRequest& request,
     const DesktopProcessSpawner& spawn_process) {
     DesktopLaunchResult result;
+    std::string request_error;
+    if (!desktop::valid_desktop_open_request(request, &request_error)) {
+        result.error = std::move(request_error);
+        return result;
+    }
     if (acecode_executable.empty()) {
         result.error = "cannot resolve the running acecode executable path";
         return result;
@@ -96,7 +102,9 @@ DesktopLaunchResult launch_sibling_desktop(
         return result;
     }
 
-    const std::vector<std::string> argv{result.executable.string()};
+    std::vector<std::string> argv{result.executable.string()};
+    auto request_argv = desktop::desktop_open_request_arguments(request);
+    argv.insert(argv.end(), request_argv.begin(), request_argv.end());
     if (!spawn_process(argv)) {
         result.error = "failed to create detached desktop process: " +
                        display_path(result.executable);
@@ -107,10 +115,12 @@ DesktopLaunchResult launch_sibling_desktop(
     return result;
 }
 
-DesktopLaunchResult launch_sibling_desktop() {
+DesktopLaunchResult launch_sibling_desktop(
+    const desktop::DesktopOpenRequest& request) {
     const std::string current_executable = daemon::current_executable_path();
     return launch_sibling_desktop(
         fs::path(current_executable),
+        request,
         [](const std::vector<std::string>& argv) {
             return daemon::spawn_detached(argv) != 0;
         });
@@ -119,7 +129,9 @@ DesktopLaunchResult launch_sibling_desktop() {
 void register_desktop_command(CommandRegistry& registry,
                               DesktopLauncher launcher) {
     if (!launcher) {
-        launcher = [] { return launch_sibling_desktop(); };
+        launcher = [](const desktop::DesktopOpenRequest& request) {
+            return launch_sibling_desktop(request);
+        };
     }
 
     registry.register_command({
@@ -132,9 +144,26 @@ void register_desktop_command(CommandRegistry& registry,
                 return;
             }
 
+            if (!ctx.session_manager) {
+                emit_desktop_command_message(
+                    ctx,
+                    "Failed to start ACECode Desktop: current session is unavailable");
+                return;
+            }
+            const std::string session_id =
+                ctx.session_manager->ensure_active_session_id();
+            desktop::DesktopOpenRequest request{ctx.cwd, session_id};
+            std::string request_error;
+            if (!desktop::valid_desktop_open_request(request, &request_error)) {
+                emit_desktop_command_message(
+                    ctx,
+                    "Failed to start ACECode Desktop: " + request_error);
+                return;
+            }
+
             DesktopLaunchResult result;
             try {
-                result = launcher();
+                result = launcher(request);
             } catch (const std::exception& error) {
                 result.error = error.what();
             } catch (...) {
