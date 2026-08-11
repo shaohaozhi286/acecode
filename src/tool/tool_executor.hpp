@@ -35,6 +35,10 @@ enum class ToolSource {
 struct ToolCapabilityPolicy {
     std::optional<std::unordered_set<std::string>> builtin_tools;
     std::optional<std::unordered_set<std::string>> mcp_servers;
+    // Tool definitions marked defer_loading stay hidden until the active
+    // session explicitly enables their exact native IDs. This set is kept on
+    // AgentLoop's session-local policy, never on the process-wide executor.
+    std::unordered_set<std::string> enabled_deferred_tools;
 };
 
 // Structured summary used by the TUI to render a single-line tool-result row
@@ -190,6 +194,12 @@ struct ToolContext {
     // next model request.
     ToolExecutor* tool_executor = nullptr;
 
+    // Enables one already-registered defer_loading tool for this session's
+    // next provider request. Returns false for unknown/non-deferred/denied
+    // tools. The callback is thread-safe because read-only tools may execute
+    // in AgentLoop's parallel tool batch.
+    std::function<bool(const std::string& tool_name)> enable_deferred_tool;
+
     // Optional session-local expert scope. ToolExecutor checks this again at
     // the execution boundary so replayed/model-produced calls cannot bypass
     // provider schema filtering.
@@ -210,6 +220,10 @@ struct ToolImpl {
     ToolDef definition;
     std::function<ToolResult(const std::string& arguments_json, const ToolContext& ctx)> execute;
     bool is_read_only = false; // Read-only tools are auto-approved without user confirmation
+    // Deferred tools are registered process-wide but absent from provider
+    // schemas and rejected at execution until the current session unlocks
+    // their exact ID through ToolContext::enable_deferred_tool.
+    bool defer_loading = false;
     ToolSource source = ToolSource::Builtin;
     // Exact owning MCP server ID. Empty for built-ins. This metadata is never
     // inferred from a qualified tool name.
@@ -219,6 +233,7 @@ struct ToolImpl {
 struct RegisteredToolInfo {
     ToolDef definition;
     bool is_read_only = false;
+    bool defer_loading = false;
     ToolSource source = ToolSource::Builtin;
     std::string source_owner;
 };
@@ -287,6 +302,9 @@ public:
 
     // Check if a tool is read-only (auto-approved)
     bool is_read_only(const std::string& name) const;
+
+    // Check whether a registered tool participates in deferred disclosure.
+    bool is_deferred(const std::string& name) const;
 
     // Generate a formatted description of all registered tools for system prompt
     std::string generate_tools_prompt(

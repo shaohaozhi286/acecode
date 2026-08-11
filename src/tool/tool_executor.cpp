@@ -105,6 +105,11 @@ ScratchPathResolution scratch_path_error(const std::string& message) {
 
 bool tool_allowed_by_policy(const ToolImpl& impl,
                             const ToolCapabilityPolicy* policy) {
+    if (impl.defer_loading &&
+        (!policy ||
+         policy->enabled_deferred_tools.count(impl.definition.name) == 0)) {
+        return false;
+    }
     if (!policy) return true;
     if (impl.source == ToolSource::Builtin) {
         return !policy->builtin_tools ||
@@ -361,6 +366,7 @@ std::vector<RegisteredToolInfo> ToolExecutor::get_registered_tools() const {
         result.push_back({
             impl.definition,
             impl.is_read_only,
+            impl.defer_loading,
             impl.source,
             impl.source_owner,
         });
@@ -422,6 +428,12 @@ bool ToolExecutor::is_read_only(const std::string& name) const {
     std::lock_guard<std::mutex> lk(tools_mu_);
     auto it = tools_.find(name);
     return it != tools_.end() && it->second.is_read_only;
+}
+
+bool ToolExecutor::is_deferred(const std::string& name) const {
+    std::lock_guard<std::mutex> lk(tools_mu_);
+    auto it = tools_.find(name);
+    return it != tools_.end() && it->second.defer_loading;
 }
 
 std::string ToolExecutor::generate_tools_prompt(

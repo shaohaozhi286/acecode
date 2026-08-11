@@ -124,3 +124,49 @@ TEST(ToolCapabilityPolicy, RegistrationAndRemovalRequireMatchingOwnerIdentity) {
     EXPECT_TRUE(tools.unregister_tool("mcp_shared_echo", "server-a"));
     EXPECT_FALSE(tools.has_tool("mcp_shared_echo"));
 }
+
+TEST(ToolCapabilityPolicy, DeferredToolsStayHiddenAndRejectForgedCalls) {
+    std::atomic<int> calls{0};
+    acecode::ToolExecutor tools;
+    auto query = make_tool("session_query", acecode::ToolSource::Builtin,
+                           {}, &calls);
+    auto control = make_tool("session_control", acecode::ToolSource::Builtin,
+                             {}, &calls);
+    control.defer_loading = true;
+    ASSERT_TRUE(tools.register_tool(query));
+    ASSERT_TRUE(tools.register_tool(control));
+
+    acecode::ToolCapabilityPolicy locked;
+    EXPECT_EQ(names(tools.get_model_tool_definitions(&locked)),
+              std::vector<std::string>({"session_query"}));
+    EXPECT_TRUE(tools.is_deferred("session_control"));
+    EXPECT_FALSE(tools.is_allowed("session_control", &locked));
+
+    acecode::ToolContext context;
+    context.capability_policy = locked;
+    const auto forged = tools.execute("session_control", "{}", context);
+    EXPECT_FALSE(forged.success);
+    EXPECT_EQ(calls.load(), 0);
+
+    locked.enabled_deferred_tools.insert("session_control");
+    context.capability_policy = locked;
+    EXPECT_EQ(names(tools.get_model_tool_definitions(&locked)),
+              std::vector<std::string>({"session_control", "session_query"}));
+    EXPECT_TRUE(tools.execute("session_control", "{}", context).success);
+    EXPECT_EQ(calls.load(), 1);
+}
+
+TEST(ToolCapabilityPolicy, DeferredUnlockStillHonorsBuiltinScope) {
+    std::atomic<int> calls{0};
+    acecode::ToolExecutor tools;
+    auto control = make_tool("session_control", acecode::ToolSource::Builtin,
+                             {}, &calls);
+    control.defer_loading = true;
+    ASSERT_TRUE(tools.register_tool(control));
+
+    acecode::ToolCapabilityPolicy policy;
+    policy.builtin_tools = std::unordered_set<std::string>{};
+    policy.enabled_deferred_tools.insert("session_control");
+    EXPECT_TRUE(tools.get_model_tool_definitions(&policy).empty());
+    EXPECT_FALSE(tools.is_allowed("session_control", &policy));
+}

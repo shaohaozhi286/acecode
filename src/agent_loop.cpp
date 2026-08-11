@@ -424,6 +424,17 @@ void AgentLoop::set_cwd(const std::string& new_cwd) {
     git_snapshot_cache_.reset();
 }
 
+bool AgentLoop::enable_deferred_tool(const std::string& tool_name) {
+    if (!tools_.is_deferred(tool_name)) return false;
+
+    std::lock_guard<std::mutex> lock(tool_capability_policy_mu_);
+    ToolCapabilityPolicy candidate = tool_capability_policy_;
+    candidate.enabled_deferred_tools.insert(tool_name);
+    if (!tools_.is_allowed(tool_name, &candidate)) return false;
+    tool_capability_policy_.enabled_deferred_tools.insert(tool_name);
+    return true;
+}
+
 ResolvedQuestionPolicy AgentLoop::resolved_question_policy() const {
     const bool has_cli = !loop_cfg_.question_policy_cli.empty();
     const std::string& configured =
@@ -927,11 +938,12 @@ bool AgentLoop::active_estimate_exceeds_auto_threshold(
 
 std::vector<ChatMessage> AgentLoop::build_compaction_initial_context() const {
     std::vector<ChatMessage> context;
+    const auto tool_policy = tool_capability_policy_snapshot();
 
     std::string system_prompt = build_system_prompt(
         tools_, cwd_, skill_registry_, memory_registry_,
         memory_cfg_, project_instructions_cfg_,
-        &tool_capability_policy_);
+        &tool_policy);
     if (loop_execution_policy_.active &&
         !loop_execution_policy_.system_context.empty()) {
         system_prompt += "\n\n<loop-execution>\n";
@@ -948,11 +960,11 @@ std::vector<ChatMessage> AgentLoop::build_compaction_initial_context() const {
     const std::string git_snapshot =
         git_snapshot_cache_.has_value() ? *git_snapshot_cache_ : std::string{};
     const bool skill_view_available =
-        tools_.is_allowed("skill_view", &tool_capability_policy_);
+        tools_.is_allowed("skill_view", &tool_policy);
     const bool skills_list_available =
-        tools_.is_allowed("skills_list", &tool_capability_policy_);
+        tools_.is_allowed("skills_list", &tool_policy);
     const bool spawn_subagent_available =
-        tools_.is_allowed("spawn_subagent", &tool_capability_policy_);
+        tools_.is_allowed("spawn_subagent", &tool_policy);
     PromptContextBlock skill_context = build_skills_index_context_prompt(
         skill_registry_, context_window_.load(std::memory_order_relaxed),
         skill_view_available, skills_list_available);
@@ -1324,8 +1336,9 @@ std::string AgentLoop::build_goal_context_prompt(const ThreadGoal& goal) const {
     const std::string remaining_tokens = goal.token_budget.has_value()
         ? std::to_string(std::max<std::int64_t>(0, *goal.token_budget - goal.tokens_used))
         : "unbounded";
+    const auto tool_policy = tool_capability_policy_snapshot();
     const bool update_goal_allowed =
-        tools_.is_allowed("update_goal", &tool_capability_policy_);
+        tools_.is_allowed("update_goal", &tool_policy);
 
     std::ostringstream oss;
     oss << "<goal_context>\n"
@@ -1352,7 +1365,7 @@ std::string AgentLoop::build_goal_context_prompt(const ThreadGoal& goal) const {
         << "Goal interaction mode:\n"
         << "- Tool permission confirmations are granted automatically while the goal is "
         << "active.\n";
-    if (tools_.is_allowed("AskUserQuestion", &tool_capability_policy_)) {
+    if (tools_.is_allowed("AskUserQuestion", &tool_policy)) {
         oss << "- You may call AskUserQuestion for a useful clarification. The user has 30 "
             << "seconds to answer; after that, the recommended option is selected "
             << "automatically so the goal keeps moving.\n";
@@ -1443,7 +1456,8 @@ std::string AgentLoop::build_goal_budget_limit_prompt(const ThreadGoal& goal) co
         << "substantive work for this goal. Wrap up this turn soon: summarize useful "
         << "progress, identify remaining work or blockers, and leave the user with a "
         << "clear next step.\n";
-    if (tools_.is_allowed("update_goal", &tool_capability_policy_)) {
+    const auto tool_policy = tool_capability_policy_snapshot();
+    if (tools_.is_allowed("update_goal", &tool_policy)) {
         oss << "\nDo not call update_goal unless the goal is actually complete.\n";
     }
     oss << "</goal_context>";
@@ -1474,7 +1488,8 @@ std::string AgentLoop::build_goal_objective_updated_prompt(const ThreadGoal& goa
         << "Adjust the current turn to pursue the updated objective. Avoid continuing "
         << "work that only served the previous objective unless it also helps the "
         << "updated objective.\n";
-    if (tools_.is_allowed("update_goal", &tool_capability_policy_)) {
+    const auto tool_policy = tool_capability_policy_snapshot();
+    if (tools_.is_allowed("update_goal", &tool_policy)) {
         oss << "\nDo not call update_goal unless the updated goal is actually complete.\n";
     }
     oss << "</goal_context>";
@@ -1483,7 +1498,8 @@ std::string AgentLoop::build_goal_objective_updated_prompt(const ThreadGoal& goa
 
 void AgentLoop::maybe_continue_goal() {
     if (!session_manager_ || abort_requested_.load() || busy_.load()) return;
-    if (!tools_.is_allowed("update_goal", &tool_capability_policy_)) return;
+    const auto tool_policy = tool_capability_policy_snapshot();
+    if (!tools_.is_allowed("update_goal", &tool_policy)) return;
     // Plan mode 下不自动开新回合(对齐 Codex try_start_turn_if_idle 的
     // PlanMode 拒绝):plan 模式的只读约束不该被 goal continuation 绕过。
     // 退出 plan mode 后的下一次回合结束会重新触发 continuation。
@@ -1792,6 +1808,7 @@ AgentLoop::UserTurnInfo AgentLoop::prepare_user_turn(const UserInput& input,
 
 AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     ApiRequestBundle bundle;
+    const auto tool_policy = tool_capability_policy_snapshot();
 
     // Rebuild the system prompt for each provider call from session-stable
     // inputs. The working directory and date belong here; request-local
@@ -1799,7 +1816,7 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     std::string system_prompt = build_system_prompt(
         tools_, cwd_, skill_registry_, memory_registry_,
         memory_cfg_, project_instructions_cfg_,
-        &tool_capability_policy_);
+        &tool_policy);
     if (loop_execution_policy_.active && !loop_execution_policy_.system_context.empty()) {
         system_prompt += "\n\n<loop-execution>\n";
         system_prompt += loop_execution_policy_.system_context;
@@ -1807,13 +1824,13 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     }
     LOG_DEBUG("System prompt length: " + std::to_string(system_prompt.size()));
     bundle.tool_defs =
-        tools_.get_model_tool_definitions(&tool_capability_policy_);
+        tools_.get_model_tool_definitions(&tool_policy);
     const auto builtin_tool_defs =
         tools_.get_model_tool_definitions_by_source(
-            ToolSource::Builtin, &tool_capability_policy_);
+            ToolSource::Builtin, &tool_policy);
     const auto mcp_tool_defs =
         tools_.get_model_tool_definitions_by_source(
-            ToolSource::Mcp, &tool_capability_policy_);
+            ToolSource::Mcp, &tool_policy);
     LOG_DEBUG("Registered tools: " + std::to_string(bundle.tool_defs.size()));
 
     // gitStatus 快照:每会话激活惰性采集一次,cwd 切换或外部失效(Web UI
@@ -1836,11 +1853,11 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
     rewrite_tool_calls_for_model(api_messages);
     PromptContextCategoryBytes context_category_bytes;
     const bool skill_view_available =
-        tools_.is_allowed("skill_view", &tool_capability_policy_);
+        tools_.is_allowed("skill_view", &tool_policy);
     const bool skills_list_available =
-        tools_.is_allowed("skills_list", &tool_capability_policy_);
+        tools_.is_allowed("skills_list", &tool_policy);
     const bool spawn_subagent_available =
-        tools_.is_allowed("spawn_subagent", &tool_capability_policy_);
+        tools_.is_allowed("spawn_subagent", &tool_policy);
     PromptContextBlock skill_context_block = build_skills_index_context_prompt(
         skill_registry_, context_window_.load(std::memory_order_relaxed),
         skill_view_available, skills_list_available);
@@ -1876,8 +1893,8 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
         permissions_.mode() == PermissionMode::Plan
             ? build_plan_mode_context_prompt(
                   session_manager_,
-                  tools_.is_allowed("AskUserQuestion", &tool_capability_policy_),
-                  tools_.is_allowed("ExitPlanMode", &tool_capability_policy_))
+                  tools_.is_allowed("AskUserQuestion", &tool_policy),
+                  tools_.is_allowed("ExitPlanMode", &tool_policy))
             : std::string{};
     append_plan_mode_context_for_api(mutable_context_messages, plan_mode_context);
     std::vector<TodoItem> todo_context_items =
@@ -2329,7 +2346,10 @@ ToolContext AgentLoop::build_tool_context(
     tool_ctx.skill_registry = skill_registry_;
     tool_ctx.scratch_dir = build_session_scratch_dir(cwd_, session_manager_);
     tool_ctx.preserve_full_output = true;
-    tool_ctx.capability_policy = tool_capability_policy_;
+    tool_ctx.capability_policy = tool_capability_policy_snapshot();
+    tool_ctx.enable_deferred_tool = [this](const std::string& tool_name) {
+        return enable_deferred_tool(tool_name);
+    };
     tool_ctx.account_goal_usage = [this]() {
         account_goal_usage(0, true);
     };

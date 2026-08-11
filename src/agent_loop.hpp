@@ -348,8 +348,14 @@ public:
         expert_member_id_ = std::move(member_id);
     }
     void set_tool_capability_policy(ToolCapabilityPolicy policy) {
+        std::lock_guard<std::mutex> lock(tool_capability_policy_mu_);
         tool_capability_policy_ = std::move(policy);
     }
+    ToolCapabilityPolicy tool_capability_policy_snapshot() const {
+        std::lock_guard<std::mutex> lock(tool_capability_policy_mu_);
+        return tool_capability_policy_;
+    }
+    bool enable_deferred_tool(const std::string& tool_name);
     void set_git_context_config(const GitContextConfig* cfg) {
         git_context_cfg_ = cfg;
     }
@@ -593,6 +599,7 @@ private:
     const CustomInstructionsConfig* custom_instructions_cfg_ = nullptr;
     const ExpertDefinition* expert_ = nullptr;
     std::string expert_member_id_;
+    mutable std::mutex tool_capability_policy_mu_;
     ToolCapabilityPolicy tool_capability_policy_;
     const GitContextConfig* git_context_cfg_ = nullptr;
     // gitStatus 快照缓存(openspec add-git-context):nullopt = 尚未采集,
