@@ -17,6 +17,7 @@ DEMOS = [
     ("07_osc133_prompts.py",      "OSC 133 prompt 标记"),
     ("08_tool_row_dots.py",       "acecode ● 三态指示灯"),
     ("09_streaming_markdown.py",  "流式 markdown 增量渲染基准"),
+    ("10_gradient_text.py",       "kimi 渐变品牌字"),
 ]
 
 

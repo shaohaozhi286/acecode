@@ -21,9 +21,10 @@ python 06_spinner_showcase.py      # 动画,Ctrl+C 退出
 python 07_osc133_prompts.py
 python 08_tool_row_dots.py
 python 09_streaming_markdown.py
+python 10_gradient_text.py          # kimi 渐变品牌字
 ```
 
-或一键跑非交互的(1/2/4/7/8/9):
+或一键跑非交互的(1/2/4/7/8/9/10):
 
 ```bash
 python run_static.py
@@ -42,6 +43,7 @@ python run_static.py
 | `07_osc133_prompts` | OSC 133 prompt 语义标记 | 3.6 | ❌ 无 |
 | `08_tool_row_dots` | `●` 三态指示灯 | 二 / 四.3 | ✅ acecode 独有优势 |
 | `09_streaming_markdown` | 流式 markdown 增量渲染基准 | 3.2 | ❌ 整条重渲染 |
+| `10_gradient_text` | kimi 渐变品牌字 | 3.4 | ❌ FTXUI 单色 |
 
 ## 各演示说明
 
@@ -76,3 +78,8 @@ python run_static.py
 - checkpoint 冻结(grok):冻结已稳定块,只渲染活跃 tail
 
 展示 acecode 在长输出时的 CPU 开销差距。
+
+### 10_gradient_text.py
+**kimi-code 渐变品牌字**(`gradientText`):逐字符在 from→to 间插值 truecolor,配合
+accentBias 偏折,用于 Kimi banner/品牌元素。对照 acecode 的 FTXUI 单色加粗
+(Element 按整段上色,不暴露逐字符色)。
