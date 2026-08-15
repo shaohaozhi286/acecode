@@ -1,201 +1,229 @@
-# ACECode TUI 与同类项目对比调研报告
+# ACECode 终端界面 与同类产品对比(产品视角)
 
-> 调研日期:2026-08-15(第 2 版,纳入 kimi-code / codex)
-> 调研范围:`D:\dev` 下 7 个具备终端 TUI 的 AI 编程工具:
-> **acecode**(本项目,C++ + FTXUI)、**opencode**(TS + OpenTUI)、**pi**(TS + 自研 pi-tui)、
-> **kimi-code**(TS + @moonshot-ai/pi-tui 即 pi-tui fork)、**crush**(Go + Bubble Tea v2)、
-> **grok-build**(Rust + ratatui fork)、**codex**(Rust + ratatui fork)。
-> `agent`(纯笔记)、`openchamber` / `pi-web`(web/desktop,无 TUI)不参与对比。
->
-> 配套可运行效果演示见 [`demos/`](./demos/README.md)。
+> 版本:2026-08-15(含 kimi-code / codex)
+> 一句话:我们和市面上 6 款主流"AI 编程终端工具"对比了终端界面的实现方式和实际观感,搞清楚:别人家终端界面"好看、流畅、好用"是怎么做到的,我们差在哪,补什么最划算。
 
----
+对比对象(D:\dev 下的 7 个项目,其中 `agent`/`openchamber`/`pi-web` 没有终端界面,不参与):
 
-## 一、技术栈速览
-
-| 项目 | 语言 | TUI 框架 | 渲染模型 | Markdown / 语法高亮 |
-|---|---|---|---|---|
-| **acecode** | C++ | **FTXUI** | 立即模式组件树,每帧重算 → Screen → ANSI | 自研 `markdown_formatter` + 内置 `syntax_highlight` |
-| **opencode** | TS/bun | **OpenTUI**(`@opentui/core`+`solid`) | retained framebuffer(`Uint16Array` 逐像素)+ Yoga flexbox + 原生 FFI | OpenTUI `<markdown>` + **tree-sitter WASM 运行时下载** |
-| **pi** | TS | **自研 pi-tui** | 组件树每帧渲染成文本行数组 → **逐行字符串 diff** → CSI 2026 同步输出 | `marked` + highlight.js + LaTeX Unicode |
-| **kimi-code** | TS | **@moonshot-ai/pi-tui**(pi-tui 0.84.3 fork) | 同 pi(差分渲染 + 布局树 + CSI 2026) | 同 pi(marked + hljs),`highlight-theme.ts` 主题化 |
-| **crush** | Go | **Bubble Tea v2** + lipgloss | 命令/更新/视图,`View()` 返回整串,tea 内部行 diff | **glamour v2 + stable-prefix 增量缓存** |
-| **grok-build** | Rust | **ratatui**(自 fork `xai-ratatui-inline`)+ crossterm | 立即模式 + 双缓冲 **cell 级 diff**,保留光标闪烁 + 后台写线程 | 自研 `xai-grok-markdown` + checkpoint 冻结 + syntect |
-| **codex** | Rust | **ratatui**(自 fork `custom_terminal.rs`)+ crossterm | 立即模式 + 双缓冲 diff,自研 Terminal;**scrollback-first** 输出模型 | `pulldown-cmark` + **two-face/syntect**(~250 语言,32 主题) |
-
-> 血缘关系:`pi` ↔ `kimi-code` 共用同一 TUI 库(pi-tui);`grok-build` ↔ `codex` 都是"fork 了 ratatui Terminal"的 Rust 重写。七个项目实际只有 5 个独立技术路线。
-
----
-
-## 二、本项目(acecode)TUI 实现特征
-
-- **立即模式 + FTXUI 组件树**:`make_screen_interactive`(`src/tui/render_mode.cpp`)按 `tui.alt_screen_mode`(auto/always/never)在 `Fullscreen()`(alt-screen `\033[?1049h`)与 `TerminalOutput()`(scrollback 模式)间二选一;`run_tui_loop`(`src/tui/tui_init.cpp:296`)直接 `screen.Loop(renderer)`,bracketed paste 包裹。
-- **布局**:header(ACE block-art logo + 版本/模型/cwd)+ 右侧 sidebar(会话列表)+ chat transcript + input box + status line。
-- **Markdown**:自研 `format_markdown`(`src/markdown/markdown_formatter.cpp`)输出 FTXUI `Element`,有 `syntax_highlight`(`src/markdown/syntax_highlight.cpp`,按语言名内置表),theme 有 `MarkdownColors`。**流式时整条重渲染**,靠 `redraw_pacer` 帧率限制 + `tool_result_fold` 折叠控量。
-- **工具行渲染**:`● ToolName(args)` 三态指示灯(灰/绿/红)、`compute_tool_call_dots` FIFO 配对、Ctrl+O/Ctrl+E 展开、`thinking_heartbeat` 内联 `[Ns · ↓ X tokens]`。
-- **跨平台兜底**:`detect_terminal_capabilities` 读 ConEmuPID/WT_SESSION/Windows build,`should_use_conhost_compat_layout` 在老 conhost 上退 ASCII 边框、去 logo —— **老 Windows 终端兼容最扎实**。
-- **剪贴板/鼠标**:FTXUI mouse tracking + 右键 OSC 52 复制 + Ctrl+V 读系统剪贴板。
-
----
-
-## 三、关键差异分维度对比(7 项目)
-
-### 3.1 渲染管线
-
-| | 模型 | 同步输出 | 输出目标 | 独特机制 |
-|---|---|---|---|---|
-| **acecode** | FTXUI Screen diff,光标回退 `\033[1A` | ❌ | stdout | 双模式(alt-screen / TerminalOutput scrollback) |
-| **opencode** | retained framebuffer + Yoga flexbox | (原生层) | 原生 FFI | 逐像素 RGBA framebuffer |
-| **pi** | 文本行数组 + 逐行字符串 diff | ✅ CSI 2026 | stdout | main/alt 双渲染器,整帧原子写入 |
-| **kimi-code** | 同 pi | ✅(同 pi) | stdout | 同 pi + agent swarm 应用层 |
-| **crush** | Bubble Tea `View()` 行 diff | (tea 内部) | stdout | 命令/更新/视图模型 |
-| **grok-build** | ratatui 双缓冲 cell diff | ✅ CSI 2026 | **stderr** + 后台写线程 | fork Terminal 保留光标闪烁 |
-| **codex** | ratatui 双缓冲 cell diff(自 fork) | ✅ CSI 2026 | stdout | **scrollback-first**:已完成历史写真实终端 scrollback,视口只是底部小窗 |
-
-**codex scrollback-first 模型**(报告新增重点):`insert_history.rs` 把已完成的对话历史用转义序列直接写进**真实终端 scrollback**,ratatui 只负责底部一个小 viewport —— 每帧 diff 量极小。写入前做 **URL 感知预换行**(URL 行保持整行以便终端识别为可点击),检测 zellij 用专用 `ZellijRaw` 写入路径,resize 时按终端 scrollback 容量回灌重建(VS Code 1000 行 / WT 9001 / WezTerm 3500 / Alacritty 10000 上限),75ms 去抖合并拖拽 resize。
-
-> 与 acecode 对照:acecode 的 `TerminalOutput()` 模式同样是"历史进 scrollback"思路,但机制不同 —— FTXUI 用 `\033[1A` 光标回退重绘整个输出区,codex 是"写死历史 + 独立小视口"永不回退,滚动天然由终端负责,无需重绘。
-
-### 3.2 流式 Markdown 渲染(acecode 明显偏弱)
-
-| | 做法 |
-|---|---|
-| acecode | 整条重渲染 + `redraw_pacer` 限帧 |
-| **crush** | glamour "stable-prefix" 增量缓存,只渲染尾部 |
-| **grok** | `StreamingMarkdownRenderer` checkpoint 冻结 tail + 键控换行缓存 |
-| **opencode** | OpenTUI `streaming={true}` 增量解析 + SSE 16ms 批量 |
-| **pi / kimi** | 整条重解析但 `cachedText/cachedWidth` 缓存 + `trimPartialClosingFences` 防抖 |
-| **codex** | **两区域流式模型**:稳定区 → 逐行"提交动画"滚入 scrollback,尾区 → active cell;`MarkdownStreamCollector` 换行门控(表格/fenced 代码未闭合不提前渲染);**表格 holdback**(pipe 表格整表保持 mutable 直到流结束,避免加行改列宽重塑历史);`AdaptiveChunkingPolicy` 按队列压力选单行/批量提交 |
-
-→ codex 的提交动画 + 表格 holdback 是最成熟的流式体验;acecode 差距最大。见 [`demos/09_streaming_markdown.py`](./demos/09_streaming_markdown.py)。
-
-### 3.3 代码语法高亮
-
-| | 方案 | 覆盖 |
+| 产品 | 用什么技术做的界面 | 一句话印象 |
 |---|---|---|
-| acecode | 内置语言表 `syntax_highlight.hpp` | 离线,内置 |
-| **opencode** | tree-sitter WASM **运行时下载** + nvim-treesitter 查询 | ~30 语言,网络依赖 |
-| **grok** | syntect + 内置 tmTheme,quantize + 双极性安全降级 | 离线 |
-| **pi / kimi** | highlight.js,`supportsLanguage` 门控 | 离线;kimi 有 `highlight-theme.ts` 主题化 |
-| **codex** | **two-face(~250 语言)+ 32 内置 .tmTheme + 用户自定义**,`convert_style` 跳过 italic/underline;护栏 >512KB/>10000 行/单行 >4KiB 跳过高亮 | 离线,最全 |
+| **ACECode**(本项目) | C++ 自研界面框架(FTXUI) | 老牌 Windows 终端兼容最好,工具调用行设计独树一帜 |
+| **opencode** | 自己的终端 UI 引擎(OpenTUI) | 界面最"华丽":有动画背景、渐变、霓虹加载条 |
+| **pi** | 自研界面库(pi-tui) | 工程最扎实:整屏一次刷新不闪、可点链接、可贴图 |
+| **kimi-code** | 直接用了 pi 的界面库(魔改版) | 和 pi 一个底子,但外壳很有品牌感:渐变字、月亮加载动画、多代理协作 |
+| **crush** | 成熟的 Go 界面框架(Bubble Tea) | 中庸稳妥,增量排版省性能 |
+| **grok-build** | Rust 界面框架(ratatui)+ 深度魔改 | 特效最多:波浪动画、内嵌图片/视频、甚至内置小游戏 |
+| **codex** | Rust 界面框架(ratatui)+ 深度魔改 | 思路最先进:历史直接滚进终端,界面只留一小块,最流畅 |
 
-### 3.4 视觉特效
+血缘关系:7 个产品实际只有 **5 套独立的技术路线** —— pi 和 kimi-code 是同一套壳,crush 自成一家,opencode 一家,ratatui 系(grok / codex)两家各自魔改。
 
-| 效果 | acecode | opencode | pi | kimi-code | grok | codex |
+---
+
+## 一、各家怎么把画面画出来(性能差异的根源)
+
+**先理解两件事:**
+1. 终端本身是个"文本画布",软件每刷新一次,就是往画布上写字。怎么"写"决定了流畅度和闪不闪。
+2. 有两个方案:① 把整个画面从头重画一遍;② 只把**有变化的部分**重画,其余不动。
+
+| 产品 | 重画方式 | 会不会闪 | 说明 |
+|---|---|---|---|
+| **ACECode** | 每帧把界面全量重画 + 光标上移重绘 | 老终端上会闪 | 全量重画,越长的对话越吃力 |
+| **opencode** | 内存里先画好整张图,只把变化的格子同步上屏 | 好 | 只更新变化部分,天生省 |
+| **pi / kimi-code** | 每次只重画有变化的"行" | 好 | 按行对比新旧画面,只改变了的行 |
+| **crush** | 每次把整屏文字重新拼一遍交给框架去刷新 | 一般 | 框架内部会省,但拼整屏本身费劲 |
+| **grok-build** | 内存双画布逐格对比,只重画变化的格子 | 好 | 画面变化小的时候开销极小 |
+| **codex** | 和 grok 类似,但更激进(见下) | 最好 | 见"codex 的思路" |
+
+**一个影响观感的关键技术——"同步刷新"(专业名 CSI 2026):**
+终端刷新是有"半帧"状态的(上半屏新的、下半屏旧的),看着就闪。加了同步刷新,画面会**整块一次到位**,完全不闪。这是很多产品"看起来高级"的一大原因。
+- ✅ 有同步刷新:pi / kimi-code / grok-build / codex
+- ❌ 没有:ACECode(目前是光标上移逐行重绘,老终端上会闪)、crush(依赖框架)
+
+**codex 的思路(最值得学的一招):**
+别的产品(包括我们)都是"整个界面自己做,内容都在自己的画布里"。codex 反着来:**已经说完的话直接写进终端的历史区**(就是你往上滚鼠标能看到的那一片),界面只占屏幕底部一小块"当前状态区"。好处:
+- 每帧要重画的东西极少 → 特别流畅
+- 历史天然能往上翻,不用自己做滚动
+- 唯一的代价:窗口拉宽时需要把历史按新宽度重排一遍(codex 做了,还按终端型号设了重排行数上限,防止卡死)
+
+> 对我们:ACECode 其实已经有"滚屏模式"(内容进历史区)和"全屏模式"两种,方向和 codex 一致,只是实现还停留在"光标上移重绘",没做到"写完就永久落定、界面只留当前块"。这是最清晰的一条升级路线。
+
+---
+
+## 二、AI 说话(流式输出)时,各家表现如何
+
+AI 打字是一点一点冒出来的。怎么把"正在冒的字"画得又顺又不晃,是体验差异的大头。
+
+| 产品 | 流式表现 | 说明 |
+|---|---|---|
+| **ACECode** | 每冒一段就把**整篇**重新排版渲染 | 对话越长越卡,长文输出时明显 |
+| **crush** | 只重排"新冒出来的尾巴",前面排版好的直接复用 | 前面部分不会再算,省很多 |
+| **grok-build** | 更聪明:已经稳定的段落"冻结",只渲染还在变化的尾部 | 长文档也流畅 |
+| **opencode** | 流式"增量排版" + 把 16ms 内的多次更新合并成一次画 | 很顺 |
+| **pi / kimi-code** | 每次整篇重排但内部有缓存,还做了"代码块没闭合时不提前画"的防抖 | 平滑但费 CPU |
+| **codex** | 最成熟:已说完的逐行"打字机式"滚进历史区,新内容在底部显示;**表格会整张憋住,等表格排完再一次性显示**(否则加一行整表就抖一下) | 观感最稳 |
+
+**一句话:流式输出这块我们目前是全场最吃力的一档**,对话一长,每次 AI 冒几个字都要把整篇重新算一遍。crush / codex 的做法(只重排新增的尾巴、冻结已稳定部分)是明确可抄的。
+
+> 想直观看到差距,跑 `demos/09_streaming_markdown.py`:同样的内容,朴素整篇重排的耗时随长度线性上涨,增量方案基本持平。
+
+---
+
+## 三、代码块配色(谁的颜色漂亮且不依赖网络)
+
+| 产品 | 代码着色方案 | 特点 |
+|---|---|---|
+| **ACECode** | 内置语言表 | 离线可用,语言数量固定 |
+| **opencode** | 运行时从网上下载语法包(30+ 语言) | 颜色最全,但**断网就退步**,且要等下载 |
+| **pi / kimi-code** | highlight.js | 离线,语言够用 |
+| **grok-build** | syntect 引擎 + 内置配色,自动适配终端色阶 | 离线 |
+| **codex** | 覆盖 **250+ 语言** 的引擎 + 32 套内置配色 + 用户自定义 | 离线,覆盖最全 |
+
+**说明:** 这里只有 opencode 有"联网依赖",其余都是离线的。codex 的覆盖面最广(250+ 语言),但这对普通使用差异不大——我们内置的语言表日常够用。
+
+---
+
+## 四、界面特效与"高级感"(我们目前最朴素)
+
+| 效果 | 我们 | opencode | pi | kimi-code | grok | codex |
 |---|---|---|---|---|---|---|
-| 逐帧动画背景 | ❌ | ✅ BgPulse 呼吸光圈 | ❌ | ❌ | ✅ sin² 波浪 accent | ❌ |
-| RGBA 透明/混色 | ❌ | ✅ | ❌ | ❌ | ✅ framebuffer | ✅ **accent 按终端背景 alpha 混色** |
-| **渐变品牌字** | ❌ | ❌ | ❌ | ✅ `gradientText`(逐字符 hex 插值,Kimi 品牌) | ❌ | ❌ |
-| 特殊 spinner | ❌ | ✅ Knight Rider 扫描光带 | ✅ braille | ✅ **Moon 月相 + braille** | ✅ braille/dot/monitor | ✅ braille(标题动画) |
-| 内联图片 | ❌ | ❌ | ✅ Kitty/iTerm2 | ✅ Kitty/iTerm2 + 缩略图 | ✅ Kitty/iTerm2 | ✅ **Sixel 手写编码 + ASCII pet** |
-| 内联视频 | ❌ | ❌ | ❌ | ❌ | ✅ ffmpeg 抽帧 | ❌ |
-| Mermaid 终端渲染 | ❌ | ❌ | ❌ | ❌ | ✅ Unicode box-drawing | ❌ |
-| 终端标题动画 | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Thinking 时 Braille 帧 |
-| 彩蛋 | ❌ | ❌ | ❌ | ✅ easter-eggs/dance | ✅ gboom 游戏 | ✅ pets(Sixel) |
-| 工具行 `●` 三态灯 | ✅(独有) | 文本 | 背景色块 | 背景色块 | accent 竖线 | `• ` bullet |
+| 动态背景(会呼吸的光圈/波浪) | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ |
+| 半透明叠层(遮罩能透出底下) | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ |
+| **渐变品牌字** | ❌ | ❌ | ❌ | ✅(Kimi 紫蓝渐变) | ❌ | ❌ |
+| 好看的加载动画 | 仅静态 ● | ✅ 霓虹扫描光条 | ✅ 转圈 | ✅ **月亮月相 + 转圈** | ✅ 多种 | ✅ 转圈 |
+| 内嵌图片 | ❌ | ❌ | ✅ | ✅(含缩略图) | ✅ | ✅(ASCII 宠物) |
+| 内嵌视频 | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| 图表(流程图等)直接画在终端 | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| 工具调用行"● 三态指示灯" | ✅ **我们的招牌** | 纯文字 | 底色块 | 底色块 | 竖线 | 圆点 |
 
-### 3.5 输入编辑器
+**小结:**
+- **opencode / grok 是"特效派"**(动画背景、霓虹加载、内嵌媒体),**codex / pi 是"流畅稳派"**,kimi-code 在 pi 的底子上加了很强的品牌包装(渐变字、月亮动画、欢迎页)。
+- 我们目前是**最朴素的一档**,但有一个别人没有的招牌:**工具调用行的"● 三态指示灯"**(灰=正在跑 / 绿=成功 / 红=失败,一眼看清工具执行状态),这是我们的差异化亮点,值得保留并强化。
 
-| | 能力 |
+> 想亲眼看:kimi 的渐变字 `demos/10_gradient_text.py`;半透明 vs 不透明 `demos/04_alpha_transparency.py`;动态背景 `demos/05_animated_background.py`;各家加载动画同屏 `demos/06_spinner_showcase.py`;我们的 ● 指示灯 `demos/08_tool_row_dots.py`。
+
+---
+
+## 五、输入框体验(打字、粘贴、快捷键)
+
+| 产品 | 输入框能力 |
 |---|---|
-| acecode | `input_history_navigation`/`path_reference_input`/`paste_handler`/`ime_windows`;**无 extmark、无输入内高亮、无 leader key** |
-| **opencode** | TextareaRenderable:输入内语法高亮、**extmark 虚拟文本**、IME、keymap mode stack + leader key |
-| **pi** | 自研 editor:Emacs 风格、undo、kill-ring、自动补全、CJK 断行、IME APC 光标 |
-| **kimi-code** | `custom-editor.ts`(自研)+ `file-mention-provider`(`@` 文件补全)+ `wrapping-select-list` |
-| **grok** | `xai-ratatui-textarea` grapheme 编辑 + Vim/Simple 双模式 |
-| **codex** | 自研 `TextArea`(`bottom_pane/textarea.rs`,注释里点名 tui-textarea 的坑):**Vim 模式**(normal/operator/text-object)、kill buffer、`TextElement` 原子元素(mention/大粘贴占位)、掩码输入;**配置驱动 `RuntimeKeymap`**(app/chat/composer/editor/vim 多上下文 + **key chord 和弦**) |
+| **ACECode** | 基础:历史记录、路径补全、粘贴处理、中文输入法兼容。**没有**输入框内高亮、没有虚拟占位、没有组合快捷键 |
+| **opencode** | 最强:输入框里直接**语法高亮**、可以插入"图片占位符"这种虚拟元素、支持复杂组合快捷键(如两键和弦)、粘贴智能压缩 |
+| **pi** | 强:撤销栈、剪贴板环、自动补全、长粘贴自动折叠成"[已粘贴 N 行]"、对中文/日文断行友好 |
+| **kimi-code** | 同 pi + 文件 `@` 补全 |
+| **grok-build** | 极客双模式(Vim/普通),圆角输入框 |
+| **codex** | 最强之一:自带 Vim 模式、剪贴板删除缓冲、粘贴压缩、**配置驱动的完整快捷键体系**(支持组合键) |
 
-### 3.6 终端协议
+**一句话:输入框这块 opencode / codex 最接近"编辑器级"体验,我们目前是基础款。** 对产品经理来说,最值得抄的两个点:① 长粘贴自动折叠(贴 500 行不用闪屏);② 复杂快捷键(leader + 组合键)。
 
-| 协议 | acecode | opencode | pi | kimi | crush | grok | codex |
-|---|---|---|---|---|---|---|---|
-| **CSI 2026 同步输出** | ❌ | (原生) | ✅ | ✅ | (tea) | ✅ | ✅ |
-| **OSC 8 超链接** | ⚠️ 检测但不发射(FTXUI 限制) | ✅ | ✅ | ✅ | ❌ | ✅ 自动 linkify | ✅ **链接元数据与几何分离**(换行不含转义字节,长 URL 跨行合并) |
-| **OSC 133 prompt 标记** | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| **kitty keyboard** | ❌(仅消费标准 CSI 修饰符) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ **按终端精细调优** |
-| **CSI-u 微调** | ❌ | 通用 | 通用 | 通用 | ❌ | 通用 | ✅ iTerm2/Ghostty 抑制 release(`>5u`)、kitty 保 repeat(`>7u`)、tmux 确认 `extended-keys-format` 才用 modifyOtherKeys、VS Code+WSL 禁用 |
-| **终端探测** | 仅 env 检测 | 原生层 | kitty 协商 | 同 pi | (tea) | DA2/XTVERSION 20+ | ✅ **100ms 有界探测**(CPR/OSC10/11/键盘增强),驱动主题+键盘模式 |
+---
 
-**codex 终端探测**(新增):`terminal_probe.rs` 用 100ms 预算探测光标位置(CPR `ESC[6n`)、默认前景/背景色(OSC 10/11)、键盘增强支持,探测期间独占终端输入 —— 比 crossterm 默认 2s 超时更快更稳。探测结果驱动:UI accent 按终端背景自动调色、键盘模式按终端分支选择。
+## 六、键盘与终端"认不认识"你按的键(细节但影响大)
 
-### 3.7 跨平台
+终端有个老毛病:它分不清"你按了 Enter"还是"Shift+Enter"(都报成同一个信号)。键盘增强协议(专业名 kitty keyboard / CSI-u)能解决——按 Shift+Enter 就能识别出"带 Shift"。
 
-| | Windows 处理 | 独有 |
+| 产品 | 是否启用键盘增强 | 程度 |
 |---|---|---|
-| acecode | conhost compat 布局 + alt-screen 兜底 | 老 conhost 兼容最扎实 |
-| **grok** | stderr 开 VTP + `SetConsoleOutputCP(UTF-8)`、legacy 字形回退、QuickEdit 保留 | 最彻底的字形/编码处理 |
-| **codex** | `SetConsoleMode` 对 stdout+stderr 开 VTP;**关闭 `ENABLE_VIRTUAL_TERMINAL_INPUT` 走 Win32 input records**(每次 poll 重断言,防其它 console client 改回 VT 输入导致导航键变裸转义字节) | macOS fd2 dup2 /dev/null 守卫 stderr |
-| **pi/kimi** | 原生 .node addon(ENABLE_VIRTUAL_TERMINAL_INPUT + isModifierPressed) | 原生修饰键查询 |
-| opencode | kernel32 FFI 清 PROCESSED_INPUT + 100ms Ctrl+C guard | — |
-| crush | Bubble Tea 自带 | — |
+| **ACECode** | ❌ 没启用 | 只消费通用的方向键修饰信号,Shift+Enter 这种拿不到 |
+| **opencode / pi / kimi-code / grok** | ✅ | 通用启用 |
+| **codex** | ✅ | **最精细**:针对不同终端(苹果终端/kitty/Ghostty/Windows 版 VS Code)分别调优,还会先探测你的终端再决定用哪种 |
 
-### 3.8 主题系统
-
-| | 方案 |
-|---|---|
-| acecode | dark/light 两套预置 `ThemePalette`,不透明色 |
-| **opencode** | 30+ JSON 主题 + 用户自定义 + **system 主题从终端调色板现场生成** |
-| **grok** | GrokNight/Day + TokyoNight 等 5 套 + OSC 11 跟随终端背景 + 量化降级 |
-| **pi** | JSON dark/light 60+ token,热重载 |
-| **kimi-code** | `theme.ts` + **`custom-theme-loader`** + `gradient-text` + `detect.ts`(终端背景探测)+ `theme-selector` 对话框 |
-| **codex** | 语法:two-face 32 主题 + 用户 `.tmTheme`;**UI 强调色按终端背景 alpha 自适应**(暗底 12% 白、亮底 4% 黑混合;表格分隔线 20% alpha 混色) |
-
-### 3.9 性能 / 虚拟化
-
-| | 手段 |
-|---|---|
-| acecode | `redraw_pacer` 帧率限制 + `tool_result_fold` + `chat_render_window` |
-| **codex** | **scrollback-first**(历史出界,每帧 diff 极小)+ **FrameRequester/FrameScheduler actor + 120FPS 上限** + 多级缓存(history render cache / ActiveCellLayoutCache / stable_prefix_len_cache)+ resize 回灌行数上限 |
-| **grok** | `entry_layouts_cache` 高度缓存 + scrollback 虚拟化 + SafeBuf |
-| **pi/kimi** | per-frame renderCache + render-churn bench |
-| **opencode** | ScrollBoxRenderable 裁剪 + SSE 16ms batching + conceal |
-| crush | stable-prefix glamour 缓存 + section cache |
+另外,codex 会在启动时用 0.1 秒快速"摸一下"你的终端是什么型号、支持什么颜色、什么键盘能力,然后自动适配(比如界面主题颜色跟着你的终端背景自动变)。**这是一个低成本高回报的点:让界面自动适配终端,而不是写死。**
 
 ---
 
-## 四、acecode 独有 / 仍占优的点
+## 七、Windows / 老终端兼容(我们的强项)
 
-1. **单一 C++ 二进制、零运行时依赖**(opencode 下 tree-sitter WASM、pi/kimi 装 node+addon、Rust 项目要编译)。
-2. **老 Windows 终端(conhost/Cmder/ConEmu)兼容最扎实**。
-3. **`●` 工具调用行 + Ctrl+O/E 折叠语义**自创紧凑风格。
-4. **daemon + 桌面壳 + headless 多形态共用同一 TUI 渲染逻辑**。
-5. **双模式(alt-screen / scrollback)** 与 codex 的 alt/inline 双模式同构 —— 说明 acecode 的架构方向与最成熟的 codex 一致,差距在实现深度(同步输出、URL 感知回灌、逐终端调优)。
+| 产品 | 对老 Windows 终端的态度 |
+|---|---|
+| **ACECode** | ✅ **最扎实**:老式 CMD/ConEmu 上自动退化成纯 ASCII 边框、去掉大 Logo,保证还能看 |
+| **grok-build** | 很彻底:强制把终端设为 UTF-8(否则特殊符号变乱码),老终端自动换能显示的符号 |
+| **codex** | 只面向现代终端(Windows Terminal),老式 CMD 基本不考虑 |
+| **pi/kimi/opencode/crush** | 主要测现代终端 |
+
+**这是我们的护城河之一:老终端兼容性全场最好。** 其他产品大多"只在现代终端上测",我们连 2018 年之前的旧版 CMD 都做了降级处理。
 
 ---
 
-## 五、acecode 最值得补的差距(按性价比排序)
+## 八、主题 / 换肤
 
-| # | 差距 | 难度 | 收益 | 参考实现 |
+| 产品 | 换肤能力 |
+|---|---|
+| **ACECode** | 内置深/浅两套配色,不可自定义 |
+| **opencode** | 30+ 内置主题 + 用户自定义 + **自动从你的终端取色生成主题** |
+| **grok-build** | 5 套主题 + 跟随终端背景色 |
+| **pi / kimi-code** | 深/浅 + 热重载(改配置立刻生效)+ kimi 支持自定义主题加载和终端背景探测 |
+| **codex** | 语法配色 32 套 + 用户自定义;**界面强调色跟随你的终端背景自动调**(深底自动用浅色强调) |
+
+**一句话:换肤是我们的明显短板**(只有两套写死的),别人都支持用户自定义甚至自动跟随终端。**这是产品经理能直接感知的"高级感"差距。**
+
+---
+
+## 九、长对话 / 大输出的流畅度
+
+| 产品 | 手段 |
+|---|---|
+| **ACECode** | 限帧率 + 折叠超长输出 + 聊天区窗口化 |
+| **codex** | 最先进:说完的话滚进终端历史区(见第一节),界面永远只画一小块 + 120 帧上限 + 多层缓存 |
+| **grok-build** | 虚拟滚动(只画看得见的)+ 高度缓存 |
+| **pi/kimi** | 每帧缓存 + 性能基准测试 |
+| **opencode** | 只画可视区域 + 流式合并更新 + 代码自动折叠 |
+| **crush** | 增量排版缓存 |
+
+**一句话:长对话的流畅度,codex 领先(靠"历史出界面"这一招),我们是中游偏下。** 我们的"折叠超长输出"思路对,但还停留在"全量重排 + 限帧"层面。
+
+---
+
+## 十、我们的独有优势(值得保住)
+
+1. **老 Windows 终端兼容全场最好**(见第七节)。
+2. **工具调用行"● 三态指示灯"**是自创招牌,信息密度高、一眼看懂执行状态。
+3. **单一安装包、零依赖、断网可用**——opencode 要联网下语法包,pi/kimi 要装 Node,我们一个二进制全搞定。
+4. **一个界面引擎同时服务终端版 / 后台服务 / 桌面壳 / 无头模式**,架构上是"一套渲染多处用",别人大多是单体。
+
+---
+
+## 十一、最该补的 8 个差距(按性价比排序)
+
+> 难度:★ 低 ~ ★★★ 高;收益:指用户能直接感知的改善。
+
+| # | 差距 | 难度 | 收益 | 一句话 |
 |---|---|---|---|---|
-| 1 | **流式 markdown 增量渲染** | 中 | 高 | crush stable-prefix / grok checkpoint / codex 两区域+提交动画 |
-| 2 | **CSI 2026 synchronized output** | 低 | 中 | pi/codex/grok |
-| 3 | **OSC 8 超链接真正可用** | 高 | 中 | codex 几何分离 / grok linkify |
-| 4 | **kitty keyboard / CSI-u 按终端调优** | 中 | 中 | codex keyboard_modes / opencode |
-| 5 | **终端探测(CPR/OSC10/11,100ms)驱动主题+键盘** | 中 | 中 | codex terminal_probe |
-| 6 | **主题扩展**(用户自定义 + 终端背景自适应 accent) | 中 | 中 | codex style.rs / kimi custom-theme-loader |
-| 7 | **输入框 extmark / 输入内高亮 / key chord** | 高 | 中 | codex TextArea / opencode |
-| 8 | **scrollback URL 感知写入 + resize 回灌行数上限** | 中 | 中 | codex insert_history / resize_reflow_cap |
+| 1 | **流式输出增量排版**(别再整篇重排) | ★★ | 高 | 长对话卡顿,最明显的短板,crush/codex 有现成方案 |
+| 2 | **同步刷新防闪烁** | ★ | 中 | 一劳永逸消除老终端闪烁,改动小 |
+| 3 | **可点击链接真正可用** | ★★★ | 中 | 我们其实写了检测代码,但框架限制发不出去(点不了),需要绕过框架 |
+| 4 | **键盘增强协议**(分得清 Shift+Enter) | ★★ | 中 | codex 已按终端逐个调优 |
+| 5 | **启动时快速探测终端能力**,自动适配主题/键盘 | ★★ | 中 | codex 0.1 秒探测,低成本高回报 |
+| 6 | **换肤能力**(用户自定义 + 跟随终端背景) | ★★ | 中 | 目前只有两套写死,产品感知明显 |
+| 7 | **输入框升级**(粘贴折叠、组合快捷键) | ★★★ | 中 | opencode/codex 已是编辑器级 |
+| 8 | **滚屏模式升级**:历史写完就落定、界面只留当前块 | ★★ | 中 | 这是我们对齐 codex 流畅度的正路 |
 
-> 第 3、7 项受 FTXUI Element 网格模型限制较深。第 8 项恰好是 acecode `TerminalOutput()` 模式的演进方向 —— 从"光标回退重绘"升级为"写死历史 + 独立视口"。
+> 第 3、7 项受我们底层界面框架(FTXUI)限制较深,需要绕过框架或改造;其余几项可以直接抄成熟方案。
 
 ---
 
-## 六、演示索引
+## 十二、演示(亲眼看效果)
 
-所有演示为自包含 Python 脚本,在 Windows Terminal / kitty / WezTerm / iTerm2 下可直接运行:
+`docs/tui-comparison/demos/` 下有 10 个可直接运行的小脚本,每个演示一个效果并标注"谁有、我们现状如何":
 
-```
+| 演示 | 效果 | 我们的现状 |
+|---|---|---|
+| `01_synchronized_output` | 同步刷新 vs 不刷新的闪烁对比 | ❌ 没有 |
+| `02_osc8_hyperlinks` | 可点击链接 vs 我们的纯色文本 | ⚠️ 检测了但点不了 |
+| `03_kitty_keyboard` | 键盘增强协议(交互,按 q 退出) | ❌ 未启用 |
+| `04_alpha_transparency` | 半透明叠层 vs 不透明 | ❌ 不透明 |
+| `05_animated_background` | 动态呼吸背景(动画,Ctrl+C 退出) | ❌ 没有 |
+| `06_spinner_showcase` | 各家加载动画同屏对比 | ❌ 仅静态 ● |
+| `07_osc133_prompts` | 回合分界标记(可跳转) | ❌ 没有 |
+| `08_tool_row_dots` | **我们的 ● 三态指示灯(招牌)** | ✅ 独有 |
+| `09_streaming_markdown` | 流式增量排版 vs 整篇重排耗时对比 | ❌ 整篇重排 |
+| `10_gradient_text` | Kimi 渐变品牌字 | ❌ 单色 |
+
+运行方式(需 Python 3.8+,推荐 Windows Terminal):
+
+```bash
 cd docs/tui-comparison/demos
-python 01_synchronized_output.py     # CSI 2026 同步输出:闪烁对比
-python 02_osc8_hyperlinks.py         # OSC 8 可点击超链接
-python 03_kitty_keyboard.py          # kitty keyboard 协议(交互)
-python 04_alpha_transparency.py      # RGBA alpha 混色对比
-python 05_animated_background.py     # 正弦呼吸动画背景
-python 06_spinner_showcase.py        # 五种 spinner 同屏对比
-python 07_osc133_prompts.py          # OSC 133 prompt 语义标记
-python 08_tool_row_dots.py           # acecode ● 三态指示灯(本项目优势)
-python 09_streaming_markdown.py      # 流式 markdown 增量渲染基准
-python 10_gradient_text.py           # kimi 渐变品牌字(新增)
+python run_static.py        # 批量跑非交互的(01/02/04/07/08/09/10)
+python 05_animated_background.py   # 动画类单独跑,Ctrl+C 退出
+python 03_kitty_keyboard.py        # 交互类,按 q 退出
 ```
-
-详见 [`demos/README.md`](./demos/README.md)。
