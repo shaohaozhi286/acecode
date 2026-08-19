@@ -187,7 +187,8 @@ void WebServer::Impl::register_experts() {
         json skills = json::array();
         if (config_snapshot) {
             const auto payload =
-                build_skills_payload(*config_snapshot, workspace->cwd);
+                build_skills_payload(*config_snapshot, workspace->cwd,
+                                     deps.skill_usage_store);
             for (const auto& item : payload) {
                 const std::string id =
                     item.value("name", std::string{});

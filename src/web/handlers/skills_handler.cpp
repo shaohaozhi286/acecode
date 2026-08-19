@@ -2,11 +2,15 @@
 
 #include "../../skills/skill_init.hpp"
 #include "../../skills/skill_registry.hpp"
+#include "../../skills/skill_usage_store.hpp"
 #include "../../utils/utf8_path.hpp"
 #include "../../utils/logger.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace fs = std::filesystem;
@@ -138,7 +142,10 @@ std::optional<std::string> get_skill_body(const std::string& name,
 nlohmann::json build_skills_payload_with_roots(
     const std::vector<fs::path>& project_roots,
     const std::vector<fs::path>& global_roots,
-    const std::vector<std::string>& disabled_list) {
+    const std::vector<std::string>& disabled_list,
+    const SkillUsageStore* skill_usage,
+    std::int64_t now_epoch_ms,
+    int idle_days) {
     // 扫描时 disabled 置空 —— 禁用中的 skill 也保留完整元数据(描述/来源),
     // 而不是像旧实现那样只剩一个名字。
     std::unordered_set<std::string> project_root_keys;
@@ -157,6 +164,18 @@ nlohmann::json build_skills_payload_with_roots(
     const std::unordered_set<std::string> disabled(
         disabled_list.begin(), disabled_list.end());
 
+    // Usage/dormancy lookup for display. Empty when no store is wired up.
+    std::unordered_map<std::string, SkillUsageSummary> usage_by_name;
+    if (skill_usage) {
+        const std::int64_t idle_ms =
+            idle_days > 0 ? static_cast<std::int64_t>(idle_days) * 24LL * 60 *
+                                60 * 1000
+                          : 0;
+        for (const auto& s : skill_usage->get_summary(now_epoch_ms, idle_ms)) {
+            usage_by_name.emplace(s.name, s);
+        }
+    }
+
     nlohmann::json arr = nlohmann::json::array();
     std::unordered_set<std::string> listed;
     for (const auto& s : registry.list()) {
@@ -169,6 +188,18 @@ nlohmann::json build_skills_payload_with_roots(
         o["source"]      = project_root_keys.count(
                                path_to_utf8(s.scan_root.lexically_normal()))
                                ? "project" : "global";
+        const auto usage_it = usage_by_name.find(s.name);
+        if (usage_it != usage_by_name.end()) {
+            o["useCount"]  = usage_it->second.use_count;
+            o["lastUsedAt"] = usage_it->second.last_used_at;
+            o["pinned"]    = usage_it->second.pinned;
+            o["dormant"]   = usage_it->second.dormant;
+        } else {
+            o["useCount"]  = 0;
+            o["lastUsedAt"] = "";
+            o["pinned"]    = false;
+            o["dormant"]   = false;
+        }
         listed.insert(s.name);
         arr.push_back(std::move(o));
     }
@@ -184,17 +215,32 @@ nlohmann::json build_skills_payload_with_roots(
         o["category"]    = "";
         o["enabled"]     = false;
         o["source"]      = "";
+        o["useCount"]    = 0;
+        o["lastUsedAt"]  = "";
+        o["pinned"]      = false;
+        o["dormant"]     = false;
         arr.push_back(std::move(o));
     }
     return arr;
 }
 
 nlohmann::json build_skills_payload(const AppConfig& cfg,
-                                    const std::string& workspace_cwd_utf8) {
+                                    const std::string& workspace_cwd_utf8,
+                                    const SkillUsageStore* skill_usage) {
+    std::int64_t now_epoch_ms = 0;
+    if (skill_usage) {
+        now_epoch_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+    }
     return build_skills_payload_with_roots(
         project_skill_scan_roots(cfg, workspace_cwd_utf8),
         global_skill_scan_roots(cfg),
-        cfg.skills.disabled);
+        cfg.skills.disabled,
+        skill_usage,
+        now_epoch_ms,
+        cfg.skills.idle_days);
 }
 
 } // namespace acecode::web

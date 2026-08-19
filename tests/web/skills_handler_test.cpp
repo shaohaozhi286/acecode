@@ -10,6 +10,7 @@
 
 #include "config/config.hpp"
 #include "skills/skill_registry.hpp"
+#include "skills/skill_usage_store.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -337,4 +338,46 @@ TEST_F(SkillsHandlerTest, BuildSkillsPayloadDeduplicatesByNameProjectWins) {
     ASSERT_NE(entry, nullptr);
     EXPECT_EQ((*entry)["source"], "project");
     EXPECT_EQ((*entry)["description"], "project copy");
+}
+
+// 场景: 传入 SkillUsageStore → payload 每条带 useCount/lastUsedAt/pinned/
+// dormant;未传入(默认)时这些字段以默认值(0/""/false/false)出现,保证
+// 前端字段形状稳定。
+TEST_F(SkillsHandlerTest, BuildSkillsPayloadCarriesUsageFields) {
+    const auto global_root = tmp_root / "home" / ".acecode" / "skills";
+    write_skill(global_root, "used-skill", "used recently");
+    write_skill(global_root, "idle-skill", "idle long enough");
+
+    const fs::path state = tmp_root / "skill_usage.json";
+    acecode::SkillUsageStore store(state.string());
+    // 最近使用(不休眠)
+    store.record("used-skill", "2026-08-10T10:00:00Z");
+    store.record("used-skill", "2026-08-11T10:00:00Z");
+    // 60 天前使用(超过 30 天阈值 → dormant)
+    store.record("idle-skill", "2026-06-01T10:00:00Z");
+
+    const std::int64_t now_ms =
+        acecode::parse_iso8601_to_epoch_ms("2026-08-15T10:00:00Z");
+
+    auto arr = acecode::web::build_skills_payload_with_roots(
+        {}, {global_root}, /*disabled=*/{}, &store, now_ms, /*idle_days=*/30);
+
+    const auto* used = find_entry(arr, "used-skill");
+    ASSERT_NE(used, nullptr);
+    EXPECT_EQ((*used)["useCount"].get<std::uint64_t>(), 2u);
+    EXPECT_FALSE((*used)["dormant"].get<bool>());
+
+    const auto* idle = find_entry(arr, "idle-skill");
+    ASSERT_NE(idle, nullptr);
+    EXPECT_TRUE((*idle)["dormant"].get<bool>());
+
+    // 无 store 时字段形状保持稳定
+    auto arr_no_store = acecode::web::build_skills_payload_with_roots(
+        {}, {global_root}, /*disabled=*/{});
+    const auto* no_store = find_entry(arr_no_store, "used-skill");
+    ASSERT_NE(no_store, nullptr);
+    EXPECT_EQ((*no_store)["useCount"].get<std::uint64_t>(), 0u);
+    EXPECT_FALSE((*no_store)["dormant"].get<bool>());
+
+    fs::remove(state);
 }

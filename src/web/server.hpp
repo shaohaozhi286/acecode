@@ -35,6 +35,7 @@ class PtySessionRegistry;
 class SessionClient;
 class SessionRegistry;
 class SkillRegistry;
+class SkillUsageStore;
 class ExpertRegistry;
 class ToolExecutor;
 } // namespace acecode
@@ -81,6 +82,9 @@ struct WebServerDeps {
     acecode::desktop::WorkspaceRegistry* workspace_registry = nullptr;
     // 非 const:PUT /api/skills/:name 要写 cfg.skills.disabled 后调 set_disabled + reload。
     SkillRegistry*             skill_registry = nullptr;
+    // Skill usage/dormancy state shared with the TUI session. Null disables
+    // usage fields on /api/skills (headless or daemon-only processes).
+    SkillUsageStore*           skill_usage_store = nullptr;
     // Daemon-global provider handle retained for routes/fixtures that inspect
     // process-level provider state. Current web session model switching is
     // session-scoped through SessionRegistry.

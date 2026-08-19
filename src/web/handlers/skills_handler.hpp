@@ -21,6 +21,7 @@
 
 namespace acecode {
 class SkillRegistry;
+class SkillUsageStore;
 }
 
 namespace acecode::web {
@@ -68,11 +69,15 @@ std::optional<std::string> get_skill_body(const std::string& name,
 nlohmann::json build_skills_payload_with_roots(
     const std::vector<std::filesystem::path>& project_roots,
     const std::vector<std::filesystem::path>& global_roots,
-    const std::vector<std::string>& disabled);
+    const std::vector<std::string>& disabled,
+    const SkillUsageStore* skill_usage = nullptr,
+    std::int64_t now_epoch_ms = 0,
+    int idle_days = 0);
 
 // 便捷封装:扫描根取自 skill_init 的 project/global 根构成(与
 // initialize_skill_registry 一致),disabled 取自 cfg.skills.disabled。
 nlohmann::json build_skills_payload(const AppConfig& cfg,
-                                    const std::string& workspace_cwd_utf8);
+                                    const std::string& workspace_cwd_utf8,
+                                    const SkillUsageStore* skill_usage = nullptr);
 
 } // namespace acecode::web

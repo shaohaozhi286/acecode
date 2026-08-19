@@ -305,7 +305,8 @@ void WebServer::Impl::register_skills() {
                     ws = compatibility_workspace();
                 }
                 std::shared_lock<std::shared_mutex> config_lock(app_config_mu);
-                arr = build_skills_payload(*deps.app_config, ws->cwd);
+                arr = build_skills_payload(*deps.app_config, ws->cwd,
+                                           deps.skill_usage_store);
             }
             crow::response r(arr.dump());
             r.add_header("Content-Type", "application/json");
