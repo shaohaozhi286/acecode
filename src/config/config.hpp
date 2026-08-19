@@ -69,6 +69,9 @@ struct SkillsConfig {
     std::vector<std::string> disabled;       // skill names to hide even if present on disk
     std::vector<std::string> external_dirs;  // extra directories to scan (supports ~ and ${ENV})
     bool reuse_opencode = true;              // reuse opencode-compatible skill roots by default
+    // Days without use before a skill is treated as dormant (hidden from the
+    // automatic <available_skills> list). 0 disables dormancy entirely.
+    int idle_days = 30;
     // Runtime-only exact allowlist. nullopt keeps normal discovery behavior;
     // an engaged empty vector hides every skill. This field is intentionally
     // not loaded from or saved to config.json — headless mode uses it on its

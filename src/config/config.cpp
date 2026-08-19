@@ -828,6 +828,9 @@ AppConfig load_config_from_path(
                 if (sj.contains("reuse_opencode") && sj["reuse_opencode"].is_boolean()) {
                     cfg.skills.reuse_opencode = sj["reuse_opencode"].get<bool>();
                 }
+                if (sj.contains("idle_days") && sj["idle_days"].is_number_integer()) {
+                    cfg.skills.idle_days = sj["idle_days"].get<int>();
+                }
             }
             if (j.contains("memory") && j["memory"].is_object()) {
                 const auto& mj = j["memory"];
@@ -1637,12 +1640,15 @@ nlohmann::json build_config_json(const AppConfig& cfg) {
     SkillsConfig skills_d;
     if (!cfg.skills.disabled.empty() ||
         !cfg.skills.external_dirs.empty() ||
-        cfg.skills.reuse_opencode != skills_d.reuse_opencode) {
+        cfg.skills.reuse_opencode != skills_d.reuse_opencode ||
+        cfg.skills.idle_days != skills_d.idle_days) {
         nlohmann::json sj = nlohmann::json::object();
         if (!cfg.skills.disabled.empty()) sj["disabled"] = cfg.skills.disabled;
         if (!cfg.skills.external_dirs.empty()) sj["external_dirs"] = cfg.skills.external_dirs;
         if (cfg.skills.reuse_opencode != skills_d.reuse_opencode)
             sj["reuse_opencode"] = cfg.skills.reuse_opencode;
+        if (cfg.skills.idle_days != skills_d.idle_days)
+            sj["idle_days"] = cfg.skills.idle_days;
         j["skills"] = sj;
     }
 
