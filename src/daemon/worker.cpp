@@ -31,6 +31,7 @@
 #include "../session/session_user_message_search.hpp"
 #include "../skills/skill_registry.hpp"
 #include "../skills/skill_init.hpp"
+#include "../skills/skill_usage_store.hpp"
 #include "../tool/ask_user_question_tool.hpp"
 #include "../tool/bash_tool.hpp"
 #include "../tool/builtin_tool_registry.hpp"
@@ -579,6 +580,11 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
     // 让 GET /api/skills 与 GET /api/commands 看到的 skill 集合与 TUI `/skills` 一致。
     acecode::SkillRegistry skill_registry;
     acecode::initialize_skill_registry(skill_registry, cfg, cwd);
+    // Skill usage/dormancy state shared with the Web UI. Same state file the
+    // TUI process writes, so counts stay consistent across surfaces. Best-
+    // effort: read/write failures never break the daemon.
+    acecode::SkillUsageStore skill_usage_store(
+        acecode::get_acecode_dir() + "/.skill_usage_state.json");
     acecode::ExpertRegistry expert_registry;
 
     acecode::ToolExecutor tools;
@@ -708,6 +714,7 @@ int run_worker(const WorkerOptions& opts, const AppConfig& cfg) {
         };
     }
     web_deps.skill_registry     = &skill_registry;
+    web_deps.skill_usage_store  = &skill_usage_store;
     web_deps.provider           = &provider;
     web_deps.provider_mu        = &provider_mu;
     web_deps.dangerous          = opts.dangerous;
