@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -1310,7 +1311,42 @@ struct ManagementCenter::Impl {
                               .size()
                         : 0) +
                 " files"),
+            render_skill_usage(*skill),
         }) | color(theme().ui.text_muted) | border;
+    }
+
+    Element render_skill_usage(const SkillMetadata& skill) const {
+        if (!deps.skill_usage || !deps.config) {
+            return text("");
+        }
+        const std::int64_t now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        const std::int64_t idle_ms =
+            static_cast<std::int64_t>(deps.config->skills.idle_days) *
+            24LL * 60 * 60 * 1000;
+        const auto summaries = deps.skill_usage->get_summary(
+            now_ms, idle_ms);
+        std::string status;
+        std::uint64_t count = 0;
+        std::string last_used;
+        for (const auto& s : summaries) {
+            if (s.name == skill.name) {
+                status = s.pinned   ? "[pinned]"
+                         : s.dormant ? "[dormant]"
+                                     : "[active]";
+                count = s.use_count;
+                last_used = s.last_used_at.empty()
+                                ? "never"
+                                : s.last_used_at.substr(0, 10);
+                break;
+            }
+        }
+        std::string line = "Usage     " + status + "  " +
+                           std::to_string(count) +
+                           " use(s), last " + last_used;
+        return text(line);
     }
 
     Element render_mcp_details() const {

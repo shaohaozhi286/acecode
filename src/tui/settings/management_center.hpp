@@ -3,6 +3,7 @@
 #include "settings_state.hpp"
 
 #include "../../config/config.hpp"
+#include "../../skills/skill_usage_store.hpp"
 
 #include <ftxui/component/component_base.hpp>
 
@@ -27,6 +28,7 @@ struct ManagementCenterDependencies {
     McpManager* mcp = nullptr;
     ToolExecutor* tools = nullptr;
     HookManager* hooks = nullptr;
+    SkillUsageStore* skill_usage = nullptr;
     std::string cwd;
     std::function<void()> request_close;
     std::function<void()> post_event;
