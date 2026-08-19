@@ -22,6 +22,7 @@
 #include "session/todo_state.hpp"
 #include "session/turn_timing.hpp"
 #include "skills/skill_activation.hpp"
+#include "skills/skill_registry.hpp"
 #include "tool/ask_user_question_tool.hpp"
 #include "tool/mtime_tracker.hpp"
 #include "tool/tool_protocol_names.hpp"
@@ -33,6 +34,7 @@
 #include "headless/headless_mode.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <set>
 #include <mutex>
 #include <future>
 #include <algorithm>
@@ -423,6 +425,25 @@ void AgentLoop::set_cwd(const std::string& new_cwd) {
     // cwd 变了(EnterWorktree/ExitWorktree),旧 gitStatus 快照作废,
     // 下一次模型请求按新 cwd 重采(openspec add-git-context)。
     git_snapshot_cache_.reset();
+}
+
+std::set<std::string> AgentLoop::dormant_skill_names() const {
+    std::set<std::string> out;
+    if (!skill_usage_store_ || skill_idle_days_ <= 0 || !skill_registry_) {
+        return out;
+    }
+    const std::int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    const std::int64_t idle_ms = static_cast<std::int64_t>(skill_idle_days_) *
+                                 24LL * 60 * 60 * 1000;
+    for (const auto& meta : skill_registry_->list()) {
+        if (skill_usage_store_->is_dormant(meta.name, now_ms, idle_ms)) {
+            out.insert(meta.name);
+        }
+    }
+    return out;
 }
 
 ResolvedQuestionPolicy AgentLoop::resolved_question_policy() const {
@@ -954,9 +975,10 @@ std::vector<ChatMessage> AgentLoop::build_compaction_initial_context() const {
         tools_.is_allowed("skills_list", &tool_capability_policy_);
     const bool spawn_subagent_available =
         tools_.is_allowed("spawn_subagent", &tool_capability_policy_);
+    const std::set<std::string> dormant_skills = dormant_skill_names();
     PromptContextBlock skill_context = build_skills_index_context_prompt(
         skill_registry_, context_window_.load(std::memory_order_relaxed),
-        skill_view_available, skills_list_available);
+        skill_view_available, skills_list_available, &dormant_skills);
     if (!skill_context.content.empty()) {
         ChatMessage skill_system;
         skill_system.role = "system";
@@ -1739,6 +1761,13 @@ AgentLoop::UserTurnInfo AgentLoop::prepare_user_turn(const UserInput& input,
             LOG_INFO("[skills] Injected " +
                      std::to_string(skill_expansion.injected_skill_names.size()) +
                      " explicitly selected Skill prompt(s) for this turn");
+            if (skill_usage_store_) {
+                const std::string now = SessionStorage::now_iso8601();
+                for (const auto& name :
+                     skill_expansion.injected_skill_names) {
+                    skill_usage_store_->record(name, now);
+                }
+            }
         }
     }
     const std::string& model_user_message = skill_expansion.prompt;
@@ -1887,9 +1916,10 @@ AgentLoop::ApiRequestBundle AgentLoop::build_api_request_messages() {
         tools_.is_allowed("skills_list", &tool_capability_policy_);
     const bool spawn_subagent_available =
         tools_.is_allowed("spawn_subagent", &tool_capability_policy_);
+    const std::set<std::string> dormant_skills = dormant_skill_names();
     PromptContextBlock skill_context_block = build_skills_index_context_prompt(
         skill_registry_, context_window_.load(std::memory_order_relaxed),
-        skill_view_available, skills_list_available);
+        skill_view_available, skills_list_available, &dormant_skills);
     const bool skill_context_changed =
         skill_context_block.cache_key != skill_context_cache_key_;
     std::string skill_context = cached_context_for_api(

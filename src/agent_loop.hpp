@@ -11,6 +11,7 @@
 #include "session/ask_user_question_prompter.hpp"
 #include "config/config.hpp"
 #include "hooks/hook_runtime.hpp"
+#include "skills/skill_usage_store.hpp"
 
 #include <vector>
 #include <string>
@@ -334,6 +335,11 @@ public:
     void notify_goal_objective_updated();
 
     void set_skill_registry(const SkillRegistry* sr) { skill_registry_ = sr; }
+    void set_skill_usage_store(SkillUsageStore* store) { skill_usage_store_ = store; }
+    void set_skill_idle_days(int days) { skill_idle_days_ = days; }
+    // Names of skills that are dormant (idle past the threshold, not pinned).
+    // Returns an empty set when dormancy is disabled or the store is unset.
+    std::set<std::string> dormant_skill_names() const;
     void set_memory_registry(const MemoryRegistry* mr) { memory_registry_ = mr; }
     void set_memory_config(const MemoryConfig* cfg) { memory_cfg_ = cfg; }
     void set_project_instructions_config(const ProjectInstructionsConfig* cfg) {
@@ -587,6 +593,8 @@ private:
     std::vector<std::string> hook_request_context_;
     bool stop_hook_active_ = false;
     const SkillRegistry* skill_registry_ = nullptr;
+    SkillUsageStore* skill_usage_store_ = nullptr;
+    int skill_idle_days_ = 30;
     const MemoryRegistry* memory_registry_ = nullptr;
     const MemoryConfig* memory_cfg_ = nullptr;
     const ProjectInstructionsConfig* project_instructions_cfg_ = nullptr;

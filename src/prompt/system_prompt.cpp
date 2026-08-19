@@ -841,12 +841,22 @@ PromptContextBlock build_skills_index_context_prompt(
     const SkillRegistry* skills,
     int context_window_tokens,
     bool skill_view_available,
-    bool skills_list_available) {
+    bool skills_list_available,
+    const std::set<std::string>* dormant_names) {
     PromptContextBlock block;
     if (!skills) return block;
 
     auto all = skills->list();
     if (all.empty()) return block;
+    if (dormant_names && !dormant_names->empty()) {
+        all.erase(
+            std::remove_if(all.begin(), all.end(),
+                           [&](const SkillMetadata& s) {
+                               return dormant_names->count(s.name) != 0;
+                           }),
+            all.end());
+        if (all.empty()) return block;
+    }
 
     SkillIndexRenderResult rendered = format_skills_index_within_budget(
         all, skills_index_budget(context_window_tokens), skills_list_available);
