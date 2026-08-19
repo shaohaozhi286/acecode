@@ -3,6 +3,7 @@
 #include "permissions.hpp"
 #include "provider/llm_provider.hpp"
 #include "path_reference/path_reference.hpp"
+#include "skills/skill_usage_store.hpp"
 #include "tui/paste_handler.hpp"
 #include "tui/model_picker.hpp"
 #include "tui/mode_picker.hpp"
@@ -18,6 +19,7 @@
 #include <vector>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
@@ -346,6 +348,9 @@ struct TuiState {
     // Application-owned, cross-launch counters loaded once at TUI startup.
     // Dropdown refreshes read only this cache and never touch the filesystem.
     std::map<std::string, std::uint64_t> slash_command_usage_counts;
+    // Skill usage/dormancy state shared with the AgentLoop. Non-owning from
+    // the TUI side; main() owns the shared_ptr. Null in headless modes.
+    std::shared_ptr<SkillUsageStore> skill_usage_store;
 
     // @ path-reference dropdown. The token offsets are UTF-8 byte offsets so
     // they can be applied directly to input_text without lossy conversion.
