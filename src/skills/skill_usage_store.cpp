@@ -54,6 +54,7 @@ bool SkillUsageStore::record(const std::string& skill_name,
                              const std::string& now_iso) {
     std::lock_guard<std::mutex> lock(mu_);
     auto state = load_state_or_empty(state_path_);
+    state["version"] = kStateVersion;
     auto& skills = state["skills"];
     if (!skills.is_object()) {
         skills = nlohmann::json::object();
@@ -90,6 +91,7 @@ bool SkillUsageStore::is_dormant(const std::string& skill_name,
 bool SkillUsageStore::set_pinned(const std::string& skill_name, bool pinned) {
     std::lock_guard<std::mutex> lock(mu_);
     auto state = load_state_or_empty(state_path_);
+    state["version"] = kStateVersion;
     auto& skills = state["skills"];
     if (!skills.is_object()) {
         skills = nlohmann::json::object();
