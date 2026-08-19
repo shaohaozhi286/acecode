@@ -34,8 +34,8 @@
 | `src/tui/settings/management_center.cpp` | TUI 展示次数/状态/pin | 修改 |
 | `src/web/handlers/skills_handler.cpp` | Web API 返回状态 + pin | 修改 |
 | `tests/skills/skill_usage_store_test.cpp` | store 单元测试 | 新建 |
-| `src/CMakeLists.txt` | 注册新源文件 | 修改 |
-| `tests/CMakeLists.txt` | 注册新测试 | 修改 |
+| (顶层 CMake GLOB_RECURSE 自动收集 src/*.cpp,无需注册) | - | - |
+| (tests/ GLOB 自动收集 *_test.cpp,无需注册) | - | - |
 
 ---
 
@@ -259,19 +259,15 @@ std::int64_t parse_iso8601_to_epoch_ms(const std::string& iso) {
 }  // namespace acecode
 ```
 
-- [ ] **Step 2: 注册到 CMake**
-
-Modify `src/CMakeLists.txt`:在 `skills/` 源文件列表追加 `skills/skill_usage_store.cpp`
-
-- [ ] **Step 3: 编译验证**
+- [ ] **Step 2: 编译验证(源文件由顶层 CMake GLOB_RECURSE 自动收集,无需注册)**
 
 Run: `cmake --build build --target acecode --config Release`
 Expected: 编译通过
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add src/skills/skill_usage_store.cpp src/CMakeLists.txt
+git add src/skills/skill_usage_store.cpp
 git commit -m "feat: implement SkillUsageStore with JSON read/write"
 ```
 
@@ -374,26 +370,15 @@ TEST(SkillUsageStoreTest, IncrementUseCount) {
 }
 ```
 
-- [ ] **Step 2: 注册到 tests/CMakeLists.txt**
+- [ ] **Step 2: 运行测试(测试由 tests/ GLOB 自动收集进 acecode_unit_tests,无需注册)**
 
-在 `tests/CMakeLists.txt` 中添加(仿现有 `default_skill_seeder_test.cpp` 模式):
-```cmake
-add_executable(acecode_skill_usage_store_test
-    skills/skill_usage_store_test.cpp
-)
-target_link_libraries(acecode_skill_usage_store_test ...)
-add_test(NAME acecode_skill_usage_store_test ...)
-```
-
-- [ ] **Step 3: 运行测试,确认失败(如果 store 实现未完成则 link 失败)**
-
-Run: `cmake --build build --target acecode_skill_usage_store_test && ./build/tests/acecode_skill_usage_store_test`
+Run: `cmake --build build --target acecode_unit_tests && ctest --test-dir build --output-on-failure -R skill_usage`
 Expected: 7/7 tests pass
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add tests/skills/skill_usage_store_test.cpp tests/CMakeLists.txt
+git add tests/skills/skill_usage_store_test.cpp
 git commit -m "test: add SkillUsageStore unit tests"
 ```
 
