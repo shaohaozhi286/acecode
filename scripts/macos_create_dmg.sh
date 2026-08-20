@@ -132,8 +132,29 @@ mkdir -p "$staging_root" "$background_root"
 
 /usr/bin/ditto "$app_path" "$staging_root/ACECode.app"
 /bin/ln -s /Applications "$staging_root/Applications"
+background_png="$background_root/ACECode-DMG.png"
+# Older macOS sips (e.g. 12.x) silently fails to rasterize SVG and writes no
+# output while still returning success. Fall back to qlmanage when the expected
+# PNG is missing or not a valid image so the Finder background still resolves.
 /usr/bin/sips -s format png "$background_path" \
-    --out "$background_root/ACECode-DMG.png" >/dev/null
+    --out "$background_png" >/dev/null 2>&1 || true
+if [[ ! -s "$background_png" ]]; then
+    echo "sips could not rasterize the SVG background; using qlmanage fallback" >&2
+    if ! /usr/bin/qlmanage -t -s 660 -o "$background_root" "$background_path" >/dev/null 2>&1; then
+        echo "Could not rasterize the DMG background image." >&2
+        exit 1
+    fi
+    ql_png="$background_root/$(basename "$background_path").png"
+    if [[ ! -f "$ql_png" ]]; then
+        echo "qlmanage produced no background image." >&2
+        exit 1
+    fi
+    /bin/mv -f "$ql_png" "$background_png"
+fi
+if [[ ! -s "$background_png" ]]; then
+    echo "Missing DMG background raster: $background_png" >&2
+    exit 1
+fi
 
 if [[ ! -L "$staging_root/Applications" ]] || \
    [[ "$(/usr/bin/readlink "$staging_root/Applications")" != "/Applications" ]]; then
